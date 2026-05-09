@@ -40,20 +40,24 @@ void main() {
     float pitchY = 1.7320508 * i;
 
     // Two candidate ROWS — fragment near a row boundary could belong to
-    // either, so we test both and pick the closer center.
-    int row0 = int(floor(px.y / pitchY));
-    int row1 = row0 + 1;
+    // either, so we test both and pick the closer center. Using float
+    // math (mod, floor) instead of int bitwise ops because the qsb
+    // pipeline compiles for GLSL 100es and 120 too, where integer `&`
+    // requires GL_EXT_gpu_shader4 and silently fails to link.
+    float row0 = floor(px.y / pitchY);
+    float row1 = row0 + 1.0;
 
     // Per-row x-offset alternates: even rows aligned, odd rows shifted.
-    float xOff0 = ((row0 & 1) == 0) ? 0.0 : pitchX * 0.5;
-    float xOff1 = ((row1 & 1) == 0) ? 0.0 : pitchX * 0.5;
+    // mod(row, 2.0) returns 0.0 for even rows, 1.0 for odd.
+    float xOff0 = mod(row0, 2.0) < 0.5 ? 0.0 : pitchX * 0.5;
+    float xOff1 = mod(row1, 2.0) < 0.5 ? 0.0 : pitchX * 0.5;
 
     // Within each candidate row, find the nearest column center.
-    int col0 = int(floor((px.x - xOff0) / pitchX + 0.5));
-    int col1 = int(floor((px.x - xOff1) / pitchX + 0.5));
+    float col0 = floor((px.x - xOff0) / pitchX + 0.5);
+    float col1 = floor((px.x - xOff1) / pitchX + 0.5);
 
-    vec2 c0 = vec2(float(col0) * pitchX + xOff0, float(row0) * pitchY);
-    vec2 c1 = vec2(float(col1) * pitchX + xOff1, float(row1) * pitchY);
+    vec2 c0 = vec2(col0 * pitchX + xOff0, row0 * pitchY);
+    vec2 c1 = vec2(col1 * pitchX + xOff1, row1 * pitchY);
 
     vec2 d0 = px - c0;
     vec2 d1 = px - c1;
