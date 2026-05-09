@@ -21,8 +21,9 @@ import qs.Common
 //                              veils the surface)
 //   speed                    — time scaling, default 1.0
 //   mode                     — string identifier selecting which fragmentShader
-//                              runs ("test" | "aurora")
+//                              runs ("test" | "aurora" | "hexrain")
 //   running                  — gate FrameAnimation; default true
+//   cellSize                 — hexrain hex radius in px (only used by hexrain mode)
 //   primaryColor             — band hue A in veil cores; defaults to Theme.primary
 //   secondaryColor           — band hue B in veil cores; defaults to Theme.secondary
 //   primaryContainerColor    — muted base color in dark zones; defaults to
@@ -36,6 +37,7 @@ Item {
     property real speed: 1.0
     property string mode: "test"
     property bool running: true
+    property real cellSize: 14
 
     property color primaryColor: Theme.primary
     property color secondaryColor: Theme.secondary
@@ -48,6 +50,7 @@ Item {
 
         property real iTime: 0
         property real intensity: root.intensity
+        property real cellSize: root.cellSize
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
         property vector4d colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)
@@ -60,6 +63,8 @@ Item {
                 return Qt.resolvedUrl("../Shaders/qsb/chrome_test.frag.qsb");
             case "aurora":
                 return Qt.resolvedUrl("../Shaders/qsb/chrome_aurora.frag.qsb");
+            case "hexrain":
+                return Qt.resolvedUrl("../Shaders/qsb/chrome_hexrain.frag.qsb");
             default:
                 return "";
             }

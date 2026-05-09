@@ -270,7 +270,8 @@ Item {
     ChromeShader {
         id: chromeShader
         anchors.fill: parent
-        mode: "aurora"
+        mode: barConfig?.shaderMode || "aurora"
+        cellSize: barConfig?.shaderHexSize || 14
         intensity: 0.6
         speed: 1.0
         visible: false
