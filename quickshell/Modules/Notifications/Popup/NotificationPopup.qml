@@ -1032,6 +1032,7 @@ PanelWindow {
                             onEntered: parent.isHovered = true
                             onExited: parent.isHovered = false
                             onClicked: {
+                                NiriService.focusSourceForNotification(notificationData);
                                 if (modelData && modelData.invoke)
                                     modelData.invoke();
                                 if (notificationData && !win.exiting)
@@ -1108,11 +1109,16 @@ PanelWindow {
                         const canExpand = bodyText.hasMoreText || win.descriptionExpanded || (SettingsData.notificationPopupPrivacyMode && win.hasExpandableBody);
                         if (canExpand) {
                             win.descriptionExpanded = !win.descriptionExpanded;
-                        } else if (notificationData.actions && notificationData.actions.length > 0) {
-                            notificationData.actions[0].invoke();
-                            NotificationService.dismissNotification(notificationData);
                         } else {
-                            notificationData.popup = false;
+                            const focused = NiriService.focusSourceForNotification(notificationData);
+                            if (notificationData.actions && notificationData.actions.length > 0) {
+                                notificationData.actions[0].invoke();
+                                NotificationService.dismissNotification(notificationData);
+                            } else if (focused) {
+                                NotificationService.dismissNotification(notificationData);
+                            } else {
+                                notificationData.popup = false;
+                            }
                         }
                     }
                 }

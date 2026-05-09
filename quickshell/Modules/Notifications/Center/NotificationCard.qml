@@ -799,6 +799,7 @@ Rectangle {
                                                     onEntered: parent.isHovered = true
                                                     onExited: parent.isHovered = false
                                                     onClicked: {
+                                                        NiriService.focusSourceForNotification(expandedDelegateWrapper.modelData);
                                                         if (modelData && modelData.invoke) {
                                                             modelData.invoke();
                                                             PopoutService.closeNotificationCenter();
@@ -939,6 +940,7 @@ Rectangle {
                     onEntered: parent.isHovered = true
                     onExited: parent.isHovered = false
                     onClicked: {
+                        NiriService.focusSourceForNotification(notificationGroup?.latestNotification);
                         if (modelData && modelData.invoke) {
                             modelData.invoke();
                             PopoutService.closeNotificationCenter();
