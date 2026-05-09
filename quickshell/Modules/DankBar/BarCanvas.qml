@@ -263,7 +263,7 @@ Item {
     ChromeShader {
         id: chromeShader
         anchors.fill: parent
-        mode: "test"
+        mode: "aurora"
         intensity: 0.6
         speed: 1.0
         visible: false
