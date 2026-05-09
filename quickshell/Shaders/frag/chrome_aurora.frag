@@ -61,14 +61,30 @@ void main() {
     // Soft veil edges — wide smoothstep window for diffuse, hazy transitions.
     float veil = smoothstep(0.15, 0.85, f);
 
+    // Bright-inclusion highlight: only the hottest ~14% of veil zones
+    // produce visible peaks. smoothstep window pushed near the top of the
+    // noise range so highlights are rare and localized — what makes real
+    // aurora chromatic, not just bright/dim. Squared to bias even more
+    // sharply toward the absolute peaks.
+    float highlight = smoothstep(0.78, 0.92, f);
+    highlight *= highlight;
+
     // Three-color blend: primaryContainer is the muted base, primary and
     // secondary alternate as the "hot" color in veils based on hue noise.
     vec3 hotCol = mix(ubuf.colorPrimary.rgb, ubuf.colorSecondary.rgb, smoothstep(0.3, 0.7, h));
     vec3 col = mix(ubuf.colorPrimaryContainer.rgb, hotCol, veil);
 
-    // Wider alpha range — 0.15 in dark zones lets the BackgroundEffect blur
-    // dominate, 0.85 in veil cores makes the shader chromaticity stand out.
-    float a = ubuf.intensity * (0.15 + 0.7 * veil) * ubuf.qt_Opacity;
+    // Inject bright-primary-toward-white at highlight peaks. 0.5 mix to white
+    // keeps the highlight color recognizably theme-tinted rather than going
+    // pure achromatic.
+    vec3 brightCol = mix(ubuf.colorPrimary.rgb, vec3(1.0), 0.5);
+    col = mix(col, brightCol, highlight * 0.75);
+
+    // Alpha range 0.15..0.85 baseline, plus an additive boost at highlights
+    // (capped at 1.0 implicitly by the framebuffer) so peaks read opaque
+    // and punchy rather than muted-translucent.
+    float a = ubuf.intensity * (0.15 + 0.7 * veil + 0.4 * highlight) * ubuf.qt_Opacity;
+    a = clamp(a, 0.0, 1.0);
 
     fragColor = vec4(col * a, a);
 }
