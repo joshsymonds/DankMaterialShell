@@ -91,21 +91,21 @@ void main() {
     // different "flow rates."
 
     // Stream A: slow, straight down, primary (cyan). Big blobs.
-    vec2 sA = vec2(edgeWorld.x * 0.03, edgeWorld.y * 0.03 - ubuf.iTime * 0.18);
+    vec2 sA = vec2(edgeWorld.x * 0.03, edgeWorld.y * 0.03 - ubuf.iTime * 0.09);
     float fA = fbm(sA);
     float litA = smoothstep(0.50, 0.58, fA);
 
     // Stream B: medium speed, mostly down with slight rightward drift,
     // secondary (magenta). Smaller blobs (scale 0.06) so even at moderate
     // velocity the apparent flow rate is faster than Stream A.
-    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.04, edgeWorld.y * 0.06 - ubuf.iTime * 0.28);
+    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.02, edgeWorld.y * 0.06 - ubuf.iTime * 0.14);
     float fB = fbm(sB);
     float litB = smoothstep(0.52, 0.60, fB);
 
     // Stream C: medium speed, counter-flow upward + leftward drift,
     // tertiary (neon green). Rarest threshold so green peaks remain
     // sparse highlights against the dominant cyan/magenta flow.
-    vec2 sC = vec2(edgeWorld.x * 0.04 - ubuf.iTime * 0.04, edgeWorld.y * 0.04 + ubuf.iTime * 0.32);
+    vec2 sC = vec2(edgeWorld.x * 0.04 - ubuf.iTime * 0.02, edgeWorld.y * 0.04 + ubuf.iTime * 0.16);
     float fC = fbm(sC);
     float litC = smoothstep(0.56, 0.66, fC);
 
