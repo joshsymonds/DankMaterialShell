@@ -272,7 +272,9 @@ Item {
         anchors.fill: parent
         mode: barConfig?.shaderMode || "aurora"
         cellSize: barConfig?.shaderHexSize || 14
-        intensity: 0.6
+        // hexrain paints only edges so it can afford full saturation; aurora
+        // covers most of the bar and would over-saturate at 1.0.
+        intensity: (barConfig?.shaderMode === "hexrain") ? 1.0 : 0.6
         speed: 1.0
         visible: false
         layer.enabled: true
