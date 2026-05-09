@@ -95,9 +95,10 @@ void main() {
     float fA = fbm(sA);
     float litA = smoothstep(0.50, 0.58, fA);
 
-    // Stream B: fast, mostly down with slight rightward drift,
-    // secondary (magenta). Smaller blobs → more visible motion.
-    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.08, edgeWorld.y * 0.06 - ubuf.iTime * 0.55);
+    // Stream B: medium speed, mostly down with slight rightward drift,
+    // secondary (magenta). Smaller blobs (scale 0.06) so even at moderate
+    // velocity the apparent flow rate is faster than Stream A.
+    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.04, edgeWorld.y * 0.06 - ubuf.iTime * 0.28);
     float fB = fbm(sB);
     float litB = smoothstep(0.52, 0.60, fB);
 
