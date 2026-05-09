@@ -260,6 +260,13 @@ Item {
         }
     }
 
+    // Bar-config-driven shader color overrides. Matugen's dominant-color
+    // algorithm flattens sparse high-chroma wallpaper accents (e.g. neon
+    // hexagon glows) into muted pastels, so we let the user pin specific
+    // hex strings via nix-config. Falls back to Theme.* when keys are
+    // absent. SettingsStore.js loads barConfigs raw without per-key spec
+    // validation (SettingsStore.js:25 only strips top-level unknowns), so
+    // extra keys in barConfigs[0] propagate from nix-config to QML.
     ChromeShader {
         id: chromeShader
         anchors.fill: parent
@@ -268,6 +275,11 @@ Item {
         speed: 1.0
         visible: false
         layer.enabled: true
+
+        primaryColor:          barConfig?.shaderPrimaryColor          ? Qt.color(barConfig.shaderPrimaryColor)          : Theme.primary
+        secondaryColor:        barConfig?.shaderSecondaryColor        ? Qt.color(barConfig.shaderSecondaryColor)        : Theme.secondary
+        primaryContainerColor: barConfig?.shaderPrimaryContainerColor ? Qt.color(barConfig.shaderPrimaryContainerColor) : Theme.primaryContainer
+        tertiaryColor:         barConfig?.shaderTertiaryColor         ? Qt.color(barConfig.shaderTertiaryColor)         : Theme.tertiary
     }
 
     MultiEffect {
