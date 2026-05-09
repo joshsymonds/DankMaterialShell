@@ -18,6 +18,7 @@ layout(std140, binding = 0) uniform buf {
 
 const float PI3 = 1.04719755;        // π / 3
 const float TWO_PI = 6.28318531;
+const float SQRT3_INV = 0.57735027;  // 1 / √3
 
 float sdHexagon(vec2 p, float i) {
     const vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
@@ -69,53 +70,78 @@ void main() {
     vec2 local = (dot(d0, d0) < dot(d1, d1)) ? d0 : d1;
     vec2 cellCenter = px - local;
 
-    float distToEdge = sdHexagon(local.yx, i);
-
-    // ── Identify the nearest EDGE midpoint ─────────────────────────
-    // For pointy-top hex, edge midpoints are at angles 0°, 60°, 120°,
-    // 180°, 240°, 300° from cell center, at distance = inradius. Snap
-    // the fragment's angle into 60° buckets to find which edge it
-    // belongs to. Sampling the flow field at the edge MIDPOINT (not
-    // the fragment position) means the whole sector covering one edge
-    // gets the same flow value — so individual edges activate as
-    // distinct units rather than the whole cell pulsing together.
-    // Shared edges between adjacent cells map to the same world-space
-    // midpoint and therefore the same flow sample → light continuity.
+    // ── Edge identification ────────────────────────────────────────
+    // Snap fragment angle to one of 6 edge buckets (every 60°).
     float angle = atan(local.y, local.x);
     if (angle < 0.0) angle += TWO_PI;
     float bucket = floor(angle / PI3 + 0.5);
     float edgeAngle = bucket * PI3;
-    vec2 edgeOffset = vec2(cos(edgeAngle), sin(edgeAngle)) * i;
-    vec2 edgeWorld = cellCenter + edgeOffset;
+    vec2 edgeMid = vec2(cos(edgeAngle), sin(edgeAngle)) * i;
+    vec2 edgeWorld = cellCenter + edgeMid;
 
-    // ── Flow field — sampled at the edge, not the fragment ────────
-    // Drift in pixel-units per second downward (negative y in flow
-    // sample = upward in noise = appearing-from-bottom in screen).
-    vec2 flowSample = vec2(edgeWorld.x * 0.025, edgeWorld.y * 0.025 - ubuf.iTime * 0.4);
+    // Edge axis: 90° rotation of midpoint direction → along the edge.
+    vec2 edgeAxis = vec2(-sin(edgeAngle), cos(edgeAngle));
+    // Position along the edge (signed). Edge length for pointy-top
+    // hex with inradius i is 2*i/√3, so alongEdge ∈ [-i/√3, i/√3].
+    float alongEdge = dot(local - edgeMid, edgeAxis);
+    float halfEdgeLen = i * SQRT3_INV;
+
+    // ── Active state — flow noise at the edge midpoint, hard threshold
+    // Each edge fires independently based on a slow drifting noise
+    // field. Sharp smoothstep window makes activation feel discrete
+    // rather than a smooth gradient — the game-of-life on/off cue.
+    vec2 flowSample = vec2(edgeWorld.x * 0.04, edgeWorld.y * 0.04 - ubuf.iTime * 0.25);
     float flow = fbm(flowSample);
-    float lit = smoothstep(0.42, 0.62, flow);
+    float firing = smoothstep(0.48, 0.56, flow);
 
-    // ── Hue field — independent scale + drift, biased toward magenta
-    // Window 0.25..0.45 shifts the primary↔secondary mix so secondary
-    // (magenta) dominates more of the bar over time. Mean of 2-octave
-    // fBm sits near 0.4, so most fragments are toward the magenta end
-    // of the smoothstep.
+    // ── Comet along the firing edge ────────────────────────────────
+    // Light source travels back-and-forth along the edge. Per-edge
+    // phase from a hash of the edge's discrete world position so
+    // adjacent edges have unrelated motion phases.
+    float edgePhase = hash(floor(edgeWorld * 0.5));
+    float t = ubuf.iTime * 1.5 + edgePhase * TWO_PI;
+    float cometX = sin(t) * halfEdgeLen;
+    float comet = exp(-abs(alongEdge - cometX) * 4.0);
+
+    float lit = firing * comet;
+
+    // ── Distance to edge — for the glow falloff perpendicular to it
+    float distToEdge = sdHexagon(local.yx, i);
+
+    // Sharper falloff than before so lit zones stay near the edge,
+    // not bleeding inward to fill the cell sector. 0.6 decay means
+    // meaningful brightness extends ~3px from the seam.
+    float litGlow = exp(-abs(distToEdge) * 0.6) * lit;
+    // Faint always-on outline, sharper still so even the base hex
+    // network reads as outlines, not glow halos.
+    float baseOutline = exp(-abs(distToEdge) * 0.9);
+
+    // ── Hue ─────────────────────────────────────────────────────────
     vec2 hueSample = vec2(edgeWorld.x * 0.015 + ubuf.iTime * 0.05, edgeWorld.y * 0.012 - ubuf.iTime * 0.18);
     float hueN = fbm(hueSample);
-
     vec3 hotCol = mix(ubuf.colorPrimary.rgb, ubuf.colorSecondary.rgb, smoothstep(0.25, 0.45, hueN));
-    // Tertiary kick reduced from 0.7 to 0.4 mix — green peaks remain
-    // visible at the brightest moments but don't dominate magenta.
-    float tertKick = smoothstep(0.75, 0.95, lit);
+    float tertKick = smoothstep(0.6, 0.95, lit);
     hotCol = mix(hotCol, ubuf.colorTertiary.rgb, tertKick * 0.4);
 
-    // ── Composition ────────────────────────────────────────────────
-    float baseGlow = exp(-abs(distToEdge) * 0.4);
-    float litGlow  = exp(-abs(distToEdge) * 0.15);
-    float final = baseGlow * 0.18 + litGlow * lit;
+    // ── Layered composition (premultiplied) ────────────────────────
+    // Three independent layers sum into the final color/alpha:
+    //   interior — constant deep purple, fills the whole bar uniformly
+    //   outline  — thin faint cyan tracing every hex edge (always on)
+    //   lit      — bright hot color where flow + comet intersect
+    // Each layer contributes both color and alpha; the output is
+    // their sum, clamped at 1.0 for the alpha. Color stays additive
+    // so peak brightness can pop against the constant interior.
+    float interiorAlpha = 0.55;
+    float outlineAlpha = baseOutline * 0.18;
+    float litAlpha = litGlow;
 
-    vec3 col = mix(ubuf.colorPrimary.rgb, hotCol, lit);
+    vec3 finalColor =
+        ubuf.colorPrimaryContainer.rgb * interiorAlpha
+      + ubuf.colorPrimary.rgb * outlineAlpha
+      + hotCol * litAlpha;
 
-    float a_out = clamp(ubuf.intensity * final, 0.0, 1.0) * ubuf.qt_Opacity;
-    fragColor = vec4(col * a_out, a_out);
+    float a = clamp(interiorAlpha + outlineAlpha + litAlpha, 0.0, 1.0);
+
+    fragColor = vec4(finalColor * ubuf.intensity * ubuf.qt_Opacity,
+                     a * ubuf.intensity * ubuf.qt_Opacity);
 }
