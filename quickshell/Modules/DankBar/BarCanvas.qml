@@ -1,7 +1,9 @@
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Shapes
 import qs.Common
 import qs.Services
+import qs.Widgets
 
 Item {
     id: root
@@ -229,6 +231,53 @@ Item {
                 }
             }
         }
+    }
+
+    // Animated shader background overlay. Renders ChromeShader to an offscreen
+    // texture, then MultiEffect composites it masked to the same SVG path the
+    // bar's painted Shape uses — so the shader respects gothic-corner geometry
+    // and never spills past the bar's body. Mask is a separate invisible Shape
+    // with the same path (FileBrowserListDelegate.qml:186-204 pattern); leaves
+    // the visible barShape rendering path untouched.
+    Item {
+        id: barShapeMask
+        anchors.fill: parent
+        layer.enabled: true
+        layer.smooth: true
+        visible: false
+
+        Shape {
+            anchors.fill: parent
+            preferredRendererType: Shape.CurveRenderer
+            ShapePath {
+                fillColor: "white"
+                strokeColor: "transparent"
+                strokeWidth: 0
+                PathSvg {
+                    path: root.mainPath
+                }
+            }
+        }
+    }
+
+    ChromeShader {
+        id: chromeShader
+        anchors.fill: parent
+        mode: "test"
+        intensity: 0.6
+        speed: 1.0
+        visible: false
+        layer.enabled: true
+    }
+
+    MultiEffect {
+        anchors.fill: parent
+        source: chromeShader
+        maskEnabled: true
+        maskSource: barShapeMask
+        maskThresholdMin: 0.5
+        maskSpreadAtMin: 1
+        visible: root.mainPathCorrectShape
     }
 
     function generatePathForPosition(w, h) {
