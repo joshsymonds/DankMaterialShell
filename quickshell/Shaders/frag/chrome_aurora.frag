@@ -11,17 +11,15 @@ layout(std140, binding = 0) uniform buf {
     vec3 iResolution;
     vec4 colorPrimary;
     vec4 colorSecondary;
+    vec4 colorPrimaryContainer;
 } ubuf;
 
-// Cheap 2D hash. Sufficient for visual noise; not cryptographic.
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
 }
 
-// 2D value noise: bilinear interpolation between four hashed corners,
-// smoothstep on f to soften the lattice edges.
 float noise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
@@ -33,8 +31,6 @@ float noise(vec2 p) {
     );
 }
 
-// fBm: 3 octaves of value noise, halving amplitude each octave.
-// Range ~[0, 0.875], mean near 0.44.
 float fbm(vec2 p) {
     float v = 0.0;
     float a = 0.5;
@@ -49,25 +45,30 @@ float fbm(vec2 p) {
 void main() {
     vec2 uv = qt_TexCoord0;
 
-    // Sample noise stretched horizontally (uv.x * 4 = thin vertical veils
-    // across a narrow bar) and slowly drifting upward (subtract iTime).
-    // Period ratios chosen for tall vertical structure.
-    vec2 p = vec2(uv.x * 4.0, uv.y * 1.2 - ubuf.iTime * 0.06);
+    // Veil density field: broad horizontal bands (uv.x * 1.0 = no horizontal
+    // cycling, the bar's full width is one continuous zone), more cycles in y
+    // (2.5) so several bands are visible at once, drifting upward (-iTime).
+    vec2 pv = vec2(uv.x * 1.0, uv.y * 2.5 - ubuf.iTime * 0.15);
+    float f = fbm(pv);
 
-    float f = fbm(p);
+    // Hue-pick field: independent noise driving which of three theme colors
+    // dominates a given band. Different scale and drift rate from veil so the
+    // color of a band shifts independently of its brightness — what makes
+    // real aurora look chromatic, not just bright/dim.
+    vec2 ph = vec2(uv.x * 1.5 + ubuf.iTime * 0.04, uv.y * 1.0 - ubuf.iTime * 0.08);
+    float h = fbm(ph);
 
-    // Sharpen into distinct veils. Threshold pair brackets the fBm mean
-    // so both bright and dark zones see meaningful coverage.
-    float veil = smoothstep(0.32, 0.72, f);
+    // Soft veil edges — wide smoothstep window for diffuse, hazy transitions.
+    float veil = smoothstep(0.15, 0.85, f);
 
-    // Color cycles between primary (dark zones) and secondary (veil cores).
-    vec3 col = mix(ubuf.colorPrimary.rgb, ubuf.colorSecondary.rgb, veil);
+    // Three-color blend: primaryContainer is the muted base, primary and
+    // secondary alternate as the "hot" color in veils based on hue noise.
+    vec3 hotCol = mix(ubuf.colorPrimary.rgb, ubuf.colorSecondary.rgb, smoothstep(0.3, 0.7, h));
+    vec3 col = mix(ubuf.colorPrimaryContainer.rgb, hotCol, veil);
 
-    // Alpha modulation: 0.25 in dark zones (blur dominates), up to 0.80
-    // in bright veils (shader dominates). This is what produces visible
-    // motion even when primary ≈ secondary perceptually — the *texture*
-    // itself drifts, independent of color contrast.
-    float a = ubuf.intensity * (0.25 + 0.55 * veil) * ubuf.qt_Opacity;
+    // Wider alpha range — 0.15 in dark zones lets the BackgroundEffect blur
+    // dominate, 0.85 in veil cores makes the shader chromaticity stand out.
+    float a = ubuf.intensity * (0.15 + 0.7 * veil) * ubuf.qt_Opacity;
 
     fragColor = vec4(col * a, a);
 }

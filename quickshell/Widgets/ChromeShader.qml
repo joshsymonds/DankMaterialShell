@@ -32,6 +32,7 @@ Item {
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary: Qt.vector4d(Theme.primary.r, Theme.primary.g, Theme.primary.b, Theme.primary.a)
         property vector4d colorSecondary: Qt.vector4d(Theme.secondary.r, Theme.secondary.g, Theme.secondary.b, Theme.secondary.a)
+        property vector4d colorPrimaryContainer: Qt.vector4d(Theme.primaryContainer.r, Theme.primaryContainer.g, Theme.primaryContainer.b, Theme.primaryContainer.a)
 
         fragmentShader: {
             switch (root.mode) {
