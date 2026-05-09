@@ -18,7 +18,6 @@ layout(std140, binding = 0) uniform buf {
 
 const float PI3 = 1.04719755;        // π / 3
 const float TWO_PI = 6.28318531;
-const float SQRT3_INV = 0.57735027;  // 1 / √3
 
 float sdHexagon(vec2 p, float i) {
     const vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
@@ -79,13 +78,6 @@ void main() {
     vec2 edgeMid = vec2(cos(edgeAngle), sin(edgeAngle)) * i;
     vec2 edgeWorld = cellCenter + edgeMid;
 
-    // Edge axis: 90° rotation of midpoint direction → along the edge.
-    vec2 edgeAxis = vec2(-sin(edgeAngle), cos(edgeAngle));
-    // Position along the edge (signed). Edge length for pointy-top
-    // hex with inradius i is 2*i/√3, so alongEdge ∈ [-i/√3, i/√3].
-    float alongEdge = dot(local - edgeMid, edgeAxis);
-    float halfEdgeLen = i * SQRT3_INV;
-
     // ── Active state — flow noise at the edge midpoint, hard threshold
     // Each edge fires independently based on a slow drifting noise
     // field. Sharp smoothstep window makes activation feel discrete
@@ -94,16 +86,11 @@ void main() {
     float flow = fbm(flowSample);
     float firing = smoothstep(0.48, 0.56, flow);
 
-    // ── Comet along the firing edge ────────────────────────────────
-    // Light source travels back-and-forth along the edge. Per-edge
-    // phase from a hash of the edge's discrete world position so
-    // adjacent edges have unrelated motion phases.
-    float edgePhase = hash(floor(edgeWorld * 0.5));
-    float t = ubuf.iTime * 1.5 + edgePhase * TWO_PI;
-    float cometX = sin(t) * halfEdgeLen;
-    float comet = exp(-abs(alongEdge - cometX) * 4.0);
-
-    float lit = firing * comet;
+    // Each firing edge lights up as a whole unit (no motion along the
+    // edge axis). Adjacent edges fire independently based on their
+    // own flow noise samples; the field drifts downward over time so
+    // different edges activate as the field translates through.
+    float lit = firing;
 
     // ── Distance to edge — for the glow falloff perpendicular to it
     float distToEdge = sdHexagon(local.yx, i);
@@ -127,7 +114,7 @@ void main() {
     // Three independent layers sum into the final color/alpha:
     //   interior — constant deep purple, fills the whole bar uniformly
     //   outline  — thin faint cyan tracing every hex edge (always on)
-    //   lit      — bright hot color where flow + comet intersect
+    //   lit      — bright hot color on edges currently firing
     // Each layer contributes both color and alpha; the output is
     // their sum, clamped at 1.0 for the alpha. Color stays additive
     // so peak brightness can pop against the constant interior.
