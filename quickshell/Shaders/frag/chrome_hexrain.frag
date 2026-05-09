@@ -78,37 +78,56 @@ void main() {
     vec2 edgeMid = vec2(cos(edgeAngle), sin(edgeAngle)) * i;
     vec2 edgeWorld = cellCenter + edgeMid;
 
-    // ── Active state — flow noise at the edge midpoint, hard threshold
-    // Each edge fires independently based on a slow drifting noise
-    // field. Sharp smoothstep window makes activation feel discrete
-    // rather than a smooth gradient — the game-of-life on/off cue.
-    vec2 flowSample = vec2(edgeWorld.x * 0.04, edgeWorld.y * 0.04 - ubuf.iTime * 0.25);
-    float flow = fbm(flowSample);
-    float firing = smoothstep(0.48, 0.56, flow);
+    // ── Three independent flow streams ─────────────────────────────
+    // Each stream is its own noise field drifting at its own velocity,
+    // associated with its own color. Edges light up where any stream's
+    // field is over its own threshold; multiple overlapping streams
+    // sum their colors. Result reads as several "light entities"
+    // moving behind the hexes at different speeds and directions, with
+    // hexes only revealing where they overlap.
+    //
+    // Velocities are in noise-units per second. Stream-specific scales
+    // give different blob sizes so the same velocity reads as visibly
+    // different "flow rates."
 
-    // Each firing edge lights up as a whole unit (no motion along the
-    // edge axis). Adjacent edges fire independently based on their
-    // own flow noise samples; the field drifts downward over time so
-    // different edges activate as the field translates through.
-    float lit = firing;
+    // Stream A: slow, straight down, primary (cyan). Big blobs.
+    vec2 sA = vec2(edgeWorld.x * 0.03, edgeWorld.y * 0.03 - ubuf.iTime * 0.18);
+    float fA = fbm(sA);
+    float litA = smoothstep(0.50, 0.58, fA);
+
+    // Stream B: fast, mostly down with slight rightward drift,
+    // secondary (magenta). Smaller blobs → more visible motion.
+    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.08, edgeWorld.y * 0.06 - ubuf.iTime * 0.55);
+    float fB = fbm(sB);
+    float litB = smoothstep(0.52, 0.60, fB);
+
+    // Stream C: medium speed, counter-flow upward + leftward drift,
+    // tertiary (neon green). Rarest threshold so green peaks remain
+    // sparse highlights against the dominant cyan/magenta flow.
+    vec2 sC = vec2(edgeWorld.x * 0.04 - ubuf.iTime * 0.04, edgeWorld.y * 0.04 + ubuf.iTime * 0.32);
+    float fC = fbm(sC);
+    float litC = smoothstep(0.56, 0.66, fC);
+
+    // ── Combined activation and color ──────────────────────────────
+    // hotCol pre-weights each color by its own lit value so summing
+    // gives correctly-weighted blends where streams overlap. lit total
+    // is clamped at 1.0 for the alpha channel.
+    vec3 hotCol = ubuf.colorPrimary.rgb   * litA
+               + ubuf.colorSecondary.rgb * litB
+               + ubuf.colorTertiary.rgb  * litC;
+
+    float lit = clamp(litA + litB + litC, 0.0, 1.0);
 
     // ── Distance to edge — for the glow falloff perpendicular to it
     float distToEdge = sdHexagon(local.yx, i);
 
-    // Sharper falloff than before so lit zones stay near the edge,
-    // not bleeding inward to fill the cell sector. 0.6 decay means
-    // meaningful brightness extends ~3px from the seam.
-    float litGlow = exp(-abs(distToEdge) * 0.6) * lit;
-    // Faint always-on outline, sharper still so even the base hex
-    // network reads as outlines, not glow halos.
+    // litGlowRaw is the bare perpendicular-falloff (no `lit` multiplied
+    // in) because hotCol is already pre-weighted by per-stream litI
+    // values. Multiplying both would double-count.
+    float litGlowRaw = exp(-abs(distToEdge) * 0.6);
+    // Faint always-on outline, sharper still so the base hex network
+    // reads as thin lines, not glow halos.
     float baseOutline = exp(-abs(distToEdge) * 0.9);
-
-    // ── Hue ─────────────────────────────────────────────────────────
-    vec2 hueSample = vec2(edgeWorld.x * 0.015 + ubuf.iTime * 0.05, edgeWorld.y * 0.012 - ubuf.iTime * 0.18);
-    float hueN = fbm(hueSample);
-    vec3 hotCol = mix(ubuf.colorPrimary.rgb, ubuf.colorSecondary.rgb, smoothstep(0.25, 0.45, hueN));
-    float tertKick = smoothstep(0.6, 0.95, lit);
-    hotCol = mix(hotCol, ubuf.colorTertiary.rgb, tertKick * 0.4);
 
     // ── Layered composition (premultiplied) ────────────────────────
     // Three independent layers sum into the final color/alpha:
@@ -120,12 +139,16 @@ void main() {
     // so peak brightness can pop against the constant interior.
     float interiorAlpha = 0.55;
     float outlineAlpha = baseOutline * 0.18;
-    float litAlpha = litGlow;
+    // hotCol is the pre-weighted color sum (Σ color_i * lit_i). Total
+    // alpha for the lit layer is Σ lit_i scaled by the spatial falloff,
+    // = lit * litGlowRaw. Color contribution is hotCol * litGlowRaw —
+    // not hotCol * litAlpha, because that would multiply by lit twice.
+    float litAlpha = lit * litGlowRaw;
 
     vec3 finalColor =
         ubuf.colorPrimaryContainer.rgb * interiorAlpha
       + ubuf.colorPrimary.rgb * outlineAlpha
-      + hotCol * litAlpha;
+      + hotCol * litGlowRaw;
 
     float a = clamp(interiorAlpha + outlineAlpha + litAlpha, 0.0, 1.0);
 
