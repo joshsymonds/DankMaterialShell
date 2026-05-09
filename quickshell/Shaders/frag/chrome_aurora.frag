@@ -12,6 +12,7 @@ layout(std140, binding = 0) uniform buf {
     vec4 colorPrimary;
     vec4 colorSecondary;
     vec4 colorPrimaryContainer;
+    vec4 colorTertiary;
 } ubuf;
 
 float hash(vec2 p) {
@@ -74,11 +75,11 @@ void main() {
     vec3 hotCol = mix(ubuf.colorPrimary.rgb, ubuf.colorSecondary.rgb, smoothstep(0.3, 0.7, h));
     vec3 col = mix(ubuf.colorPrimaryContainer.rgb, hotCol, veil);
 
-    // Inject bright-primary-toward-white at highlight peaks. 0.5 mix to white
-    // keeps the highlight color recognizably theme-tinted rather than going
-    // pure achromatic.
-    vec3 brightCol = mix(ubuf.colorPrimary.rgb, vec3(1.0), 0.5);
-    col = mix(col, brightCol, highlight * 0.75);
+    // Inject Theme.tertiary at highlight peaks. Tertiary is matugen's
+    // hue-shifted complementary accent to primary (M3 spec) — gives the
+    // visible chromatic pop the user asked for while staying inside the
+    // matugen-derived palette so the bar doesn't visually clash.
+    col = mix(col, ubuf.colorTertiary.rgb, highlight * 0.85);
 
     // Alpha range 0.15..0.85 baseline, plus an additive boost at highlights
     // (capped at 1.0 implicitly by the framebuffer) so peaks read opaque

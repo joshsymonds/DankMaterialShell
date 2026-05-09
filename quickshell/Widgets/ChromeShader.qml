@@ -33,6 +33,7 @@ Item {
         property vector4d colorPrimary: Qt.vector4d(Theme.primary.r, Theme.primary.g, Theme.primary.b, Theme.primary.a)
         property vector4d colorSecondary: Qt.vector4d(Theme.secondary.r, Theme.secondary.g, Theme.secondary.b, Theme.secondary.a)
         property vector4d colorPrimaryContainer: Qt.vector4d(Theme.primaryContainer.r, Theme.primaryContainer.g, Theme.primaryContainer.b, Theme.primaryContainer.a)
+        property vector4d colorTertiary: Qt.vector4d(Theme.tertiary.r, Theme.tertiary.g, Theme.tertiary.b, Theme.tertiary.a)
 
         fragmentShader: {
             switch (root.mode) {
