@@ -62,12 +62,13 @@ void main() {
     // Soft veil edges — wide smoothstep window for diffuse, hazy transitions.
     float veil = smoothstep(0.15, 0.85, f);
 
-    // Bright-inclusion highlight: only the hottest ~14% of veil zones
-    // produce visible peaks. smoothstep window pushed near the top of the
-    // noise range so highlights are rare and localized — what makes real
-    // aurora chromatic, not just bright/dim. Squared to bias even more
-    // sharply toward the absolute peaks.
-    float highlight = smoothstep(0.78, 0.92, f);
+    // Bright-inclusion highlight: catches the top portion of veil zones for
+    // chromatic peaks. smoothstep window kept near the top of the noise
+    // range so highlights stay rare and localized — what makes real aurora
+    // chromatic rather than just bright/dim. Squared to bias more sharply
+    // toward the absolute peaks. Window widened slightly from (0.78, 0.92)
+    // to (0.70, 0.88) — still rare, but green tertiary peeks more often.
+    float highlight = smoothstep(0.70, 0.88, f);
     highlight *= highlight;
 
     // Three-color blend: primaryContainer is the muted base, primary and
