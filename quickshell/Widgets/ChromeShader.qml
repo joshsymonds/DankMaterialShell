@@ -21,6 +21,7 @@ Item {
     property real intensity: 0.6
     property real speed: 1.0
     property string mode: "test"
+    property bool running: true
 
     ShaderEffect {
         id: shaderEffect
@@ -45,7 +46,7 @@ Item {
     }
 
     FrameAnimation {
-        running: root.visible
+        running: root.running
         onTriggered: shaderEffect.iTime += frameTime * root.speed
     }
 }
