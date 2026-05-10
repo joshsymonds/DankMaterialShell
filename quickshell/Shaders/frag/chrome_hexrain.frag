@@ -90,22 +90,24 @@ void main() {
     // give different blob sizes so the same velocity reads as visibly
     // different "flow rates."
 
-    // Stream A: slow, straight down, primary (cyan). Big blobs.
-    vec2 sA = vec2(edgeWorld.x * 0.03, edgeWorld.y * 0.03 - ubuf.iTime * 0.09);
+    // Stream A: slow diagonal down-right (~55° from vertical), primary
+    // (cyan). Big blobs. Strong horizontal component so the angle is
+    // visible across the bar's 30px width.
+    vec2 sA = vec2(edgeWorld.x * 0.03 - ubuf.iTime * 0.12, edgeWorld.y * 0.03 - ubuf.iTime * 0.09);
     float fA = fbm(sA);
     float litA = smoothstep(0.50, 0.58, fA);
 
-    // Stream B: medium speed, mostly down with slight rightward drift,
-    // secondary (magenta). Smaller blobs (scale 0.06) so even at moderate
-    // velocity the apparent flow rate is faster than Stream A.
-    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.02, edgeWorld.y * 0.06 - ubuf.iTime * 0.14);
+    // Stream B: medium speed diagonal down-left (~50°), secondary
+    // (magenta). Smaller blobs (scale 0.06) so the tighter features
+    // make the diagonal motion read as faster swooshes.
+    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.10, edgeWorld.y * 0.06 - ubuf.iTime * 0.14);
     float fB = fbm(sB);
     float litB = smoothstep(0.52, 0.60, fB);
 
-    // Stream C: medium speed, counter-flow upward + leftward drift,
-    // tertiary (neon green). Rarest threshold so green peaks remain
-    // sparse highlights against the dominant cyan/magenta flow.
-    vec2 sC = vec2(edgeWorld.x * 0.04 - ubuf.iTime * 0.02, edgeWorld.y * 0.04 + ubuf.iTime * 0.16);
+    // Stream C: medium speed counter-flow up-left (~45°), tertiary
+    // (neon green). Rarest threshold so green swooshes are sparse
+    // highlights crossing the bar at a distinct angle from A and B.
+    vec2 sC = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.16, edgeWorld.y * 0.04 + ubuf.iTime * 0.16);
     float fC = fbm(sC);
     float litC = smoothstep(0.56, 0.66, fC);
 
