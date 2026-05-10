@@ -90,26 +90,37 @@ void main() {
     // give different blob sizes so the same velocity reads as visibly
     // different "flow rates."
 
-    // Stream A: slow diagonal down-right (~55° from vertical), primary
-    // (cyan). Big blobs. Strong horizontal component so the angle is
-    // visible across the bar's 30px width.
-    vec2 sA = vec2(edgeWorld.x * 0.03 - ubuf.iTime * 0.12, edgeWorld.y * 0.03 - ubuf.iTime * 0.09);
+    // Stream A: slow diagonal down-right, primary (cyan). Big blobs.
+    vec2 sA = vec2(edgeWorld.x * 0.03 - ubuf.iTime * 0.06, edgeWorld.y * 0.03 - ubuf.iTime * 0.045);
     float fA = fbm(sA);
     float litA = smoothstep(0.50, 0.58, fA);
 
-    // Stream B: medium speed diagonal down-left (~50°), secondary
-    // (magenta). Smaller blobs (scale 0.06) so the tighter features
-    // make the diagonal motion read as faster swooshes.
-    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.10, edgeWorld.y * 0.06 - ubuf.iTime * 0.14);
+    // Stream B: medium-slow diagonal down-left, secondary (magenta).
+    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.05, edgeWorld.y * 0.06 - ubuf.iTime * 0.07);
     float fB = fbm(sB);
     float litB = smoothstep(0.52, 0.60, fB);
 
-    // Stream C: medium speed counter-flow up-left (~45°), tertiary
-    // (neon green). Rarest threshold so green swooshes are sparse
-    // highlights crossing the bar at a distinct angle from A and B.
-    vec2 sC = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.16, edgeWorld.y * 0.04 + ubuf.iTime * 0.16);
+    // Stream C: medium-slow counter-flow up-left, tertiary (neon green).
+    vec2 sC = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.08, edgeWorld.y * 0.04 + ubuf.iTime * 0.08);
     float fC = fbm(sC);
     float litC = smoothstep(0.56, 0.66, fC);
+
+    // ── Wind direction modulation — directional progression ──────
+    // A global "wind" angle pendulums between left and right of
+    // vertical. Each edge's brightness is boosted by how aligned its
+    // facing direction is with the current wind. As wind sweeps from
+    // left → up → right and back, edges on the windward side of cells
+    // light up first, top edges peak when wind is straight up, then
+    // edges on the leeward side. Gives the visual sense of light
+    // progressing across each cell rather than firing all at once.
+    float windAngle = 1.5707963 + sin(ubuf.iTime * 0.25) * 1.2566371; // π/2 ± 0.4π
+    vec2 windDir = vec2(cos(windAngle), sin(windAngle));
+    vec2 edgeFaceDir = vec2(cos(edgeAngle), sin(edgeAngle));
+    float windBoost = 0.30 + 0.70 * max(0.0, dot(edgeFaceDir, windDir));
+
+    litA *= windBoost;
+    litB *= windBoost;
+    litC *= windBoost;
 
     // ── Combined activation and color ──────────────────────────────
     // hotCol pre-weights each color by its own lit value so summing
