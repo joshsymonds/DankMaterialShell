@@ -90,20 +90,26 @@ void main() {
     // give different blob sizes so the same velocity reads as visibly
     // different "flow rates."
 
-    // Stream A: slow diagonal down-right, primary (cyan). Big blobs.
-    vec2 sA = vec2(edgeWorld.x * 0.03 - ubuf.iTime * 0.06, edgeWorld.y * 0.03 - ubuf.iTime * 0.045);
+    // Stream A: slow diagonal down-right, primary (cyan). Larger
+    // blobs (scale 0.02 → ~50px features) span multiple cells so
+    // clusters of adjacent edges fire together. Wider smoothstep
+    // window for gradual fade-in/out instead of binary on/off.
+    vec2 sA = vec2(edgeWorld.x * 0.02 - ubuf.iTime * 0.03, edgeWorld.y * 0.02 - ubuf.iTime * 0.022);
     float fA = fbm(sA);
-    float litA = smoothstep(0.54, 0.62, fA);
+    float litA = smoothstep(0.50, 0.66, fA);
 
-    // Stream B: medium-slow diagonal down-left, secondary (magenta).
-    vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.05, edgeWorld.y * 0.06 - ubuf.iTime * 0.07);
+    // Stream B: slow diagonal down-left, secondary (magenta). Bigger
+    // blobs than before (0.06 → 0.04) so magenta clusters span ~3
+    // cells of contiguous edges, less random-flicker feel.
+    vec2 sB = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.025, edgeWorld.y * 0.04 - ubuf.iTime * 0.035);
     float fB = fbm(sB);
-    float litB = smoothstep(0.56, 0.64, fB);
+    float litB = smoothstep(0.52, 0.66, fB);
 
-    // Stream C: medium-slow counter-flow up-left, tertiary (neon green).
-    vec2 sC = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.08, edgeWorld.y * 0.04 + ubuf.iTime * 0.08);
+    // Stream C: slow counter-flow up-left, tertiary (neon green).
+    // Higher threshold keeps green sparse; wider window smooths peaks.
+    vec2 sC = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.04, edgeWorld.y * 0.04 + ubuf.iTime * 0.04);
     float fC = fbm(sC);
-    float litC = smoothstep(0.60, 0.70, fC);
+    float litC = smoothstep(0.56, 0.72, fC);
 
     // ── Wind direction modulation — directional progression ──────
     // A global "wind" angle pendulums between left and right of
