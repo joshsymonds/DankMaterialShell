@@ -90,24 +90,30 @@ void main() {
     // give different blob sizes so the same velocity reads as visibly
     // different "flow rates."
 
-    // Stream A: slow diagonal down-right, primary (cyan). Larger
-    // blobs (scale 0.02 → ~50px features) span multiple cells so
-    // clusters of adjacent edges fire together. Wider smoothstep
-    // window for gradual fade-in/out instead of binary on/off.
-    vec2 sA = vec2(edgeWorld.x * 0.02 - ubuf.iTime * 0.03, edgeWorld.y * 0.02 - ubuf.iTime * 0.022);
+    // Each stream's sample position = (edgeWorld * scale) + circular
+    // phase shuffle + linear translation. The phase shuffle is a slow
+    // circular drift in noise-space that cycles every ~60-120s with
+    // a different frequency per stream. Without it, slow translation
+    // velocities mean blobs hover near the same edges for tens of
+    // seconds → user perceives "always the same spots" recurrence.
+    // The shuffle keeps the noise values at each edge changing even
+    // when the linear translation is slow.
+
+    // Stream A: slow diagonal down-right, primary (cyan). Big blobs.
+    vec2 shuffleA = vec2(sin(ubuf.iTime * 0.07), cos(ubuf.iTime * 0.07)) * 0.30;
+    vec2 sA = edgeWorld * 0.02 + shuffleA - vec2(ubuf.iTime * 0.03, ubuf.iTime * 0.022);
     float fA = fbm(sA);
     float litA = smoothstep(0.50, 0.66, fA);
 
-    // Stream B: slow diagonal down-left, secondary (magenta). Bigger
-    // blobs than before (0.06 → 0.04) so magenta clusters span ~3
-    // cells of contiguous edges, less random-flicker feel.
-    vec2 sB = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.025, edgeWorld.y * 0.04 - ubuf.iTime * 0.035);
+    // Stream B: slow diagonal down-left, secondary (magenta).
+    vec2 shuffleB = vec2(sin(ubuf.iTime * 0.09 + 2.1), cos(ubuf.iTime * 0.09 + 2.1)) * 0.25;
+    vec2 sB = edgeWorld * 0.04 + shuffleB + vec2(ubuf.iTime * 0.025, -ubuf.iTime * 0.035);
     float fB = fbm(sB);
     float litB = smoothstep(0.52, 0.66, fB);
 
     // Stream C: slow counter-flow up-left, tertiary (neon green).
-    // Higher threshold keeps green sparse; wider window smooths peaks.
-    vec2 sC = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.04, edgeWorld.y * 0.04 + ubuf.iTime * 0.04);
+    vec2 shuffleC = vec2(sin(ubuf.iTime * 0.06 + 4.3), cos(ubuf.iTime * 0.06 + 4.3)) * 0.30;
+    vec2 sC = edgeWorld * 0.04 + shuffleC + vec2(ubuf.iTime * 0.04, ubuf.iTime * 0.04);
     float fC = fbm(sC);
     float litC = smoothstep(0.56, 0.72, fC);
 
