@@ -93,17 +93,17 @@ void main() {
     // Stream A: slow diagonal down-right, primary (cyan). Big blobs.
     vec2 sA = vec2(edgeWorld.x * 0.03 - ubuf.iTime * 0.06, edgeWorld.y * 0.03 - ubuf.iTime * 0.045);
     float fA = fbm(sA);
-    float litA = smoothstep(0.50, 0.58, fA);
+    float litA = smoothstep(0.54, 0.62, fA);
 
     // Stream B: medium-slow diagonal down-left, secondary (magenta).
     vec2 sB = vec2(edgeWorld.x * 0.06 + ubuf.iTime * 0.05, edgeWorld.y * 0.06 - ubuf.iTime * 0.07);
     float fB = fbm(sB);
-    float litB = smoothstep(0.52, 0.60, fB);
+    float litB = smoothstep(0.56, 0.64, fB);
 
     // Stream C: medium-slow counter-flow up-left, tertiary (neon green).
     vec2 sC = vec2(edgeWorld.x * 0.04 + ubuf.iTime * 0.08, edgeWorld.y * 0.04 + ubuf.iTime * 0.08);
     float fC = fbm(sC);
-    float litC = smoothstep(0.56, 0.66, fC);
+    float litC = smoothstep(0.60, 0.70, fC);
 
     // ── Wind direction modulation — directional progression ──────
     // A global "wind" angle pendulums between left and right of
