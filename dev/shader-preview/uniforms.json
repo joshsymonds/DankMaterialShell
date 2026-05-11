@@ -2,24 +2,23 @@
   "_comment": "Live-reloaded by ShaderPreview.qml. Edit + save here, or use the in-window panel and click Save.",
   "_schema": "Keys under .shader MUST match std140 uniform names in the .frag exactly. Keys under .harness drive QML behaviour (not GPU uniforms).",
   "shader": {
-    "intensity": 1.0,
+    "intensity": 1,
     "cellSize": 26,
-    "modeAmount": 1.0,
-    "subModeAmount": 1.0,
-    "domeStrength": 1.0,
+    "modeAmount": 0.77,
+    "domeStrength": 0.65,
     "seamGlow": 1.5,
-    "sunDriftSpeed": 1.0,
-    "heightAmount": 1.0,
-    "matteness": 0.70,
-    "bleedBack": 0.03,
+    "sunDriftSpeed": 1,
+    "heightAmount": 0.55,
+    "matteness": 0.42,
+    "bleedBack": 0.18,
     "hexBevel": 0.6,
-    "heightDriftSpeed": 0.6,
+    "heightDriftSpeed": 0.25,
     "colorPrimary": "#5896E1",
     "colorSecondary": "#B711DB",
     "colorPrimaryContainer": "#170B55",
     "colorTertiary": "#39FF99"
   },
   "harness": {
-    "speed": 2.9
+    "speed": 1.1
   }
 }

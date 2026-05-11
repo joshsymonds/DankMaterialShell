@@ -14,19 +14,13 @@ layout(std140, binding = 0) uniform buf {
     vec4 colorSecondary;
     vec4 colorPrimaryContainer;
     vec4 colorTertiary;
-    // Alt mode: 2D point-light "suns" drift behind the hex grid; each
-    // hex is shaded by sun colour through one of two sub-mode masks.
-    // modeAmount=0 → original 2D matrix-rain bar look. modeAmount=1 →
-    // alt mode active, with subModeAmount selecting between:
-    //   subModeAmount=0 → "lattice" — bright dome at each hex centre,
-    //                     dim seams between (looks like glowing lattice
-    //                     points behind a dark mesh)
-    //   subModeAmount=1 → "scales" — dim hex bodies with a uniformly-
-    //                     thin bright rim along every hex side (each
-    //                     hex reads as a discrete scale, seams between
-    //                     them are bright thin lines)
+    // Alt mode: 2D point-light "suns" drift behind a hex grid where
+    // each cell sits at its own height. Where neighbours differ in
+    // height the shared seam glows with the sun colour from behind,
+    // and light leaks onto the shorter neighbour's matte top via
+    // exponential decay. modeAmount=0 = original 2D matrix-rain
+    // bar look; modeAmount=1 = full height-leak look.
     float modeAmount;
-    float subModeAmount;   // 0 = lattice, 1 = scales (continuous blend)
     float domeStrength;    // 0..1 — multiplier on lit-zone intensity
     float seamGlow;        // 0..3 — multiplier on the lit portion
     float sunDriftSpeed;   // 0..3 — sun-position drift rate multiplier
@@ -260,15 +254,18 @@ void main() {
     float gB = exp(-dot(dB, dB) * invSig2);
     float gC = exp(-dot(dC, dC) * invSig2);
 
-    vec3 lightFromSuns = ubuf.colorPrimary.rgb   * gA
-                       + ubuf.colorSecondary.rgb * gB
-                       + ubuf.colorTertiary.rgb  * gC;
-
-    // Lattice mask: bright at hex centres, fading toward edges. Uses
-    // distNorm (radial position within the hex) so the bright zone has
-    // the rotational symmetry of a glowing dome.
-    float distNorm = length(local) / i;
-    float latticeMask = 1.0 - smoothstep(0.20, 0.98, distNorm);
+    vec3 lightRaw = ubuf.colorPrimary.rgb   * gA
+                  + ubuf.colorSecondary.rgb * gB
+                  + ubuf.colorTertiary.rgb  * gC;
+    // Hue-preserving cap on the sun field itself. When three
+    // saturated sun colours overlap, the raw additive sum can push
+    // every channel past 1.0 → would otherwise clip to neutral white.
+    // Capping at the source keeps the field "always coloured" without
+    // dimming the downstream body/seam shading — peak brightness in
+    // saturated zones still pushes surfaceColor toward saturation,
+    // but in whichever sun's hue dominates locally, not in white.
+    float lightMax = max(lightRaw.r, max(lightRaw.g, lightRaw.b));
+    vec3 lightFromSuns = lightRaw / max(lightMax, 1.0);
 
     // Neighbour-height leak model (inspired by the gnomon wallpaper):
     // each hex is a flat matte-topped column at its own elevation.
@@ -342,10 +339,7 @@ void main() {
         }
     }
 
-    float scalesMask = clamp(totalIntensity * ubuf.heightAmount, 0.0, 1.0);
-
-    // Sub-mode blend (lattice mode preserved unchanged).
-    float altMask = mix(latticeMask, scalesMask, ubuf.subModeAmount);
+    float altMask = clamp(totalIntensity * ubuf.heightAmount, 0.0, 1.0);
 
     // On-body mask: 1 on the matte top, 0 inside the seam gap.
     // fwidth-based transition gives screen-space-aware AA so the seam

@@ -68,7 +68,6 @@ FloatingWindow {
         "cellSize":       { min: 4,   max: 40,  step: 1    },
         "speed":          { min: 0.0, max: 3.0, step: 0.05 },
         "modeAmount":     { min: 0.0, max: 1.0, step: 0.01 },
-        "subModeAmount":  { min: 0.0, max: 1.0, step: 0.01 },
         "domeStrength":   { min: 0.0, max: 1.0, step: 0.01 },
         "seamGlow":       { min: 0.0, max: 3.0, step: 0.02 },
         "sunDriftSpeed":  { min: 0.0, max: 3.0, step: 0.05 },
@@ -309,7 +308,6 @@ FloatingWindow {
         property real intensity: 1.0
         property real cellSize: 14
         property real modeAmount: 1.0
-        property real subModeAmount: 1.0
         property real domeStrength: 0.8
         property real seamGlow: 1.5
         property real sunDriftSpeed: 1.0
