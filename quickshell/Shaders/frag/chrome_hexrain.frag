@@ -523,18 +523,24 @@ void main() {
         frontSunReach += pxReach;
 
         vec2 cellToSun = sunPos - cellCenter;
+        float cellToSunLen = length(cellToSun);
         float cellR = exp(-dot(cellToSun, cellToSun) * frontInvSig2);
 
-        for (int k = 0; k < 6; k++) {
-            float ang = float(k) * PI3;
-            vec2 nDirK = vec2(cos(ang), sin(ang));
-            vec2 nCenter = cellCenter + nDirK * 2.0 * i;
-            vec2 nToSun = sunPos - nCenter;
-            float nR = exp(-dot(nToSun, nToSun) * frontInvSig2);
-            float litDiff = nR - cellR;
+        // Continuous-direction cast shadow. The caster is a virtual
+        // point at distance 2i from this cell in the sun's direction
+        // — its position rotates smoothly with the sun, so there's no
+        // 6-neighbour rank-swap that would cause the shadow to pop
+        // to a different side. Same hex-shape and intensity math as
+        // the original; only the caster selection changed.
+        if (cellToSunLen > 0.001) {
+            vec2 sunDir = cellToSun / cellToSunLen;
+            vec2 virtualCaster = cellCenter + sunDir * 2.0 * i;
+            vec2 vcToSun = sunPos - virtualCaster;
+            float vcR = exp(-dot(vcToSun, vcToSun) * frontInvSig2);
+            float litDiff = vcR - cellR;
             if (litDiff > 0.001) {
                 float diffWeight = smoothstep(0.001, 0.05, litDiff);
-                vec2 shadowCenter = cellCenter + nDirK * (i * 1.3);
+                vec2 shadowCenter = cellCenter + sunDir * (i * 1.3);
                 float shadowSize = i * (1.2 + litDiff * 2.0 * ubuf.frontSunShadowLength);
                 vec2 fromShadow = px - shadowCenter;
                 float hexDist = sdHexagon(fromShadow.yx, shadowSize);
