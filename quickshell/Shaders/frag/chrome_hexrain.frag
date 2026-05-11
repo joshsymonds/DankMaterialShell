@@ -121,6 +121,23 @@ layout(std140, binding = 0) uniform buf {
                                //         screen dim (same scaling as
                                //         frontSunSize).
     float frontNegSunSpeed;    // 0..N — orbit rate.
+    // ── Palette flip wave ────────────────────────────────────────
+    // Propagating colour wave that sweeps the field, transitioning
+    // each hex from the current body tint (colorPrimaryContainer) to
+    // a staged target (colorPrimaryContainerNext). The wave radiates
+    // outward from (flipOriginX, flipOriginY) at a configurable
+    // speed; each hex transitions over flipDuration once its turn
+    // arrives. At idle, flipStartTime should sit far in the future
+    // (e.g. 1e9) so per-hex flip phase clamps to 0 everywhere.
+    vec4 colorPrimaryNext;
+    vec4 colorSecondaryNext;
+    vec4 colorPrimaryContainerNext;
+    vec4 colorTertiaryNext;
+    float flipOriginX;
+    float flipOriginY;
+    float flipStartTime;
+    float flipPropDelay;
+    float flipDuration;
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -177,6 +194,41 @@ vec3 paletteCycle(float phase) {
     return mix(c0, c1, frac);
 }
 
+// Same as paletteCycle but using the "Next" palette colours. Used
+// when the flip wave has reached a sun's position — that sun's
+// emitted colour blends from paletteCycle → paletteCycleNext based
+// on the sun's own per-position flip phase.
+vec3 paletteCycleNext(float phase) {
+    phase = mod(phase, 3.0);
+    int idx = int(phase);
+    float frac = phase - float(idx);
+    vec3 c0, c1;
+    if (idx == 0) {
+        c0 = ubuf.colorPrimaryNext.rgb;
+        c1 = ubuf.colorSecondaryNext.rgb;
+    } else if (idx == 1) {
+        c0 = ubuf.colorSecondaryNext.rgb;
+        c1 = ubuf.colorTertiaryNext.rgb;
+    } else {
+        c0 = ubuf.colorTertiaryNext.rgb;
+        c1 = ubuf.colorPrimaryNext.rgb;
+    }
+    return mix(c0, c1, frac);
+}
+
+// Per-position flip phase. Same math as cellFlipPhase but takes an
+// arbitrary world-space position — used for sun positions so each
+// sun's colour transitions when the wave reaches IT.
+float positionFlipPhase(vec2 worldPos, float pitchY) {
+    vec2 flipOrigin = vec2(ubuf.flipOriginX, ubuf.flipOriginY);
+    float distFromOrigin = distance(worldPos, flipOrigin);
+    float steps = distFromOrigin / max(pitchY, 1.0);
+    return clamp(
+        (ubuf.iTime - ubuf.flipStartTime - steps * ubuf.flipPropDelay) /
+        max(ubuf.flipDuration, 0.001),
+        0.0, 1.0);
+}
+
 // Per-hex height field: a static base noise plus a slow per-cell
 // oscillation. Each cell gets a unique phase and period (random
 // derived from its centre coords) so neighbours never rise/fall
@@ -210,6 +262,19 @@ void main() {
     vec2 d1 = px - c1;
     vec2 local = (dot(d0, d0) < dot(d1, d1)) ? d0 : d1;
     vec2 cellCenter = px - local;
+
+    // ── Per-cell flip phase ───────────────────────────────────────
+    // Distance from this cell to the flip origin, in hex steps. Each
+    // hex starts its transition delayed by (hex steps from origin) ×
+    // flipPropDelay, then walks 0 → 1 over flipDuration seconds. At
+    // idle, flipStartTime is far in the future so this clamps to 0.
+    vec2 flipOrigin = vec2(ubuf.flipOriginX, ubuf.flipOriginY);
+    float distFromFlipOrigin = distance(cellCenter, flipOrigin);
+    float stepsFromOrigin = distFromFlipOrigin / max(pitchY, 1.0);
+    float cellFlipPhase = clamp(
+        (ubuf.iTime - ubuf.flipStartTime - stepsFromOrigin * ubuf.flipPropDelay) /
+        max(ubuf.flipDuration, 0.001),
+        0.0, 1.0);
 
     // ── Edge identification ────────────────────────────────────────
     // Snap fragment angle to one of 6 edge buckets (every 60°).
@@ -280,9 +345,18 @@ void main() {
     // hotCol pre-weights each color by its own lit value so summing
     // gives correctly-weighted blends where streams overlap. lit total
     // is clamped at 1.0 for the alpha channel.
-    vec3 hotCol = ubuf.colorPrimary.rgb   * litA
-               + ubuf.colorSecondary.rgb * litB
-               + ubuf.colorTertiary.rgb  * litC;
+    // Each palette colour is blended with its "Next" counterpart by
+    // the cell's flip phase, so the 2D background also transitions
+    // during the wave (otherwise the 2D contribution snaps to the
+    // post-commit palette when the swap happens, causing a final pop).
+    vec3 primaryBlend   = mix(ubuf.colorPrimary.rgb,   ubuf.colorPrimaryNext.rgb,   cellFlipPhase);
+    vec3 secondaryBlend = mix(ubuf.colorSecondary.rgb, ubuf.colorSecondaryNext.rgb, cellFlipPhase);
+    vec3 tertiaryBlend  = mix(ubuf.colorTertiary.rgb,  ubuf.colorTertiaryNext.rgb,  cellFlipPhase);
+    vec3 containerBlend = mix(ubuf.colorPrimaryContainer.rgb,
+                              ubuf.colorPrimaryContainerNext.rgb, cellFlipPhase);
+    vec3 hotCol = primaryBlend   * litA
+               + secondaryBlend * litB
+               + tertiaryBlend  * litC;
 
     float lit = clamp(litA + litB + litC, 0.0, 1.0);
 
@@ -314,8 +388,8 @@ void main() {
     float litAlpha = lit * litGlowRaw;
 
     vec3 finalColor2D =
-        ubuf.colorPrimaryContainer.rgb * interiorAlpha
-      + ubuf.colorPrimary.rgb * outlineAlpha
+        containerBlend * interiorAlpha
+      + primaryBlend  * outlineAlpha
       + hotCol * litGlowRaw;
 
     float alpha2D = clamp(interiorAlpha + outlineAlpha + litAlpha, 0.0, 1.0);
@@ -368,7 +442,15 @@ void main() {
         // represented for any count >= 3, and any pair always picks
         // up two different points on the cycle for count = 2.
         float phaseColor = pt + fs * 3.0 / fnBackPos;
-        vec3 col = paletteCycle(phaseColor);
+        // Per-sun flip phase: blend the sun's colour from current →
+        // next palette based on whether the wave has reached its
+        // current position. The wave's leading edge sweeps through
+        // the field; each sun's emitted colour transitions when the
+        // wave passes its position.
+        float sunFlip = positionFlipPhase(sunPos, pitchY);
+        vec3 col = mix(paletteCycle(phaseColor),
+                       paletteCycleNext(phaseColor),
+                       sunFlip);
         lightRaw += col * g;
     }
     lightRaw *= ubuf.backSunStrength;
@@ -509,6 +591,11 @@ void main() {
 
     float frontSunReach = 0.0;
     float castShadow = 0.0;
+    // Weighted-average flip phase across front suns. Used to blend
+    // the front-sun colour from current → next palette when the
+    // wave has swept through the suns' positions.
+    float frontFlipBlend = 0.0;
+    float frontFlipWeight = 0.0;
     for (int s = 0; s < 10; s++) {
         if (s >= nFrontPos) break;
         float fs = float(s);
@@ -521,6 +608,10 @@ void main() {
         vec2 toSun = sunPos - px;
         float pxReach = exp(-dot(toSun, toSun) * frontInvSig2);
         frontSunReach += pxReach;
+        // Accumulate per-sun flip phase weighted by pxReach so suns
+        // contributing more to this pixel dominate its colour blend.
+        frontFlipBlend  += positionFlipPhase(sunPos, pitchY) * pxReach;
+        frontFlipWeight += pxReach;
 
         vec2 cellToSun = sunPos - cellCenter;
         float cellToSunLen = length(cellToSun);
@@ -603,9 +694,26 @@ void main() {
     // Modulation amplitude scales gently with matteness.
     float matteTex = 1.0 + (noise(px * 0.08) - 0.5) * 0.25 * ubuf.matteness;
 
+    // ── Propagating colour wave ───────────────────────────────────
+    // The wave passes through the tertiary colour at its midpoint —
+    // the body transitions old → tertiary (bright highlight) → new.
+    // This reads as a bright wave-front sweeping the field, leaving
+    // hexes in the new colour behind it. At cellFlipPhase = 0 or 1,
+    // the body is fully one of the palette ends; the highlight peaks
+    // at cellFlipPhase = 0.5.
+    vec3 oldBodyTint  = ubuf.colorPrimaryContainer.rgb;
+    vec3 newBodyTint  = ubuf.colorPrimaryContainerNext.rgb;
+    vec3 peakBodyTint = ubuf.colorTertiary.rgb;
+    vec3 flipBodyTint;
+    if (cellFlipPhase < 0.5) {
+        flipBodyTint = mix(oldBodyTint, peakBodyTint, cellFlipPhase * 2.0);
+    } else {
+        flipBodyTint = mix(peakBodyTint, newBodyTint, (cellFlipPhase - 0.5) * 2.0);
+    }
+
     // Ambient body colour — what every hex would look like with no
     // front sun. Dark matte container tint, broken by the noise grain.
-    vec3 ambientBody = ubuf.colorPrimaryContainer.rgb * matteTex;
+    vec3 ambientBody = flipBodyTint * matteTex;
 
     // Front-sun illumination: warm light from the localised moving
     // sun. Additive on top of the ambient body, and GATED by
@@ -625,7 +733,15 @@ void main() {
     // full palette over time at frontSunPaletteSpeed — paletteCycle
     // is offset by +2 so at speed=0 it sits exactly on colorTertiary.
     float fpt = ubuf.iTime * 0.1 * ubuf.frontSunPaletteSpeed;
-    vec3 frontSunColor = paletteCycle(fpt + 2.0);
+    // Average flip phase across front suns (weighted by per-pixel
+    // reach), used to blend front-sun colour from current → next
+    // palette as the wave sweeps through the suns' positions.
+    float frontFlipNorm = (frontFlipWeight > 0.001)
+                        ? frontFlipBlend / frontFlipWeight
+                        : 0.0;
+    vec3 frontSunColor = mix(paletteCycle(fpt + 2.0),
+                             paletteCycleNext(fpt + 2.0),
+                             frontFlipNorm);
     vec3 sunLight = frontSunColor * ubuf.frontSunStrength * 0.6;
     // Shadow visibility gates on the sun being *on* (strength > 0)
     // but not on its brightness — so shadowDarkness controls dark

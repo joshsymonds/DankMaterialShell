@@ -94,7 +94,12 @@ FloatingWindow {
         "frontNegSunCount":  { min: 0, max: 10, step: 1 },
         "frontNegSunStrength": { min: 0.0, max: 1.0, step: 0.01 },
         "frontNegSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
-        "frontNegSunSpeed":    { min: 0.0, max: 12.0, step: 0.1 }
+        "frontNegSunSpeed":    { min: 0.0, max: 12.0, step: 0.1 },
+        "flipPropDelay":  { min: 0.0, max: 0.5, step: 0.005 },
+        "flipDuration":   { min: 0.05, max: 3.0, step: 0.05 },
+        "depthShading":   { min: 0.0, max: 1.0, step: 0.01 },
+        "flipSpecular":   { min: 0.0, max: 3.0, step: 0.02 },
+        "hexDepth":       { min: 0.0, max: 1.5, step: 0.02 }
     })
 
     // Section grouping: a fixed-order list of named sections, each with the
@@ -104,7 +109,7 @@ FloatingWindow {
         { name: "field", keys: [
             "intensity", "cellSize", "modeAmount", "domeStrength", "seamGlow",
             "sunDriftSpeed", "heightAmount", "matteness", "bleedBack",
-            "hexBevel", "heightDriftSpeed"
+            "hexBevel", "heightDriftSpeed", "depthShading", "hexDepth"
         ] },
         { name: "front sun", keys: [
             "frontSunCount", "frontSunStrength", "frontSunSpeed", "frontSunSize",
@@ -123,6 +128,11 @@ FloatingWindow {
         ] },
         { name: "colors", keys: [
             "colorPrimary", "colorSecondary", "colorPrimaryContainer", "colorTertiary"
+        ] },
+        { name: "flip target", keys: [
+            "colorPrimaryNext", "colorSecondaryNext",
+            "colorPrimaryContainerNext", "colorTertiaryNext",
+            "flipPropDelay", "flipDuration", "flipSpecular"
         ] },
         { name: "harness", keys: ["speed"] }
     ])
@@ -180,6 +190,14 @@ FloatingWindow {
         return null;
     }
 
+    // Internal-state uniforms that should never appear as panel rows
+    // even if they live in shaderState (so applyState pushes them).
+    readonly property var hiddenKeys: ({
+        "flipStartTime": true,
+        "flipOriginX": true,
+        "flipOriginY": true
+    })
+
     function rebuildSections() {
         const known = {};
         for (let i = 0; i < sectionMap.length; i++) {
@@ -187,6 +205,8 @@ FloatingWindow {
                 known[sectionMap[i].keys[j]] = true;
             }
         }
+        // Mark hidden keys as "known" so they don't fall into misc.
+        for (const k in hiddenKeys) known[k] = true;
         const result = [];
         for (let i = 0; i < sectionMap.length; i++) {
             const s = sectionMap[i];
@@ -221,6 +241,92 @@ FloatingWindow {
         const next = Object.assign({}, expanded);
         next[name] = !cur;
         expanded = next;
+    }
+
+    // Palette flip — sets the wave origin to a random screen position,
+    // stamps flipStartTime with the current iTime, and arms a timer
+    // that commits the new body colour once the wave has passed every
+    // hex. Lockout while flipActive prevents mid-flip re-trigger from
+    // making the field discontinuous.
+    property bool flipActive: false
+
+    function triggerFlip() {
+        if (flipActive) return;
+        const w = shaderEffect.width;
+        const h = shaderEffect.height;
+        const ox = Math.random() * w;
+        const oy = Math.random() * h;
+        const propDelay = shaderState["flipPropDelay"] !== undefined
+                        ? shaderState["flipPropDelay"] : 0.05;
+        const duration = shaderState["flipDuration"] !== undefined
+                       ? shaderState["flipDuration"] : 0.5;
+        const cellSize = shaderState["cellSize"] !== undefined
+                       ? shaderState["cellSize"] : 14;
+        // Worst-case hex distance from origin to the farthest corner.
+        const maxDist = Math.sqrt(
+            Math.max(ox, w - ox) * Math.max(ox, w - ox) +
+            Math.max(oy, h - oy) * Math.max(oy, h - oy));
+        const pitch = Math.max(cellSize * 1.7320508, 1.0);
+        // totalSec is in iTime-seconds (how long the wave takes to
+        // fully traverse, measured by the cell-flip phase math).
+        const totalSec = (maxDist / pitch) * propDelay + duration;
+        // Wall-clock duration depends on the harness speed multiplier
+        // applied to iTime. If speed=0.5, iTime advances at half-rate
+        // and the wave takes 2× as long in real time. Without this
+        // correction the timer commits before the wave actually
+        // finishes — visible as the wave terminating abruptly when
+        // the leading edge is still on-screen.
+        const speed = root.harnessState.speed !== undefined ? root.harnessState.speed : 1.0;
+        // Wall-clock = totalSec / speed seconds, + 200ms buffer.
+        // The buffer guarantees iTime is well past flipStartTime+totalSec
+        // when commit fires; without it, frame-timing jitter can leave
+        // the last few cells/suns at phase < 1, causing a visible snap
+        // when the palette swap and flipStartTime reset happen.
+        const wallClockMs = totalSec * 1000.0 / Math.max(speed, 0.01) + 200.0;
+
+        shaderState["flipOriginX"] = ox;
+        shaderState["flipOriginY"] = oy;
+        shaderState["flipStartTime"] = shaderEffect.iTime;
+        shaderState = shaderState;
+        applyState();
+        flipActive = true;
+        flipCommitTimer.interval = Math.max(50, wallClockMs);
+        flipCommitTimer.start();
+    }
+
+    Timer {
+        id: flipCommitTimer
+        repeat: false
+        onTriggered: {
+            // Swap all four Current/Next palette pairs so a successive
+            // Trigger flip click animates the field back to the
+            // previous colours rather than nothing. Both body tint
+            // AND sun palette entries get swapped now that the wave
+            // drives sun colours too (step 2).
+            const pairs = [
+                ["colorPrimary",          "colorPrimaryNext"],
+                ["colorSecondary",        "colorSecondaryNext"],
+                ["colorPrimaryContainer", "colorPrimaryContainerNext"],
+                ["colorTertiary",         "colorTertiaryNext"]
+            ];
+            for (let i = 0; i < pairs.length; i++) {
+                const cur = root.shaderState[pairs[i][0]];
+                const nxt = root.shaderState[pairs[i][1]];
+                if (cur !== undefined && nxt !== undefined) {
+                    root.shaderState[pairs[i][0]] = nxt;
+                    root.shaderState[pairs[i][1]] = cur;
+                }
+            }
+            // Reset to the future sentinel so per-hex flip phase
+            // clamps back to 0 and the field renders the (newly
+            // committed) Current palette cleanly.
+            root.shaderState["flipStartTime"] = 1.0e9;
+            root.shaderState = root.shaderState;
+            root.applyState();
+            root.rebuildSections();
+            root.flipActive = false;
+            root.dirty = true;
+        }
     }
 
     function setValue(section, key, value) {
@@ -406,11 +512,28 @@ FloatingWindow {
         property real frontNegSunStrength: 0.7
         property real frontNegSunSize: 0.3
         property real frontNegSunSpeed: 1.0
+        property real flipOriginX: 0.0
+        property real flipOriginY: 0.0
+        // Sentinel = far-future iTime. Per-hex flip phase math gives
+        // a negative numerator → clamped to 0 → renders the Current
+        // palette. triggerFlip() sets this to the actual current
+        // iTime to kick off the wave; flipCommitTimer resets back to
+        // sentinel after the wave finishes.
+        property real flipStartTime: 1.0e9
+        property real flipPropDelay: 0.05
+        property real flipDuration: 0.5
+        property real depthShading: 0.35
+        property real flipSpecular: 0.8
+        property real hexDepth: 0.7
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary:           Qt.vector4d(0.345, 0.588, 0.882, 1.0)
         property vector4d colorSecondary:         Qt.vector4d(0.718, 0.067, 0.859, 1.0)
         property vector4d colorPrimaryContainer:  Qt.vector4d(0.090, 0.043, 0.333, 1.0)
         property vector4d colorTertiary:          Qt.vector4d(0.224, 1.000, 0.600, 1.0)
+        property vector4d colorPrimaryNext:           colorPrimary
+        property vector4d colorSecondaryNext:         colorSecondary
+        property vector4d colorPrimaryContainerNext:  colorPrimaryContainer
+        property vector4d colorTertiaryNext:          colorTertiary
 
         fragmentShader: "file://" + root.qsbPath + "?v=" + root.qsbRev
     }
@@ -510,6 +633,13 @@ FloatingWindow {
                 }
 
                 Item { Layout.fillHeight: true; Layout.minimumHeight: 12 }
+
+                Button {
+                    Layout.fillWidth: true
+                    text: root.flipActive ? "flipping…" : "Trigger flip"
+                    enabled: !root.flipActive
+                    onClicked: root.triggerFlip()
+                }
 
                 Button {
                     Layout.fillWidth: true

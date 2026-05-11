@@ -74,6 +74,29 @@ Item {
     property real frontNegSunSize: 0.3
     property real frontNegSunSpeed: 1.0
 
+    // Palette flip — staging colours + propagating-ripple parameters.
+    // While not flipping, the four Next colours should match the
+    // four Current colours; the wave shows a visible transition only
+    // when they differ and flipStartTime is set to a recent iTime.
+    // flipStartTime < 0 (or any large-negative sentinel) effectively
+    // means "the wave has already finished" so the field renders as
+    // the Next palette = Current palette (no animation).
+    property color primaryNextColor: primaryColor
+    property color secondaryNextColor: secondaryColor
+    property color primaryContainerNextColor: primaryContainerColor
+    property color tertiaryNextColor: tertiaryColor
+    property real flipOriginX: 0.0
+    property real flipOriginY: 0.0
+    // Far-future sentinel: at idle, iTime never reaches flipStartTime,
+    // so per-hex phase clamps to 0 and the field renders the Current
+    // palette. Set to a real iTime to start a wave.
+    property real flipStartTime: 1.0e9
+    property real flipPropDelay: 0.05
+    property real flipDuration: 0.5
+    property real depthShading: 0.35
+    property real flipSpecular: 0.8
+    property real hexDepth: 0.7
+
     property color primaryColor: Theme.primary
     property color secondaryColor: Theme.secondary
     property color primaryContainerColor: Theme.primaryContainer
@@ -114,11 +137,23 @@ Item {
         property real frontNegSunStrength: root.frontNegSunStrength
         property real frontNegSunSize: root.frontNegSunSize
         property real frontNegSunSpeed: root.frontNegSunSpeed
+        property real flipOriginX: root.flipOriginX
+        property real flipOriginY: root.flipOriginY
+        property real flipStartTime: root.flipStartTime
+        property real flipPropDelay: root.flipPropDelay
+        property real flipDuration: root.flipDuration
+        property real depthShading: root.depthShading
+        property real flipSpecular: root.flipSpecular
+        property real hexDepth: root.hexDepth
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
         property vector4d colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)
         property vector4d colorPrimaryContainer: Qt.vector4d(root.primaryContainerColor.r, root.primaryContainerColor.g, root.primaryContainerColor.b, root.primaryContainerColor.a)
         property vector4d colorTertiary: Qt.vector4d(root.tertiaryColor.r, root.tertiaryColor.g, root.tertiaryColor.b, root.tertiaryColor.a)
+        property vector4d colorPrimaryNext: Qt.vector4d(root.primaryNextColor.r, root.primaryNextColor.g, root.primaryNextColor.b, root.primaryNextColor.a)
+        property vector4d colorSecondaryNext: Qt.vector4d(root.secondaryNextColor.r, root.secondaryNextColor.g, root.secondaryNextColor.b, root.secondaryNextColor.a)
+        property vector4d colorPrimaryContainerNext: Qt.vector4d(root.primaryContainerNextColor.r, root.primaryContainerNextColor.g, root.primaryContainerNextColor.b, root.primaryContainerNextColor.a)
+        property vector4d colorTertiaryNext: Qt.vector4d(root.tertiaryNextColor.r, root.tertiaryNextColor.g, root.tertiaryNextColor.b, root.tertiaryNextColor.a)
 
         fragmentShader: {
             switch (root.mode) {
