@@ -25,10 +25,17 @@
     "backNegSunSpeed": 1.7000000000000002,
     "backSunPaletteSpeed": 0.5,
     "frontSunPaletteSpeed": 0.5,
-    "colorPrimary": "#5896E1",
-    "colorSecondary": "#B711DB",
-    "colorPrimaryContainer": "#170B55",
-    "colorTertiary": "#39FF99"
+    "backSunCount": 3,
+    "backNegSunCount": 1,
+    "frontSunCount": 1,
+    "frontNegSunCount": 0,
+    "frontNegSunStrength": 0.7,
+    "frontNegSunSize": 0.3,
+    "frontNegSunSpeed": 1.0,
+    "colorPrimary": "#b0b0b0",
+    "colorSecondary": "#7a7a7a",
+    "colorPrimaryContainer": "#0a0a0a",
+    "colorTertiary": "#ffffff"
   },
   "harness": {
     "speed": 0.8500000000000001

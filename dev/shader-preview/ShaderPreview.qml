@@ -87,11 +87,54 @@ FloatingWindow {
         "backNegSunStrength": { min: 0.0, max: 1.0, step: 0.01 },
         "backNegSunSpeed":    { min: 0.0, max: 5.0, step: 0.05 },
         "backSunPaletteSpeed":  { min: 0.0, max: 3.0, step: 0.02 },
-        "frontSunPaletteSpeed": { min: 0.0, max: 3.0, step: 0.02 }
+        "frontSunPaletteSpeed": { min: 0.0, max: 3.0, step: 0.02 },
+        "backSunCount":      { min: 0, max: 10, step: 1 },
+        "backNegSunCount":   { min: 0, max: 10, step: 1 },
+        "frontSunCount":     { min: 0, max: 10, step: 1 },
+        "frontNegSunCount":  { min: 0, max: 10, step: 1 },
+        "frontNegSunStrength": { min: 0.0, max: 1.0, step: 0.01 },
+        "frontNegSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
+        "frontNegSunSpeed":    { min: 0.0, max: 12.0, step: 0.1 }
     })
 
-    // Flat array used as Repeater model. Built from shaderState + harnessState.
-    property var controls: []
+    // Section grouping: a fixed-order list of named sections, each with the
+    // uniform keys it owns. Any key not in this map falls into a "misc"
+    // bucket so newly-added uniforms still show up rather than vanish.
+    readonly property var sectionMap: ([
+        { name: "field", keys: [
+            "intensity", "cellSize", "modeAmount", "domeStrength", "seamGlow",
+            "sunDriftSpeed", "heightAmount", "matteness", "bleedBack",
+            "hexBevel", "heightDriftSpeed"
+        ] },
+        { name: "front sun", keys: [
+            "frontSunCount", "frontSunStrength", "frontSunSpeed", "frontSunSize",
+            "frontSunShadowLength", "frontSunShadowDarkness", "frontSunPaletteSpeed"
+        ] },
+        { name: "negative front sun", keys: [
+            "frontNegSunCount", "frontNegSunStrength", "frontNegSunSize",
+            "frontNegSunSpeed"
+        ] },
+        { name: "back sun", keys: [
+            "backSunCount", "backSunSize", "backSunStrength", "backSunPaletteSpeed"
+        ] },
+        { name: "negative back sun", keys: [
+            "backNegSunCount", "backNegSunSize", "backNegSunStrength",
+            "backNegSunSpeed"
+        ] },
+        { name: "colors", keys: [
+            "colorPrimary", "colorSecondary", "colorPrimaryContainer", "colorTertiary"
+        ] },
+        { name: "harness", keys: ["speed"] }
+    ])
+
+    // Built per-load; each entry is { name, controls: [...] }. Controls
+    // share the same shape as before so the slider/color delegates can
+    // be reused unchanged.
+    property var sections: []
+
+    // Per-section expand/collapse state. Missing keys default to expanded
+    // via the `!== false` check at render time.
+    property var expanded: ({})
 
     // ===== Window setup =====
 
@@ -122,46 +165,62 @@ FloatingWindow {
         }
     }
 
-    function rebuildControls() {
-        const list = [];
-        for (const k in shaderState) {
-            if (k.startsWith("_")) continue;
-            const v = shaderState[k];
-            const h = hints[k];
-            if (typeof v === "number") {
-                list.push({
-                    section: "shader",
-                    key: k,
-                    kind: "real",
-                    value: v,
-                    minVal: h ? h.min : 0,
-                    maxVal: h ? h.max : 2,
-                    step:   h ? h.step : 0.01
-                });
-            } else if (typeof v === "string" && v.startsWith("#")) {
-                list.push({
-                    section: "shader",
-                    key: k,
-                    kind: "color",
-                    value: v
-                });
+    function buildCtrl(section, key, v) {
+        const h = hints[key];
+        if (typeof v === "number") {
+            return {
+                section: section, key: key, kind: "real", value: v,
+                minVal: h ? h.min : 0,
+                maxVal: h ? h.max : (section === "harness" ? 3 : 2),
+                step:   h ? h.step : (section === "harness" ? 0.05 : 0.01)
+            };
+        } else if (typeof v === "string" && v.startsWith("#")) {
+            return { section: section, key: key, kind: "color", value: v };
+        }
+        return null;
+    }
+
+    function rebuildSections() {
+        const known = {};
+        for (let i = 0; i < sectionMap.length; i++) {
+            for (let j = 0; j < sectionMap[i].keys.length; j++) {
+                known[sectionMap[i].keys[j]] = true;
             }
         }
-        for (const k in harnessState) {
-            if (k.startsWith("_")) continue;
-            const v = harnessState[k];
-            const h = hints[k];
-            list.push({
-                section: "harness",
-                key: k,
-                kind: "real",
-                value: v,
-                minVal: h ? h.min : 0,
-                maxVal: h ? h.max : 3,
-                step:   h ? h.step : 0.05
-            });
+        const result = [];
+        for (let i = 0; i < sectionMap.length; i++) {
+            const s = sectionMap[i];
+            const ctrls = [];
+            for (let j = 0; j < s.keys.length; j++) {
+                const k = s.keys[j];
+                let c = null;
+                if (k in shaderState)       c = buildCtrl("shader", k, shaderState[k]);
+                else if (k in harnessState) c = buildCtrl("harness", k, harnessState[k]);
+                if (c) ctrls.push(c);
+            }
+            if (ctrls.length > 0) result.push({ name: s.name, controls: ctrls });
         }
-        controls = list;
+        // Misc bucket: anything not assigned to a known section.
+        const misc = [];
+        for (const k in shaderState) {
+            if (k.startsWith("_") || known[k]) continue;
+            const c = buildCtrl("shader", k, shaderState[k]);
+            if (c) misc.push(c);
+        }
+        for (const k in harnessState) {
+            if (k.startsWith("_") || known[k]) continue;
+            const c = buildCtrl("harness", k, harnessState[k]);
+            if (c) misc.push(c);
+        }
+        if (misc.length > 0) result.push({ name: "misc", controls: misc });
+        sections = result;
+    }
+
+    function toggleSection(name) {
+        const cur = (expanded[name] !== false);
+        const next = Object.assign({}, expanded);
+        next[name] = !cur;
+        expanded = next;
     }
 
     function setValue(section, key, value) {
@@ -211,7 +270,7 @@ FloatingWindow {
                 root.shaderState  = j.shader  || {};
                 root.harnessState = j.harness || {};
                 root.applyState();
-                root.rebuildControls();
+                root.rebuildSections();
                 root.uniformsRev += 1;
                 root.dirty = false;
             } catch (e) {
@@ -340,6 +399,13 @@ FloatingWindow {
         property real backNegSunSpeed: 1.0
         property real backSunPaletteSpeed: 0.5
         property real frontSunPaletteSpeed: 0.5
+        property real backSunCount: 3
+        property real backNegSunCount: 1
+        property real frontSunCount: 1
+        property real frontNegSunCount: 0
+        property real frontNegSunStrength: 0.7
+        property real frontNegSunSize: 0.3
+        property real frontNegSunSpeed: 1.0
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary:           Qt.vector4d(0.345, 0.588, 0.882, 1.0)
         property vector4d colorSecondary:         Qt.vector4d(0.718, 0.067, 0.859, 1.0)
@@ -373,37 +439,73 @@ FloatingWindow {
 
             ColumnLayout {
                 width: panel.width - 24
-                spacing: 8
-
-                Text {
-                    color: "#cfcfcf"; font.family: "monospace"; font.pixelSize: 11; font.bold: true
-                    text: "shader"
-                }
+                spacing: 6
 
                 Repeater {
-                    model: root.controls.filter(function (c) { return c.section === "shader"; })
+                    model: root.sections
 
-                    delegate: Loader {
+                    delegate: ColumnLayout {
                         Layout.fillWidth: true
-                        property var d: modelData
-                        sourceComponent: d.kind === "real" ? sliderRowComp : colorRowComp
-                    }
-                }
+                        spacing: 4
+                        readonly property var sec: modelData
+                        readonly property bool open: root.expanded[sec.name] !== false
 
-                Item { Layout.preferredHeight: 8 }
+                        // Section header — click to toggle expand/collapse.
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 24
+                            color: headerArea.containsMouse ? "#262626" : "#1a1a1a"
+                            border.color: "#303030"
+                            border.width: 1
+                            radius: 3
 
-                Text {
-                    color: "#cfcfcf"; font.family: "monospace"; font.pixelSize: 11; font.bold: true
-                    text: "harness"
-                }
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8
+                                anchors.rightMargin: 8
 
-                Repeater {
-                    model: root.controls.filter(function (c) { return c.section === "harness"; })
+                                Text {
+                                    color: "#cfcfcf"
+                                    font.family: "monospace"
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                    text: (open ? "▼ " : "▶ ") + sec.name
+                                }
+                                Item { Layout.fillWidth: true }
+                                Text {
+                                    color: "#606060"
+                                    font.family: "monospace"
+                                    font.pixelSize: 10
+                                    text: sec.controls.length + ""
+                                }
+                            }
 
-                    delegate: Loader {
-                        Layout.fillWidth: true
-                        property var d: modelData
-                        sourceComponent: sliderRowComp
+                            MouseArea {
+                                id: headerArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.toggleSection(sec.name)
+                            }
+                        }
+
+                        // Section body — visible only when open.
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 6
+                            spacing: 4
+                            visible: open
+
+                            Repeater {
+                                model: sec.controls
+
+                                delegate: Loader {
+                                    Layout.fillWidth: true
+                                    property var d: modelData
+                                    sourceComponent: d.kind === "real" ? sliderRowComp : colorRowComp
+                                }
+                            }
+                        }
                     }
                 }
 
