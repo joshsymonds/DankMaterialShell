@@ -59,6 +59,15 @@ layout(std140, binding = 0) uniform buf {
                             //         fraction of the larger screen
                             //         dimension. Small = tight focused
                             //         spotlight; large = broad wash.
+    float frontSunShadowLength;  // 0..N — multiplier on the cast
+                                 //         shadow's decay length.
+                                 //         1 = baseline; higher
+                                 //         stretches shadows deeper
+                                 //         across receiver hexes.
+    float frontSunShadowDarkness; // 0..1 — peak darkening a cast
+                                  //         shadow can apply to a
+                                  //         body, before clamping.
+                                  //         Higher = inkier shadows.
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -350,11 +359,15 @@ void main() {
     float frontSunReach = exp(-dot(toFrontSun, toFrontSun) /
                               (frontSunSigma * frontSunSigma));
 
-    // Direction from THIS hex toward the sun (per-cell, not global).
-    // Drives shadow projection in the neighbour loop — a tall
-    // neighbour in this direction casts a shadow extending opposite
-    // it across our matte top.
-    vec2 sunDir = normalize(frontSunPos - cellCenter + vec2(0.0001));
+    // Per-CELL reach (computed at the cell centre, used uniformly
+    // across all fragments in this cell). This is the cell's
+    // "size" / "presence" — how lit the front sun makes this hex.
+    // Differential in cell-reach between this hex and a neighbour
+    // drives the cast-shadow logic: the brighter (more present)
+    // hex casts a shadow onto its less-lit neighbour.
+    vec2 cellToFrontSun = frontSunPos - cellCenter;
+    float cellReach = exp(-dot(cellToFrontSun, cellToFrontSun) /
+                          (frontSunSigma * frontSunSigma));
 
     float totalIntensity = 0.0;
     float castShadow = 0.0;
@@ -372,38 +385,6 @@ void main() {
             float diff = nHeight - currentHeight;
             float peakI = clamp(diff * 2.5, 0.0, 1.0);
             totalIntensity += peakI * exp(-distInBody / max(decayLength, 0.5));
-
-            // Front-sun shadow cast by this taller neighbour: a soft
-            // directional lobe extending from the neighbour in the
-            // direction OPPOSITE the sun. Falloffs are smooth on all
-            // three axes (head ramp, tail decay, perpendicular bell)
-            // so no edge of the shadow reads as a hard geometric line
-            // — it blurs gracefully like a real penumbra.
-            //
-            //   alongShadow  = distance from the neighbour CENTRE
-            //                  along -sunDir. Smooth ramp through 0
-            //                  (soft leading edge), then exponential
-            //                  decay (long fading tail). Decay length
-            //                  scales with the height diff so taller
-            //                  casters throw longer shadows.
-            //   perpFromAxis = perpendicular offset from the shadow's
-            //                  centreline. Gaussian falloff so the
-            //                  shadow has no straight side edges.
-            vec2 fromN = px - nCenter;
-            vec2 perpAxis = vec2(-sunDir.y, sunDir.x);
-            float alongShadow = dot(fromN, -sunDir);
-            float perpFromAxis = dot(fromN, perpAxis);
-
-            float decayScale = max(diff * i * 2.5, 1.0);
-            float headRamp   = smoothstep(-i * 0.2, i * 0.2, alongShadow);
-            float tailDecay  = exp(-max(alongShadow, 0.0) / decayScale);
-
-            float perpSigma  = max(i * 0.6, 1.0);
-            float perpMask   = exp(-(perpFromAxis * perpFromAxis) / (perpSigma * perpSigma));
-
-            float thisShadow = clamp(diff * 2.5, 0.0, 1.0)
-                             * headRamp * tailDecay * perpMask;
-            castShadow = max(castShadow, thisShadow);
         } else if (currentHeight > nHeight + 0.005) {
             // Taller side — minimal bleed onto its own face (the hex
             // is blocking most of the light). Same grazing model
@@ -412,6 +393,44 @@ void main() {
             float peakI = clamp(diff * 2.5, 0.0, 1.0);
             totalIntensity += peakI * exp(-distInBody / max(decayLength * 0.25, 0.5))
                             * ubuf.bleedBack;
+        }
+
+        // Cast-shadow check — separate from the height-based leak.
+        // Each cell has a "size" = its lit-ness from the front sun
+        // (reach at the cell centre). A more-lit neighbour casts a
+        // hex-shaped shadow onto this less-lit cell. Shadow size
+        // grows with the lit differential and frontSunShadowLength.
+        //
+        // Position: a hex offset from this cell's centre toward the
+        // brighter neighbour's edge — so the shadow lives on the
+        // receiver's sun-facing side and shaped like a hex pushing
+        // in across the seam. Smoothstep on litDiff prevents the
+        // abrupt on/off you'd otherwise see as the reach differential
+        // drifts across the activation threshold.
+        vec2 nToFrontSun = frontSunPos - nCenter;
+        float nReach = exp(-dot(nToFrontSun, nToFrontSun) /
+                           (frontSunSigma * frontSunSigma));
+        float litDiff = nReach - cellReach;
+        if (litDiff > 0.001) {
+            float diffWeight = smoothstep(0.001, 0.05, litDiff);
+            // Position shadow hex well past the receiver's edge facing
+            // the brighter neighbour, and size it large enough to
+            // sweep across the receiver. This places the smoothstep
+            // transition band OUTSIDE the receiver (or at its very
+            // far edge) instead of through the middle — so when
+            // multiple neighbours cast simultaneously their
+            // transitions don't pile up near the centre. Result is a
+            // smooth gradient from full dark on the sun-facing edge
+            // to clear on the away side.
+            vec2 shadowCenter = cellCenter + nDirK * (i * 1.3);
+            float shadowSize  = i * (1.2 + litDiff * 2.0 * ubuf.frontSunShadowLength);
+            vec2 fromShadow = px - shadowCenter;
+            float hexDist = sdHexagon(fromShadow.yx, shadowSize);
+            float shadowMask = 1.0 - smoothstep(-shadowSize * 0.4,
+                                                shadowSize * 0.7,
+                                                hexDist);
+            float thisShadow = diffWeight * clamp(litDiff * 2.5, 0.0, 1.0) * shadowMask;
+            castShadow = max(castShadow, thisShadow);
         }
     }
 
@@ -460,8 +479,14 @@ void main() {
     // shining anyway. Clamped at 0.92 so cranked-up strengths leave
     // some ambient colour in shadow zones rather than pitch black.
     vec3 sunLight = vec3(1.0, 0.95, 0.85) * ubuf.frontSunStrength * 0.6;
-    float shadowDarken = clamp(castShadow * 0.85 * ubuf.frontSunStrength * frontSunReach,
-                               0.0, 0.92);
+    // Shadow visibility gates on the sun being *on* (strength > 0)
+    // but not on its brightness — so shadowDarkness controls dark
+    // depth independently. Without this decoupling, at low sun
+    // strengths the shadowDarkness slider has no perceptible range.
+    float shadowGate = smoothstep(0.0, 0.05, ubuf.frontSunStrength);
+    float shadowDarken = clamp(castShadow * ubuf.frontSunShadowDarkness
+                               * shadowGate * frontSunReach,
+                               0.0, 0.995);
     float litness = frontSunReach * (1.0 - shadowDarken);
 
     vec3 bodyTopColor = ambientBody + sunLight * litness;
