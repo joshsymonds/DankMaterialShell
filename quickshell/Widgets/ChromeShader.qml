@@ -54,6 +54,9 @@ Item {
     property real bleedBack: 0.03
     property real hexBevel: 0.6
     property real heightDriftSpeed: 0.0
+    property real frontSunStrength: 0.0
+    property real frontSunSpeed: 0.0
+    property real frontSunSize: 0.3
 
     property color primaryColor: Theme.primary
     property color secondaryColor: Theme.secondary
@@ -76,6 +79,9 @@ Item {
         property real bleedBack: root.bleedBack
         property real hexBevel: root.hexBevel
         property real heightDriftSpeed: root.heightDriftSpeed
+        property real frontSunStrength: root.frontSunStrength
+        property real frontSunSpeed: root.frontSunSpeed
+        property real frontSunSize: root.frontSunSize
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
         property vector4d colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)

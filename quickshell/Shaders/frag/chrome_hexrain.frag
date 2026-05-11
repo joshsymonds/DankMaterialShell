@@ -44,6 +44,21 @@ layout(std140, binding = 0) uniform buf {
                             //         cycle every 12-36 seconds (random
                             //         per hex so they don't pulse in
                             //         lockstep); >1 = faster.
+    float frontSunStrength; // 0..N — brightness of the front-sun
+                            //         pass. 0 disables. The front sun
+                            //         is a single localised light
+                            //         (NOT directional) that drifts
+                            //         across the field on a Lissajous
+                            //         path; hexes near it get the
+                            //         additive warm illumination,
+                            //         hexes far from it stay at
+                            //         ambient body colour.
+    float frontSunSpeed;    // 0..N — orbit rate of the front-sun
+                            //         position. 0 freezes it.
+    float frontSunSize;     // 0..1 — radius of the sun's reach as a
+                            //         fraction of the larger screen
+                            //         dimension. Small = tight focused
+                            //         spotlight; large = broad wash.
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -313,7 +328,36 @@ void main() {
     // altMask caps the cumulative brightness at saturation.
     float decayLength = mix(1.2, 0.05, ubuf.matteness) * i;
 
+    // Front-sun: a single localised light source that drifts across
+    // the field on a slow Lissajous path. Unlike a directional sun
+    // (which would illuminate every hex equally regardless of where
+    // they sit on screen), this one has a POSITION — hexes near it
+    // are brightly lit, hexes far from it stay at ambient. As it
+    // moves, the lit region sweeps across the field; tall hexes
+    // near the sun cast shadows radiating outward from its position.
+    float fst = ubuf.iTime * 0.05 * ubuf.frontSunSpeed;
+    vec2 frontSunPos = ubuf.iResolution.xy * 0.5 + ubuf.iResolution.xy * 0.45 *
+                       vec2(cos(fst * 0.23 + 0.5), sin(fst * 0.31 + 1.7));
+
+    // Sun reach: Gaussian falloff sigma in pixels. frontSunSize scales
+    // it as a fraction of the larger screen dimension.
+    float frontSunSigma = max(ubuf.frontSunSize *
+                              max(ubuf.iResolution.x, ubuf.iResolution.y) * 0.5,
+                              1.0);
+
+    // Per-pixel proximity to the sun → drives body brightening.
+    vec2 toFrontSun = frontSunPos - px;
+    float frontSunReach = exp(-dot(toFrontSun, toFrontSun) /
+                              (frontSunSigma * frontSunSigma));
+
+    // Direction from THIS hex toward the sun (per-cell, not global).
+    // Drives shadow projection in the neighbour loop — a tall
+    // neighbour in this direction casts a shadow extending opposite
+    // it across our matte top.
+    vec2 sunDir = normalize(frontSunPos - cellCenter + vec2(0.0001));
+
     float totalIntensity = 0.0;
+    float castShadow = 0.0;
     for (int k = 0; k < 6; k++) {
         float ang = float(k) * PI3;
         vec2 nDirK = vec2(cos(ang), sin(ang));
@@ -328,6 +372,38 @@ void main() {
             float diff = nHeight - currentHeight;
             float peakI = clamp(diff * 2.5, 0.0, 1.0);
             totalIntensity += peakI * exp(-distInBody / max(decayLength, 0.5));
+
+            // Front-sun shadow cast by this taller neighbour: a soft
+            // directional lobe extending from the neighbour in the
+            // direction OPPOSITE the sun. Falloffs are smooth on all
+            // three axes (head ramp, tail decay, perpendicular bell)
+            // so no edge of the shadow reads as a hard geometric line
+            // — it blurs gracefully like a real penumbra.
+            //
+            //   alongShadow  = distance from the neighbour CENTRE
+            //                  along -sunDir. Smooth ramp through 0
+            //                  (soft leading edge), then exponential
+            //                  decay (long fading tail). Decay length
+            //                  scales with the height diff so taller
+            //                  casters throw longer shadows.
+            //   perpFromAxis = perpendicular offset from the shadow's
+            //                  centreline. Gaussian falloff so the
+            //                  shadow has no straight side edges.
+            vec2 fromN = px - nCenter;
+            vec2 perpAxis = vec2(-sunDir.y, sunDir.x);
+            float alongShadow = dot(fromN, -sunDir);
+            float perpFromAxis = dot(fromN, perpAxis);
+
+            float decayScale = max(diff * i * 2.5, 1.0);
+            float headRamp   = smoothstep(-i * 0.2, i * 0.2, alongShadow);
+            float tailDecay  = exp(-max(alongShadow, 0.0) / decayScale);
+
+            float perpSigma  = max(i * 0.6, 1.0);
+            float perpMask   = exp(-(perpFromAxis * perpFromAxis) / (perpSigma * perpSigma));
+
+            float thisShadow = clamp(diff * 2.5, 0.0, 1.0)
+                             * headRamp * tailDecay * perpMask;
+            castShadow = max(castShadow, thisShadow);
         } else if (currentHeight > nHeight + 0.005) {
             // Taller side — minimal bleed onto its own face (the hex
             // is blocking most of the light). Same grazing model
@@ -366,7 +442,29 @@ void main() {
     // break the flat-color look without competing with the leak glow.
     // Modulation amplitude scales gently with matteness.
     float matteTex = 1.0 + (noise(px * 0.08) - 0.5) * 0.25 * ubuf.matteness;
-    vec3 bodyTopColor = ubuf.colorPrimaryContainer.rgb * matteTex;
+
+    // Ambient body colour — what every hex would look like with no
+    // front sun. Dark matte container tint, broken by the noise grain.
+    vec3 ambientBody = ubuf.colorPrimaryContainer.rgb * matteTex;
+
+    // Front-sun illumination: warm light from the localised moving
+    // sun. Additive on top of the ambient body, and GATED by
+    // frontSunReach so only the hexes underneath the sun get the
+    // boost. As the sun drifts, the lit region sweeps across the
+    // field — far hexes stay at ambient (dark matte), near hexes
+    // brighten and at high strengths saturate toward white.
+    //
+    // shadowDarken comes from the neighbour loop above (tall hexes
+    // near the sun cast shadows on lower hexes opposite the sun).
+    // It's also gated by reach — no shadows where the sun isn't
+    // shining anyway. Clamped at 0.92 so cranked-up strengths leave
+    // some ambient colour in shadow zones rather than pitch black.
+    vec3 sunLight = vec3(1.0, 0.95, 0.85) * ubuf.frontSunStrength * 0.6;
+    float shadowDarken = clamp(castShadow * 0.85 * ubuf.frontSunStrength * frontSunReach,
+                               0.0, 0.92);
+    float litness = frontSunReach * (1.0 - shadowDarken);
+
+    vec3 bodyTopColor = ambientBody + sunLight * litness;
 
     // Composition: seam glows only at height-diff edges, body picks up
     // directional leak from any taller neighbour (max-over-six, already

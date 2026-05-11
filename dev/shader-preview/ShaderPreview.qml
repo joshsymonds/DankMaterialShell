@@ -75,7 +75,10 @@ FloatingWindow {
         "matteness":      { min: 0.0, max: 1.0, step: 0.01 },
         "bleedBack":      { min: 0.0, max: 0.3, step: 0.005 },
         "hexBevel":       { min: 0.0, max: 1.0, step: 0.01 },
-        "heightDriftSpeed": { min: 0.0, max: 3.0, step: 0.05 }
+        "heightDriftSpeed": { min: 0.0, max: 3.0, step: 0.05 },
+        "frontSunStrength": { min: 0.0, max: 5.0, step: 0.02 },
+        "frontSunSpeed":    { min: 0.0, max: 12.0, step: 0.1 },
+        "frontSunSize":     { min: 0.05, max: 1.0, step: 0.01 }
     })
 
     // Flat array used as Repeater model. Built from shaderState + harnessState.
@@ -316,6 +319,9 @@ FloatingWindow {
         property real bleedBack: 0.03
         property real hexBevel: 0.6
         property real heightDriftSpeed: 0.6
+        property real frontSunStrength: 1.5
+        property real frontSunSpeed: 1.0
+        property real frontSunSize: 0.3
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary:           Qt.vector4d(0.345, 0.588, 0.882, 1.0)
         property vector4d colorSecondary:         Qt.vector4d(0.718, 0.067, 0.859, 1.0)
