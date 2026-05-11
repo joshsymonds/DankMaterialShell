@@ -42,6 +42,14 @@ layout(std140, binding = 0) uniform buf {
                            //         shadow that makes each hex read as
                            //         a raised face). Same width on every
                            //         hex; doesn't vary with height.
+    float heightDriftSpeed; // 0..3 — rate at which per-hex heights
+                            //         drift up/down over time. 0 =
+                            //         static field (heights frozen at
+                            //         their base noise value); 1 = each
+                            //         hex completes a full lower/raise
+                            //         cycle every 12-36 seconds (random
+                            //         per hex so they don't pulse in
+                            //         lockstep); >1 = faster.
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -74,6 +82,19 @@ float noise(vec2 p) {
 
 float fbm(vec2 p) {
     return 0.5 * noise(p) + 0.25 * noise(p * 2.0);
+}
+
+// Per-hex height field: a static base noise plus a slow per-cell
+// oscillation. Each cell gets a unique phase and period (random
+// derived from its centre coords) so neighbours never rise/fall
+// together — the field "breathes" asynchronously. heightDriftSpeed
+// scales the oscillation rate; 0 freezes the field.
+float hexHeight(vec2 center, float time) {
+    float base = noise(center * 0.005);
+    float phase = hash(center * 0.07) * TWO_PI;
+    float period = 12.0 + hash(center * 0.07 + vec2(13.7, 27.3)) * 24.0;
+    float drift = sin(time * TWO_PI / period * ubuf.heightDriftSpeed + phase) * 0.12;
+    return base + drift;
 }
 
 void main() {
@@ -259,7 +280,7 @@ void main() {
     // taller neighbours is fully dark; a hex surrounded by taller
     // ones is lit on every side. Per-hex height = noise(cellCenter).
 
-    float currentHeight = noise(cellCenter * 0.005);
+    float currentHeight = hexHeight(cellCenter, ubuf.iTime);
 
     // Neighbour layout (pointy-top tiling: each hex has 6 neighbours
     // at distance 2i and angles 0°,60°,120°,180°,240°,300°). For the
@@ -286,17 +307,21 @@ void main() {
     // height differential — bigger steps expose more underside, so
     // more light spills out.
     //
-    // MAX (not sum) over the 6 neighbours so vertex overlaps don't
-    // double-brighten. Each fragment reads from its strongest
-    // neighbour leak.
-    float decayLength = mix(0.95, 0.04, ubuf.matteness) * i;
+    // SUM (not max) over the 6 neighbours so that when several edges
+    // light up at once, their exponential tails add up — a hex
+    // surrounded by taller neighbours reads as a uniformly glowing
+    // top, not 6 wedges meeting in a star at the centre. Vertices
+    // between two lit edges round off smoothly because both edges'
+    // tails contribute through the corner. Final clamp(0,1) on
+    // altMask caps the cumulative brightness at saturation.
+    float decayLength = mix(1.2, 0.05, ubuf.matteness) * i;
 
     float totalIntensity = 0.0;
     for (int k = 0; k < 6; k++) {
         float ang = float(k) * PI3;
         vec2 nDirK = vec2(cos(ang), sin(ang));
         vec2 nCenter  = cellCenter + nDirK * 2.0 * i;
-        float nHeight = noise(nCenter * 0.005);
+        float nHeight = hexHeight(nCenter, ubuf.iTime);
 
         float perp = i - dot(local, nDirK);
         float distInBody = max(0.0, perp - seamWidth);
@@ -304,18 +329,16 @@ void main() {
         if (nHeight > currentHeight + 0.005) {
             // Shorter side — full leak. Peak scales with diff.
             float diff = nHeight - currentHeight;
-            float peakI = clamp(diff * 4.0, 0.0, 1.0);
-            float thisI = peakI * exp(-distInBody / max(decayLength, 0.5));
-            totalIntensity = max(totalIntensity, thisI);
+            float peakI = clamp(diff * 2.5, 0.0, 1.0);
+            totalIntensity += peakI * exp(-distInBody / max(decayLength, 0.5));
         } else if (currentHeight > nHeight + 0.005) {
             // Taller side — minimal bleed onto its own face (the hex
             // is blocking most of the light). Same grazing model
             // but with a much shorter decay and bleedBack scalar.
             float diff = currentHeight - nHeight;
-            float peakI = clamp(diff * 4.0, 0.0, 1.0);
-            float thisI = peakI * exp(-distInBody / max(decayLength * 0.25, 0.5))
-                        * ubuf.bleedBack;
-            totalIntensity = max(totalIntensity, thisI);
+            float peakI = clamp(diff * 2.5, 0.0, 1.0);
+            totalIntensity += peakI * exp(-distInBody / max(decayLength * 0.25, 0.5))
+                            * ubuf.bleedBack;
         }
     }
 
@@ -341,7 +364,7 @@ void main() {
     float angB = float(kBucket) * PI3;
     vec2 bucketDir = vec2(cos(angB), sin(angB));
     vec2 bucketNCenter = cellCenter + bucketDir * 2.0 * i;
-    float bucketHeight = noise(bucketNCenter * 0.005);
+    float bucketHeight = hexHeight(bucketNCenter, ubuf.iTime);
     float seamLit = smoothstep(0.02, 0.20, abs(bucketHeight - currentHeight));
 
     // Subtle matte texture on the hex top. Noise in screen-space at a

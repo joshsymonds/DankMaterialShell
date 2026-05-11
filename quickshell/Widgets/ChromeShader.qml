@@ -55,6 +55,7 @@ Item {
     property real matteness: 0.70
     property real bleedBack: 0.03
     property real hexBevel: 0.6
+    property real heightDriftSpeed: 0.0
 
     property color primaryColor: Theme.primary
     property color secondaryColor: Theme.secondary
@@ -77,6 +78,7 @@ Item {
         property real matteness: root.matteness
         property real bleedBack: root.bleedBack
         property real hexBevel: root.hexBevel
+        property real heightDriftSpeed: root.heightDriftSpeed
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
         property vector4d colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)
