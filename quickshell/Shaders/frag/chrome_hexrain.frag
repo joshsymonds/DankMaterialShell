@@ -79,6 +79,29 @@ layout(std140, binding = 0) uniform buf {
                              //         Dial below 1 to darken the
                              //         field, above 1 to push toward
                              //         fully-saturated hue at peaks.
+    float backNegSunSize;    // 0..1 — gaussian sigma of the negative
+                             //         back sun (a moving anti-light
+                             //         that EATS the underglow where
+                             //         it is, creating shifting voids).
+    float backNegSunStrength;// 0..1 — depth of darkening at the
+                             //         centre of the negative sun. 0
+                             //         disables; 1 nearly snuffs the
+                             //         underglow out under it.
+    float backNegSunSpeed;   // 0..N — drift rate of the negative
+                             //         sun's Lissajous path (independent
+                             //         of the positive suns).
+    float backSunPaletteSpeed; // 0..N — rate at which the three back
+                               //         suns cycle through the palette
+                               //         colours. 0 freezes them in
+                               //         the primary/secondary/tertiary
+                               //         assignment; higher values
+                               //         morph each sun continuously
+                               //         through all three hues.
+    float frontSunPaletteSpeed; // 0..N — same idea for the front sun.
+                                //         At 0 it stays at colorTertiary
+                                //         (today's default); higher
+                                //         values morph it through the
+                                //         palette over time.
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -111,6 +134,28 @@ float noise(vec2 p) {
 
 float fbm(vec2 p) {
     return 0.5 * noise(p) + 0.25 * noise(p * 2.0);
+}
+
+// Smooth palette cycle: maps a continuous phase to a colour that
+// morphs through primary → secondary → tertiary → primary as the
+// phase walks 0 → 1 → 2 → 3. Used to rotate the three back-sun
+// colours over time at backSunPaletteSpeed.
+vec3 paletteCycle(float phase) {
+    phase = mod(phase, 3.0);
+    int idx = int(phase);
+    float frac = phase - float(idx);
+    vec3 c0, c1;
+    if (idx == 0) {
+        c0 = ubuf.colorPrimary.rgb;
+        c1 = ubuf.colorSecondary.rgb;
+    } else if (idx == 1) {
+        c0 = ubuf.colorSecondary.rgb;
+        c1 = ubuf.colorTertiary.rgb;
+    } else {
+        c0 = ubuf.colorTertiary.rgb;
+        c1 = ubuf.colorPrimary.rgb;
+    }
+    return mix(c0, c1, frac);
 }
 
 // Per-hex height field: a static base noise plus a slow per-cell
@@ -291,9 +336,18 @@ void main() {
     float gB = exp(-dot(dB, dB) * invSig2);
     float gC = exp(-dot(dC, dC) * invSig2);
 
-    vec3 lightRaw = (ubuf.colorPrimary.rgb   * gA
-                  +  ubuf.colorSecondary.rgb * gB
-                  +  ubuf.colorTertiary.rgb  * gC) * ubuf.backSunStrength;
+    // Rotate which palette colour goes to each sun over time, with
+    // 1/3 offset between suns so all three hues are always represented
+    // (just at different positions). At backSunPaletteSpeed=0 the
+    // assignment is frozen at primary/secondary/tertiary.
+    float pt = ubuf.iTime * 0.1 * ubuf.backSunPaletteSpeed;
+    vec3 colorA = paletteCycle(pt);
+    vec3 colorB = paletteCycle(pt + 1.0);
+    vec3 colorC = paletteCycle(pt + 2.0);
+
+    vec3 lightRaw = (colorA * gA
+                  +  colorB * gB
+                  +  colorC * gC) * ubuf.backSunStrength;
     // Hue-preserving cap on the sun field itself. When three
     // saturated sun colours overlap, the raw additive sum can push
     // every channel past 1.0 → would otherwise clip to neutral white.
@@ -303,6 +357,25 @@ void main() {
     // but in whichever sun's hue dominates locally, not in white.
     float lightMax = max(lightRaw.r, max(lightRaw.g, lightRaw.b));
     vec3 lightFromSuns = lightRaw / max(lightMax, 1.0);
+
+    // Negative back sun: an anti-light drifting on its own Lissajous
+    // path that attenuates whatever underglow happens to be there.
+    // Creates moving voids in the colour field — combined with the
+    // positive suns' interference patterns, this makes the back
+    // lighting feel genuinely unpredictable rather than three known
+    // sources rotating on fixed paths. Speed and Lissajous frequencies
+    // are deliberately different from the positive suns so they
+    // never lock in phase.
+    float negT = ubuf.iTime * 0.05 * ubuf.backNegSunSpeed;
+    vec2 negSunPos = screenC + vec2(cos(negT * 0.19 + 2.7) * screenR.x,
+                                    sin(negT * 0.13 + 5.1) * screenR.y);
+    float negSunSigma = max(ubuf.backNegSunSize *
+                            max(ubuf.iResolution.x, ubuf.iResolution.y), 1.0);
+    vec2 toNegSun = negSunPos - px;
+    float negSunReach = exp(-dot(toNegSun, toNegSun) /
+                            (negSunSigma * negSunSigma));
+    float darkFactor = clamp(negSunReach * ubuf.backNegSunStrength, 0.0, 0.98);
+    lightFromSuns *= (1.0 - darkFactor);
 
     // Neighbour-height leak model (inspired by the gnomon wallpaper):
     // each hex is a flat matte-topped column at its own elevation.
@@ -495,7 +568,14 @@ void main() {
     // It's also gated by reach — no shadows where the sun isn't
     // shining anyway. Clamped at 0.92 so cranked-up strengths leave
     // some ambient colour in shadow zones rather than pitch black.
-    vec3 sunLight = vec3(1.0, 0.95, 0.85) * ubuf.frontSunStrength * 0.6;
+    // Front-sun colour starts at colorTertiary (so monochrome palettes
+    // get monochrome front sun for free, and matugen-theme palettes
+    // pick up a wallpaper-derived hue). Optionally cycles through the
+    // full palette over time at frontSunPaletteSpeed — paletteCycle
+    // is offset by +2 so at speed=0 it sits exactly on colorTertiary.
+    float fpt = ubuf.iTime * 0.1 * ubuf.frontSunPaletteSpeed;
+    vec3 frontSunColor = paletteCycle(fpt + 2.0);
+    vec3 sunLight = frontSunColor * ubuf.frontSunStrength * 0.6;
     // Shadow visibility gates on the sun being *on* (strength > 0)
     // but not on its brightness — so shadowDarkness controls dark
     // depth independently. Without this decoupling, at low sun

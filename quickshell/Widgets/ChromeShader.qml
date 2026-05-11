@@ -61,6 +61,11 @@ Item {
     property real frontSunShadowDarkness: 0.85
     property real backSunSize: 0.4
     property real backSunStrength: 1.0
+    property real backNegSunSize: 0.3
+    property real backNegSunStrength: 0.0
+    property real backNegSunSpeed: 1.0
+    property real backSunPaletteSpeed: 0.0
+    property real frontSunPaletteSpeed: 0.0
 
     property color primaryColor: Theme.primary
     property color secondaryColor: Theme.secondary
@@ -90,6 +95,11 @@ Item {
         property real frontSunShadowDarkness: root.frontSunShadowDarkness
         property real backSunSize: root.backSunSize
         property real backSunStrength: root.backSunStrength
+        property real backNegSunSize: root.backNegSunSize
+        property real backNegSunStrength: root.backNegSunStrength
+        property real backNegSunSpeed: root.backNegSunSpeed
+        property real backSunPaletteSpeed: root.backSunPaletteSpeed
+        property real frontSunPaletteSpeed: root.frontSunPaletteSpeed
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
         property vector4d colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)
