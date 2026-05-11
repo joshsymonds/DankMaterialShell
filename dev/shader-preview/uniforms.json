@@ -18,6 +18,8 @@
     "frontSunSize": 0.67,
     "frontSunShadowLength": 2.5,
     "frontSunShadowDarkness": 2.3000000000000003,
+    "backSunSize": 0.4,
+    "backSunStrength": 1.0,
     "colorPrimary": "#5896E1",
     "colorSecondary": "#B711DB",
     "colorPrimaryContainer": "#170B55",

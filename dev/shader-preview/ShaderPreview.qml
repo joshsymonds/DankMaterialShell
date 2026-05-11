@@ -80,7 +80,9 @@ FloatingWindow {
         "frontSunSpeed":    { min: 0.0, max: 12.0, step: 0.1 },
         "frontSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
         "frontSunShadowLength":   { min: 0.0, max: 4.0, step: 0.05 },
-        "frontSunShadowDarkness": { min: 0.0, max: 3.0, step: 0.02 }
+        "frontSunShadowDarkness": { min: 0.0, max: 3.0, step: 0.02 },
+        "backSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
+        "backSunStrength": { min: 0.0, max: 3.0, step: 0.02 }
     })
 
     // Flat array used as Repeater model. Built from shaderState + harnessState.
@@ -326,6 +328,8 @@ FloatingWindow {
         property real frontSunSize: 0.3
         property real frontSunShadowLength: 1.8
         property real frontSunShadowDarkness: 0.95
+        property real backSunSize: 0.4
+        property real backSunStrength: 1.0
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary:           Qt.vector4d(0.345, 0.588, 0.882, 1.0)
         property vector4d colorSecondary:         Qt.vector4d(0.718, 0.067, 0.859, 1.0)

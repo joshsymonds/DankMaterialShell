@@ -68,6 +68,17 @@ layout(std140, binding = 0) uniform buf {
                                   //         shadow can apply to a
                                   //         body, before clamping.
                                   //         Higher = inkier shadows.
+    float backSunSize;       // 0..1 — gaussian sigma of each back
+                             //         (underglow) sun, as a fraction
+                             //         of the larger screen dim. Small
+                             //         = tight isolated suns with deep
+                             //         dark between; large = broad
+                             //         overlapping wash.
+    float backSunStrength;   // 0..N — overall intensity multiplier on
+                             //         the back-sun additive light.
+                             //         Dial below 1 to darken the
+                             //         field, above 1 to push toward
+                             //         fully-saturated hue at peaks.
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -267,9 +278,11 @@ void main() {
     vec2 sunPosC = screenC + vec2(cos(t * 0.17 + 4.5 ) * screenR.x,
                                   sin(t * 0.13 + 0.8 ) * screenR.y);
 
-    // Gaussian falloff. sigma scaled to the larger screen dim so suns
-    // span several hex-widths regardless of resolution.
-    float sigma = max(ubuf.iResolution.x, ubuf.iResolution.y) * 0.40;
+    // Gaussian falloff. sigma is backSunSize × max screen dim so the
+    // user can dial the suns from tight isolated pools to broad
+    // overlapping washes.
+    float sigma = max(ubuf.backSunSize *
+                      max(ubuf.iResolution.x, ubuf.iResolution.y), 1.0);
     float invSig2 = 1.0 / (sigma * sigma);
     vec2 dA = px - sunPosA;
     vec2 dB = px - sunPosB;
@@ -278,9 +291,9 @@ void main() {
     float gB = exp(-dot(dB, dB) * invSig2);
     float gC = exp(-dot(dC, dC) * invSig2);
 
-    vec3 lightRaw = ubuf.colorPrimary.rgb   * gA
-                  + ubuf.colorSecondary.rgb * gB
-                  + ubuf.colorTertiary.rgb  * gC;
+    vec3 lightRaw = (ubuf.colorPrimary.rgb   * gA
+                  +  ubuf.colorSecondary.rgb * gB
+                  +  ubuf.colorTertiary.rgb  * gC) * ubuf.backSunStrength;
     // Hue-preserving cap on the sun field itself. When three
     // saturated sun colours overlap, the raw additive sum can push
     // every channel past 1.0 → would otherwise clip to neutral white.
@@ -380,20 +393,31 @@ void main() {
         float perp = i - dot(local, nDirK);
         float distInBody = max(0.0, perp - seamWidth);
 
+        // Height-driven leak (dominant): a taller neighbour throws a
+        // strong glow onto this hex's edge facing it, scaling with
+        // the height differential. Conversely, when THIS hex is the
+        // taller one, its column blocks most of the gap from above
+        // so only a faint bleedBack-scaled residue reaches its own
+        // surface.
         if (nHeight > currentHeight + 0.005) {
-            // Shorter side — full leak. Peak scales with diff.
             float diff = nHeight - currentHeight;
             float peakI = clamp(diff * 2.5, 0.0, 1.0);
             totalIntensity += peakI * exp(-distInBody / max(decayLength, 0.5));
         } else if (currentHeight > nHeight + 0.005) {
-            // Taller side — minimal bleed onto its own face (the hex
-            // is blocking most of the light). Same grazing model
-            // but with a much shorter decay and bleedBack scalar.
             float diff = currentHeight - nHeight;
             float peakI = clamp(diff * 2.5, 0.0, 1.0);
             totalIntensity += peakI * exp(-distInBody / max(decayLength * 0.25, 0.5))
                             * ubuf.bleedBack;
         }
+
+        // Baseline leak (always present, small): every seam is a gap
+        // revealing some underlying sun light, so even same-height
+        // seams contribute a tiny bleed onto the adjacent body. This
+        // is what stops lit edges from ending abruptly at matched
+        // neighbours — there's always continuity across the seam.
+        // Kept small so it doesn't saturate when summed across all
+        // 6 edges and overwhelm the matte body colour.
+        totalIntensity += 0.1 * exp(-distInBody / max(decayLength, 0.5));
 
         // Cast-shadow check — separate from the height-based leak.
         // Each cell has a "size" = its lit-ness from the front sun
@@ -442,19 +466,12 @@ void main() {
     float aa = fwidth(distToEdge);
     float onBody = smoothstep(seamWidth, seamWidth + aa, abs(distToEdge));
 
-    // Seam height-gating: the seam between two hexes only glows where
-    // those two hexes differ in height. Use the sextant bucket to pick
-    // out WHICH neighbour shares this fragment's edge, then check that
-    // specific neighbour's height differential. Same-height pairs read
-    // as a dark hairline; height-differential pairs glow with the sun
-    // colour that happens to be behind them. seamLit ramps from 0
-    // (matched heights) to 1 (clearly differing heights).
-    int kBucket = int(mod(bucket, 6.0));
-    float angB = float(kBucket) * PI3;
-    vec2 bucketDir = vec2(cos(angB), sin(angB));
-    vec2 bucketNCenter = cellCenter + bucketDir * 2.0 * i;
-    float bucketHeight = hexHeight(bucketNCenter, ubuf.iTime);
-    float seamLit = smoothstep(0.02, 0.20, abs(bucketHeight - currentHeight));
+    // (Seam height-gating used to live here, gating seam glow on
+    // adjacent height differential. Removed — the seam is now treated
+    // as an always-open gap revealing the sun field beneath, with no
+    // special edge-lighting logic. Light intensity at the seam comes
+    // directly from lightFromSuns, and the leak loop above ensures
+    // the same light bleeds onto both adjacent bodies.)
 
     // Subtle matte texture on the hex top. Noise in screen-space at a
     // fine scale gives each top a barely-visible grain — enough to
@@ -495,7 +512,7 @@ void main() {
     // directional leak from any taller neighbour (max-over-six, already
     // computed above into altMask). seamGlow scales both seam and leak
     // together so they brighten in lockstep.
-    vec3 seamColor = lightFromSuns * ubuf.seamGlow * seamLit;
+    vec3 seamColor = lightFromSuns * ubuf.seamGlow;
     float litWeight = altMask * ubuf.domeStrength;
     vec3 surfaceColor = bodyTopColor
                       + lightFromSuns * litWeight * ubuf.seamGlow;
