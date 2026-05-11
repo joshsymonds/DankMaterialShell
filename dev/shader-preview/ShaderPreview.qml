@@ -64,9 +64,18 @@ FloatingWindow {
     // Per-knob hint table for slider bounds. Add entries here for new known
     // uniforms; unknown numeric keys fall back to (0, 2, 0.01).
     readonly property var hints: ({
-        "intensity": { min: 0.0, max: 1.0, step: 0.01 },
-        "cellSize":  { min: 4,   max: 40,  step: 1 },
-        "speed":     { min: 0.0, max: 3.0, step: 0.05 }
+        "intensity":      { min: 0.0, max: 1.0, step: 0.01 },
+        "cellSize":       { min: 4,   max: 40,  step: 1    },
+        "speed":          { min: 0.0, max: 3.0, step: 0.05 },
+        "modeAmount":     { min: 0.0, max: 1.0, step: 0.01 },
+        "subModeAmount":  { min: 0.0, max: 1.0, step: 0.01 },
+        "domeStrength":   { min: 0.0, max: 1.0, step: 0.01 },
+        "seamGlow":       { min: 0.0, max: 3.0, step: 0.02 },
+        "sunDriftSpeed":  { min: 0.0, max: 3.0, step: 0.05 },
+        "heightAmount":   { min: 0.0, max: 1.0, step: 0.01 },
+        "matteness":      { min: 0.0, max: 1.0, step: 0.01 },
+        "bleedBack":      { min: 0.0, max: 0.3, step: 0.005 },
+        "hexBevel":       { min: 0.0, max: 1.0, step: 0.01 }
     })
 
     // Flat array used as Repeater model. Built from shaderState + harnessState.
@@ -298,6 +307,15 @@ FloatingWindow {
         // properties.
         property real intensity: 1.0
         property real cellSize: 14
+        property real modeAmount: 1.0
+        property real subModeAmount: 1.0
+        property real domeStrength: 0.8
+        property real seamGlow: 1.5
+        property real sunDriftSpeed: 1.0
+        property real heightAmount: 1.0
+        property real matteness: 0.70
+        property real bleedBack: 0.03
+        property real hexBevel: 0.6
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary:           Qt.vector4d(0.345, 0.588, 0.882, 1.0)
         property vector4d colorSecondary:         Qt.vector4d(0.718, 0.067, 0.859, 1.0)

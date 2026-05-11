@@ -39,6 +39,23 @@ Item {
     property bool running: true
     property real cellSize: 14
 
+    // Alt mode (chrome_hexrain). modeAmount=0 preserves the original
+    // 2D matrix-rain bar look; modeAmount=1 mixes in an alt look driven
+    // by drifting point-light "suns" behind the hex grid. Within alt:
+    //   subModeAmount=0 → "lattice" (bright domes at hex centres)
+    //   subModeAmount=1 → "scales"  (thin bright rims, dim hex bodies)
+    // Bar consumers leave at defaults; wallpaper consumers drive
+    // modeAmount to 1.0 and pick a sub-mode.
+    property real modeAmount: 0.0
+    property real subModeAmount: 0.0
+    property real domeStrength: 0.8
+    property real seamGlow: 1.5
+    property real sunDriftSpeed: 1.0
+    property real heightAmount: 0.0
+    property real matteness: 0.70
+    property real bleedBack: 0.03
+    property real hexBevel: 0.6
+
     property color primaryColor: Theme.primary
     property color secondaryColor: Theme.secondary
     property color primaryContainerColor: Theme.primaryContainer
@@ -51,6 +68,15 @@ Item {
         property real iTime: 0
         property real intensity: root.intensity
         property real cellSize: root.cellSize
+        property real modeAmount: root.modeAmount
+        property real subModeAmount: root.subModeAmount
+        property real domeStrength: root.domeStrength
+        property real seamGlow: root.seamGlow
+        property real sunDriftSpeed: root.sunDriftSpeed
+        property real heightAmount: root.heightAmount
+        property real matteness: root.matteness
+        property real bleedBack: root.bleedBack
+        property real hexBevel: root.hexBevel
         property vector3d iResolution: Qt.vector3d(width, height, 1)
         property vector4d colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
         property vector4d colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)

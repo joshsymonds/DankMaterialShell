@@ -14,6 +14,34 @@ layout(std140, binding = 0) uniform buf {
     vec4 colorSecondary;
     vec4 colorPrimaryContainer;
     vec4 colorTertiary;
+    // Alt mode: 2D point-light "suns" drift behind the hex grid; each
+    // hex is shaded by sun colour through one of two sub-mode masks.
+    // modeAmount=0 → original 2D matrix-rain bar look. modeAmount=1 →
+    // alt mode active, with subModeAmount selecting between:
+    //   subModeAmount=0 → "lattice" — bright dome at each hex centre,
+    //                     dim seams between (looks like glowing lattice
+    //                     points behind a dark mesh)
+    //   subModeAmount=1 → "scales" — dim hex bodies with a uniformly-
+    //                     thin bright rim along every hex side (each
+    //                     hex reads as a discrete scale, seams between
+    //                     them are bright thin lines)
+    float modeAmount;
+    float subModeAmount;   // 0 = lattice, 1 = scales (continuous blend)
+    float domeStrength;    // 0..1 — multiplier on lit-zone intensity
+    float seamGlow;        // 0..3 — multiplier on the lit portion
+    float sunDriftSpeed;   // 0..3 — sun-position drift rate multiplier
+    float heightAmount;    // 0..1 — strength of the neighbour-height
+                           //         leak effect overall.
+    float matteness;       // 0..1 — surface "light friction". Low =
+                           //         light travels far across the top;
+                           //         high = light absorbed quickly.
+    float bleedBack;       // 0..1 — small bleed of light onto the
+                           //         taller hex's own edge (very subtle).
+    float hexBevel;        // 0..1 — strength of the constant darker
+                           //         rim band on every hex (the "inset"
+                           //         shadow that makes each hex read as
+                           //         a raised face). Same width on every
+                           //         hex; doesn't vary with height.
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -171,12 +199,172 @@ void main() {
     // not hotCol * litAlpha, because that would multiply by lit twice.
     float litAlpha = lit * litGlowRaw;
 
-    vec3 finalColor =
+    vec3 finalColor2D =
         ubuf.colorPrimaryContainer.rgb * interiorAlpha
       + ubuf.colorPrimary.rgb * outlineAlpha
       + hotCol * litGlowRaw;
 
-    float a = clamp(interiorAlpha + outlineAlpha + litAlpha, 0.0, 1.0);
+    float alpha2D = clamp(interiorAlpha + outlineAlpha + litAlpha, 0.0, 1.0);
+
+    // ── Scales + suns composition ──────────────────────────────────
+    // Mental model: three large soft "suns" drift in screen space behind
+    // a foreground grid of hex-shaped scales. Each scale is dim in its
+    // centre and bright at its rim, so the suns' colours read through
+    // the seams between hexes. With suns at different positions painting
+    // primary/secondary/tertiary, every seam picks up whichever sun is
+    // nearest behind it — the field looks like coloured light bleeding
+    // through stained-glass scales.
+
+    // Three suns on Lissajous-like screen-space paths. Different
+    // frequencies per axis stop the loop from repeating obviously;
+    // sunDriftSpeed scales the rate so the harness can dial it.
+    float t = ubuf.iTime * ubuf.sunDriftSpeed;
+    vec2 screenC = ubuf.iResolution.xy * 0.5;
+    vec2 screenR = ubuf.iResolution.xy * 0.40;
+    vec2 sunPosA = screenC + vec2(cos(t * 0.13       ) * screenR.x,
+                                  sin(t * 0.17 + 1.0 ) * screenR.y);
+    vec2 sunPosB = screenC + vec2(cos(t * 0.11 + 2.3 ) * screenR.x,
+                                  sin(t * 0.19 + 3.7 ) * screenR.y);
+    vec2 sunPosC = screenC + vec2(cos(t * 0.17 + 4.5 ) * screenR.x,
+                                  sin(t * 0.13 + 0.8 ) * screenR.y);
+
+    // Gaussian falloff. sigma scaled to the larger screen dim so suns
+    // span several hex-widths regardless of resolution.
+    float sigma = max(ubuf.iResolution.x, ubuf.iResolution.y) * 0.40;
+    float invSig2 = 1.0 / (sigma * sigma);
+    vec2 dA = px - sunPosA;
+    vec2 dB = px - sunPosB;
+    vec2 dC = px - sunPosC;
+    float gA = exp(-dot(dA, dA) * invSig2);
+    float gB = exp(-dot(dB, dB) * invSig2);
+    float gC = exp(-dot(dC, dC) * invSig2);
+
+    vec3 lightFromSuns = ubuf.colorPrimary.rgb   * gA
+                       + ubuf.colorSecondary.rgb * gB
+                       + ubuf.colorTertiary.rgb  * gC;
+
+    // Lattice mask: bright at hex centres, fading toward edges. Uses
+    // distNorm (radial position within the hex) so the bright zone has
+    // the rotational symmetry of a glowing dome.
+    float distNorm = length(local) / i;
+    float latticeMask = 1.0 - smoothstep(0.20, 0.98, distNorm);
+
+    // Neighbour-height leak model (inspired by the gnomon wallpaper):
+    // each hex is a flat matte-topped column at its own elevation.
+    // Light is at "ground level" beneath the field; it bleeds out
+    // from underneath each TALLER hex onto the rim of its shorter
+    // neighbour. So a hex's top is lit only on the edges where it
+    // borders a taller hex — direction and intensity per edge depend
+    // on which neighbour is taller and by how much. A hex with no
+    // taller neighbours is fully dark; a hex surrounded by taller
+    // ones is lit on every side. Per-hex height = noise(cellCenter).
+
+    float currentHeight = noise(cellCenter * 0.005);
+
+    // Neighbour layout (pointy-top tiling: each hex has 6 neighbours
+    // at distance 2i and angles 0°,60°,120°,180°,240°,300°). For the
+    // kth neighbour, edge-normal direction is (cos(k·60°), sin(k·60°))
+    // and the offset to the neighbour's centre is twice that. We
+    // compute these inline in the loop rather than via a const array
+    // so the shader stays compatible with GLSL ES 1.0 backends
+    // (which Qt RHI may target — const arrays would error there).
+
+    // Seam width: an always-on dark gap between adjacent hexes,
+    // representing the visible groove between column tops. hexBevel
+    // controls width. Floor at 1 px so it never disappears.
+    float seamWidth = max(0.5, ubuf.hexBevel * i * 0.04);
+
+    // Grazing-light model: the suns sit very close to the underside
+    // of the matte top, so light spills out from beneath taller
+    // neighbours at near-grazing angle. Brightness is peak at the
+    // seam itself and decays exponentially as it crosses the matte
+    // — matte absorption removes light per unit travel.
+    //
+    // matteness controls the decay length: 0 = light travels almost
+    // the full hex width before fading; 1 = light dies within a
+    // pixel or two of the seam. Peak intensity scales with the
+    // height differential — bigger steps expose more underside, so
+    // more light spills out.
+    //
+    // MAX (not sum) over the 6 neighbours so vertex overlaps don't
+    // double-brighten. Each fragment reads from its strongest
+    // neighbour leak.
+    float decayLength = mix(0.95, 0.04, ubuf.matteness) * i;
+
+    float totalIntensity = 0.0;
+    for (int k = 0; k < 6; k++) {
+        float ang = float(k) * PI3;
+        vec2 nDirK = vec2(cos(ang), sin(ang));
+        vec2 nCenter  = cellCenter + nDirK * 2.0 * i;
+        float nHeight = noise(nCenter * 0.005);
+
+        float perp = i - dot(local, nDirK);
+        float distInBody = max(0.0, perp - seamWidth);
+
+        if (nHeight > currentHeight + 0.005) {
+            // Shorter side — full leak. Peak scales with diff.
+            float diff = nHeight - currentHeight;
+            float peakI = clamp(diff * 4.0, 0.0, 1.0);
+            float thisI = peakI * exp(-distInBody / max(decayLength, 0.5));
+            totalIntensity = max(totalIntensity, thisI);
+        } else if (currentHeight > nHeight + 0.005) {
+            // Taller side — minimal bleed onto its own face (the hex
+            // is blocking most of the light). Same grazing model
+            // but with a much shorter decay and bleedBack scalar.
+            float diff = currentHeight - nHeight;
+            float peakI = clamp(diff * 4.0, 0.0, 1.0);
+            float thisI = peakI * exp(-distInBody / max(decayLength * 0.25, 0.5))
+                        * ubuf.bleedBack;
+            totalIntensity = max(totalIntensity, thisI);
+        }
+    }
+
+    float scalesMask = clamp(totalIntensity * ubuf.heightAmount, 0.0, 1.0);
+
+    // Sub-mode blend (lattice mode preserved unchanged).
+    float altMask = mix(latticeMask, scalesMask, ubuf.subModeAmount);
+
+    // On-body mask: 1 on the matte top, 0 inside the seam gap.
+    // fwidth-based transition gives screen-space-aware AA so the seam
+    // stays crisp without aliasing at any cellSize/zoom.
+    float aa = fwidth(distToEdge);
+    float onBody = smoothstep(seamWidth, seamWidth + aa, abs(distToEdge));
+
+    // Seam height-gating: the seam between two hexes only glows where
+    // those two hexes differ in height. Use the sextant bucket to pick
+    // out WHICH neighbour shares this fragment's edge, then check that
+    // specific neighbour's height differential. Same-height pairs read
+    // as a dark hairline; height-differential pairs glow with the sun
+    // colour that happens to be behind them. seamLit ramps from 0
+    // (matched heights) to 1 (clearly differing heights).
+    int kBucket = int(mod(bucket, 6.0));
+    float angB = float(kBucket) * PI3;
+    vec2 bucketDir = vec2(cos(angB), sin(angB));
+    vec2 bucketNCenter = cellCenter + bucketDir * 2.0 * i;
+    float bucketHeight = noise(bucketNCenter * 0.005);
+    float seamLit = smoothstep(0.02, 0.20, abs(bucketHeight - currentHeight));
+
+    // Subtle matte texture on the hex top. Noise in screen-space at a
+    // fine scale gives each top a barely-visible grain — enough to
+    // break the flat-color look without competing with the leak glow.
+    // Modulation amplitude scales gently with matteness.
+    float matteTex = 1.0 + (noise(px * 0.08) - 0.5) * 0.25 * ubuf.matteness;
+    vec3 bodyTopColor = ubuf.colorPrimaryContainer.rgb * matteTex;
+
+    // Composition: seam glows only at height-diff edges, body picks up
+    // directional leak from any taller neighbour (max-over-six, already
+    // computed above into altMask). seamGlow scales both seam and leak
+    // together so they brighten in lockstep.
+    vec3 seamColor = lightFromSuns * ubuf.seamGlow * seamLit;
+    float litWeight = altMask * ubuf.domeStrength;
+    vec3 surfaceColor = bodyTopColor
+                      + lightFromSuns * litWeight * ubuf.seamGlow;
+
+    vec3 finalColorAlt = mix(seamColor, surfaceColor, onBody);
+
+    // ── Mix 2D and alt (lattice/scales) modes ──────────────────────
+    vec3 finalColor = mix(finalColor2D, finalColorAlt, ubuf.modeAmount);
+    float a = mix(alpha2D, 1.0, ubuf.modeAmount);
 
     fragColor = vec4(finalColor * ubuf.intensity * ubuf.qt_Opacity,
                      a * ubuf.intensity * ubuf.qt_Opacity);

@@ -3,13 +3,22 @@
   "_schema": "Keys under .shader MUST match std140 uniform names in the .frag exactly. Keys under .harness drive QML behaviour (not GPU uniforms).",
   "shader": {
     "intensity": 1.0,
-    "cellSize": 14,
+    "cellSize": 26,
+    "modeAmount": 1.0,
+    "subModeAmount": 1.0,
+    "domeStrength": 1.0,
+    "seamGlow": 1.5,
+    "sunDriftSpeed": 1.0,
+    "heightAmount": 1.0,
+    "matteness": 0.70,
+    "bleedBack": 0.03,
+    "hexBevel": 0.6,
     "colorPrimary": "#5896E1",
     "colorSecondary": "#B711DB",
     "colorPrimaryContainer": "#170B55",
     "colorTertiary": "#39FF99"
   },
   "harness": {
-    "speed": 1.0
+    "speed": 2.9
   }
 }
