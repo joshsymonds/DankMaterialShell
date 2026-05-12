@@ -1427,6 +1427,8 @@ Singleton {
         switch (colorMode) {
         case "s":
             return surface;
+        case "scl":
+            return surfaceContainerLowest;
         case "sc":
             return surfaceContainer;
         case "sch":
