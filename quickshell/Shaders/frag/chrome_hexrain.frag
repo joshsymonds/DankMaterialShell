@@ -125,8 +125,11 @@ layout(std140, binding = 0) uniform buf {
     // layer, just elevation in the same shader.
     //
     //   enabled:    0 = pass through, > 0 = active.
-    //   anchor:     0 = top of each output, 1 = bottom.
-    //   thickness:  band height in pixels.
+    //   anchor:     0 = top, 1 = bottom, 2 = left, 3 = right edge of
+    //               each output. The strip is anchored to that edge,
+    //               extending `thickness` pixels inward.
+    //   thickness:  band size in pixels (height for top/bottom anchors,
+    //               width for left/right).
     //   elevation:  height-field bump added to cells inside the band.
     //               0.5 saturates the leak math, which gives max-glow
     //               seams + clean shadow casts onto neighbouring
@@ -309,16 +312,29 @@ float hexHeight(vec2 center, float time) {
 }
 
 // Bar-zone elevation bump for a cell at the given virtual-canvas
-// position. The bar is anchored to the top or bottom of THIS window
+// position. The bar is anchored to one of four edges of THIS window
 // (not virtual canvas) so each output has its own bar band. Returns
 // 0 when the bar is disabled or the cell sits outside the band.
+//   anchor 0 = top, 1 = bottom, 2 = left, 3 = right.
 float barElevationFor(vec2 worldPos) {
     if (ubuf.barZoneEnabled < 0.5) return 0.0;
-    // Map virtual-canvas Y back to window-local Y.
-    float localY = worldPos.y - ubuf.windowGeom.y;
+    // Map virtual-canvas position back to window-local.
+    vec2 local = worldPos - ubuf.windowGeom.xy;
+    int anchor = int(ubuf.barZoneAnchor + 0.5);
     // Distance from the anchored edge of this window.
-    float yFromAnchor = mix(localY, ubuf.windowGeom.w - localY, ubuf.barZoneAnchor);
-    return (yFromAnchor < ubuf.barZoneThickness) ? ubuf.barZoneElevation : 0.0;
+    float distFromEdge;
+    if      (anchor == 0) distFromEdge = local.y;                          // top
+    else if (anchor == 1) distFromEdge = ubuf.windowGeom.w - local.y;      // bottom
+    else if (anchor == 2) distFromEdge = local.x;                          // left
+    else                  distFromEdge = ubuf.windowGeom.z - local.x;      // right
+    // Bounds check matters for neighbour cells that fall outside this
+    // window's pixel rect (e.g. the leftmost bar-zone hex's left
+    // neighbour, which sits across the bezel in the next output's
+    // territory). Without this, distFromEdge can be negative and
+    // would falsely satisfy `< thickness`, elevating cells that
+    // don't belong to this output.
+    return (distFromEdge >= 0.0 && distFromEdge < ubuf.barZoneThickness)
+         ? ubuf.barZoneElevation : 0.0;
 }
 
 void main() {

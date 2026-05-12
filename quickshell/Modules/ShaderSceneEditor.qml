@@ -72,7 +72,7 @@ FloatingWindow {
         "fastBackSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
         "fastBackSunSpeed":    { min: 0.0, max: 1.0, step: 0.005 },
         "barZoneEnabled":   { min: 0, max: 1, step: 1 },
-        "barZoneAnchor":    { min: 0, max: 1, step: 1 },
+        "barZoneAnchor":    { min: 0, max: 3, step: 1 },
         "barZoneThickness": { min: 0, max: 300, step: 1 },
         "barZoneElevation": { min: 0.0, max: 2.0, step: 0.02 },
         "flipPropDelay":  { min: 0.0, max: 0.5, step: 0.005 },

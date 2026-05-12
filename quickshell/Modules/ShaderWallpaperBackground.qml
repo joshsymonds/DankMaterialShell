@@ -60,6 +60,17 @@ Variants {
         // Helpers: read a key from sceneData/sceneHarness with a fallback.
         function f(d, k, def) { return d[k] !== undefined ? d[k] : def; }
 
+        // Bar-zone activation is per-output: the scene's `barZoneScreens`
+        // array (if present and non-empty) lists the screen names where
+        // the elevated bar strip should appear. Other outputs see
+        // barZoneEnabled = 0 regardless of the scene's stored value.
+        // Empty/missing array = active on every output (legacy behaviour).
+        readonly property bool barZoneActiveHere: {
+            const screens = sceneData.barZoneScreens;
+            if (!screens || screens.length === 0) return true;
+            return screens.indexOf(modelData.name) !== -1;
+        }
+
         ChromeShader {
             anchors.fill: parent
             mode: "hexrain"
@@ -124,7 +135,9 @@ Variants {
             fastBackSunLifetime:     shaderWallpaperWindow.f(sceneData, "fastBackSunLifetime",    6.0)
             fastBackSunGap:          shaderWallpaperWindow.f(sceneData, "fastBackSunGap",         12.0)
             fastBackSunSpeed:        shaderWallpaperWindow.f(sceneData, "fastBackSunSpeed",       0.18)
-            barZoneEnabled:          shaderWallpaperWindow.f(sceneData, "barZoneEnabled",         0.0)
+            barZoneEnabled:          shaderWallpaperWindow.barZoneActiveHere
+                                      ? shaderWallpaperWindow.f(sceneData, "barZoneEnabled", 0.0)
+                                      : 0.0
             barZoneAnchor:           shaderWallpaperWindow.f(sceneData, "barZoneAnchor",          0.0)
             barZoneThickness:        shaderWallpaperWindow.f(sceneData, "barZoneThickness",       60.0)
             barZoneElevation:        shaderWallpaperWindow.f(sceneData, "barZoneElevation",       0.5)

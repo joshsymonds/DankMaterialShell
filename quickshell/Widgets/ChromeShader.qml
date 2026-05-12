@@ -120,8 +120,8 @@ Item {
     // seams and cast shadows onto surrounding wallpaper hexes.
     // Default off; the taskbar surface enables it on the wallpaper.
     property real barZoneEnabled: 0.0
-    property real barZoneAnchor: 0.0     // 0 = top, 1 = bottom
-    property real barZoneThickness: 60.0 // pixels
+    property real barZoneAnchor: 0.0     // 0 = top, 1 = bottom, 2 = left, 3 = right
+    property real barZoneThickness: 60.0 // pixels (height for top/bottom; width for left/right)
     property real barZoneElevation: 0.5  // height-field bump
 
     // Palette flip — staging colours + propagating-ripple parameters.
