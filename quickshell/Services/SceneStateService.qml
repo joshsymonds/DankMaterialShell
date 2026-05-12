@@ -1,6 +1,7 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
 
+import QtCore
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -18,7 +19,15 @@ import Quickshell.Io
 //   scenes.bar.data          — (future)
 //   ...
 //
-// File backing is one JSON per scene under quickshell/Shaders/scenes/.
+// Two-tier file backing per scene:
+//   - canonical: quickshell/Shaders/scenes/<name>.json — ships with DMS.
+//   - shadow:    $XDG_STATE_HOME/DankMaterialShell/scenes/<name>.json — writable.
+//
+// On load, shadow wins if present (so user edits persist across DMS
+// restarts even when DMS itself lives in a read-only path like /nix/store).
+// Saves always go to the shadow. To bless a shadow as canonical, copy
+// the shadow file into the DMS source's scene file and delete the
+// shadow.
 
 Singleton {
     id: root
@@ -37,6 +46,12 @@ Singleton {
     readonly property string scenesDir: {
         const u = Qt.resolvedUrl("../Shaders/scenes/").toString();
         return u.replace(/^file:\/\//, "");
+    }
+
+    // Writable shadow under XDG state. Saves go here; loads prefer it
+    // over the canonical when present.
+    readonly property string shadowDir: {
+        return StandardPaths.writableLocation(StandardPaths.GenericStateLocation) + "/DankMaterialShell/scenes/";
     }
 
     function get(name) {
@@ -100,8 +115,9 @@ Singleton {
 
     function save(name) {
         if (name === "wallpaper") {
-            wallpaperFileView.ourWrite = true;
-            wallpaperFileView.setText(_serialize("wallpaper"));
+            wallpaperShadowFileView.ourWrite = true;
+            wallpaperShadowFileView.setText(_serialize("wallpaper"));
+            paths = Object.assign({}, paths, withKey(name, wallpaperShadowFileView.path));
         }
         // Future scenes are added here as additional FileViews + cases.
         dirty = Object.assign({}, dirty, withKey(name, false));
@@ -109,21 +125,22 @@ Singleton {
 
     function saveAs(name, path) {
         if (name === "wallpaper") {
-            wallpaperFileView.ourWrite = true;
-            wallpaperFileView.path = path;
-            wallpaperFileView.setText(_serialize("wallpaper"));
+            wallpaperShadowFileView.ourWrite = true;
+            wallpaperShadowFileView.path = path;
+            wallpaperShadowFileView.setText(_serialize("wallpaper"));
             paths = Object.assign({}, paths, withKey(name, path));
         }
         dirty = Object.assign({}, dirty, withKey(name, false));
     }
 
-    // Hardcoded scene FileViews. To add a surface, declare a new
-    // FileView here pointing at its scene file and add a case in
-    // save() / saveAs() above.
+    // Shadow first. On load failure (shadow missing), fall back to
+    // canonical. After that, saves go to the shadow and we watch the
+    // shadow for external edits.
     FileView {
-        id: wallpaperFileView
-        path: root.scenesDir + "wallpaper.json"
+        id: wallpaperShadowFileView
+        path: root.shadowDir + "wallpaper.json"
         blockLoading: false
+        blockWrites: true
         watchChanges: true
         property bool ourWrite: false
         onFileChanged: {
@@ -138,7 +155,31 @@ Singleton {
                              j.harness || {},
                              path);
             } catch (e) {
-                console.warn("SceneStateService: parse error for wallpaper:", e.message);
+                console.warn("SceneStateService: parse error for wallpaper shadow:", e.message);
+            }
+        }
+        onLoadFailed: error => {
+            wallpaperCanonicalFileView.reload();
+        }
+    }
+
+    FileView {
+        id: wallpaperCanonicalFileView
+        path: root.scenesDir + "wallpaper.json"
+        blockLoading: false
+        watchChanges: false
+        onLoaded: {
+            try {
+                const j = JSON.parse(text());
+                // Even though we loaded from canonical, future saves
+                // go to the shadow — point "paths" at the shadow so
+                // the rest of the system uses it.
+                root._ingest("wallpaper",
+                             j.shader || {},
+                             j.harness || {},
+                             wallpaperShadowFileView.path);
+            } catch (e) {
+                console.warn("SceneStateService: parse error for wallpaper canonical:", e.message);
             }
         }
     }
