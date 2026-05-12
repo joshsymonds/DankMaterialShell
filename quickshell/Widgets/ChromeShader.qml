@@ -114,6 +114,16 @@ Item {
     property real fastBackSunGap: 12.0
     property real fastBackSunSpeed: 0.18
 
+    // Bar-zone elevation: raises hexes in a horizontal strip anchored
+    // to the top or bottom of each output. Feeds the height-leak
+    // model so the strip emerges as a raised platform with glowing
+    // seams and cast shadows onto surrounding wallpaper hexes.
+    // Default off; the taskbar surface enables it on the wallpaper.
+    property real barZoneEnabled: 0.0
+    property real barZoneAnchor: 0.0     // 0 = top, 1 = bottom
+    property real barZoneThickness: 60.0 // pixels
+    property real barZoneElevation: 0.5  // height-field bump
+
     // Palette flip — staging colours + propagating-ripple parameters.
     // While not flipping, the four Next colours should match the
     // four Current colours; the wave shows a visible transition only
@@ -191,6 +201,10 @@ Item {
         property real fastBackSunLifetime: root.fastBackSunLifetime
         property real fastBackSunGap: root.fastBackSunGap
         property real fastBackSunSpeed: root.fastBackSunSpeed
+        property real barZoneEnabled: root.barZoneEnabled
+        property real barZoneAnchor: root.barZoneAnchor
+        property real barZoneThickness: root.barZoneThickness
+        property real barZoneElevation: root.barZoneElevation
         property real flipOriginX: root.flipOriginX
         property real flipOriginY: root.flipOriginY
         property real flipStartTime: root.flipStartTime

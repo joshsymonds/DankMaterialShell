@@ -115,6 +115,28 @@ layout(std140, binding = 0) uniform buf {
     // so noise/hex tiling/sun positions all live in one shared space
     // even when split across outputs.
     vec4 windowGeom;
+    // Taskbar zone — a horizontal strip anchored to the top or bottom
+    // of EACH output (window-local, not virtual-canvas) whose hexes
+    // get an elevation bump fed into the existing height-leak model.
+    // The result is a raised hex platform that the DMS taskbar can
+    // sit on; seams between the platform and surrounding wallpaper
+    // hexes glow strongly and cast small shadows outward — solving
+    // the "hex on hex cutout" problem because there's no second hex
+    // layer, just elevation in the same shader.
+    //
+    //   enabled:    0 = pass through, > 0 = active.
+    //   anchor:     0 = top of each output, 1 = bottom.
+    //   thickness:  band height in pixels.
+    //   elevation:  height-field bump added to cells inside the band.
+    //               0.5 saturates the leak math, which gives max-glow
+    //               seams + clean shadow casts onto neighbouring
+    //               wallpaper hexes. Drop below 0.15 for an
+    //               almost-invisible bump; raise above 1.0 for a
+    //               cartoonish cliff.
+    float barZoneEnabled;
+    float barZoneAnchor;
+    float barZoneThickness;
+    float barZoneElevation;
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -284,6 +306,19 @@ float hexHeight(vec2 center, float time) {
     float period = 12.0 + hash(center * 0.07 + vec2(13.7, 27.3)) * 24.0;
     float drift = sin(time * TWO_PI / period * ubuf.heightDriftSpeed + phase) * 0.12;
     return base + drift;
+}
+
+// Bar-zone elevation bump for a cell at the given virtual-canvas
+// position. The bar is anchored to the top or bottom of THIS window
+// (not virtual canvas) so each output has its own bar band. Returns
+// 0 when the bar is disabled or the cell sits outside the band.
+float barElevationFor(vec2 worldPos) {
+    if (ubuf.barZoneEnabled < 0.5) return 0.0;
+    // Map virtual-canvas Y back to window-local Y.
+    float localY = worldPos.y - ubuf.windowGeom.y;
+    // Distance from the anchored edge of this window.
+    float yFromAnchor = mix(localY, ubuf.windowGeom.w - localY, ubuf.barZoneAnchor);
+    return (yFromAnchor < ubuf.barZoneThickness) ? ubuf.barZoneElevation : 0.0;
 }
 
 void main() {
@@ -586,7 +621,8 @@ void main() {
     // taller neighbours is fully dark; a hex surrounded by taller
     // ones is lit on every side. Per-hex height = noise(cellCenter).
 
-    float currentHeight = hexHeight(cellCenter, ubuf.iTime);
+    float currentHeight = hexHeight(cellCenter, ubuf.iTime)
+                        + barElevationFor(cellCenter);
 
     // Neighbour layout (pointy-top tiling: each hex has 6 neighbours
     // at distance 2i and angles 0°,60°,120°,180°,240°,300°). For the
@@ -630,7 +666,8 @@ void main() {
         float ang = float(k) * PI3;
         vec2 nDirK = vec2(cos(ang), sin(ang));
         vec2 nCenter  = cellCenter + nDirK * 2.0 * i;
-        float nHeight = hexHeight(nCenter, ubuf.iTime);
+        float nHeight = hexHeight(nCenter, ubuf.iTime)
+                      + barElevationFor(nCenter);
 
         float perp = i - dot(local, nDirK);
         float distInBody = max(0.0, perp - seamWidth);

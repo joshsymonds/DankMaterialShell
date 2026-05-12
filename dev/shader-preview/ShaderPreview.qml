@@ -127,6 +127,10 @@ FloatingWindow {
         "fastBackSunLifetime": { min: 1.0, max: 60.0, step: 0.5 },
         "fastBackSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
         "fastBackSunSpeed":    { min: 0.0, max: 1.0, step: 0.005 },
+        "barZoneEnabled":   { min: 0, max: 1, step: 1 },
+        "barZoneAnchor":    { min: 0, max: 1, step: 1 },
+        "barZoneThickness": { min: 0, max: 300, step: 1 },
+        "barZoneElevation": { min: 0.0, max: 2.0, step: 0.02 },
         "flipPropDelay":  { min: 0.0, max: 0.5, step: 0.005 },
         "flipDuration":   { min: 0.05, max: 3.0, step: 0.05 },
         "depthShading":   { min: 0.0, max: 1.0, step: 0.01 },
@@ -164,6 +168,9 @@ FloatingWindow {
         { name: "fast back sun", keys: [
             "fastBackSunStrength", "fastBackSunSize",
             "fastBackSunLifetime", "fastBackSunGap", "fastBackSunSpeed"
+        ] },
+        { name: "bar zone", keys: [
+            "barZoneEnabled", "barZoneAnchor", "barZoneThickness", "barZoneElevation"
         ] },
         { name: "colors", keys: [
             "colorPrimary", "colorSecondary", "colorPrimaryContainer", "colorTertiary"
@@ -1131,6 +1138,10 @@ FloatingWindow {
         property real fastBackSunLifetime: 6.0
         property real fastBackSunGap: 12.0
         property real fastBackSunSpeed: 0.18
+        property real barZoneEnabled: 0.0
+        property real barZoneAnchor: 0.0
+        property real barZoneThickness: 60.0
+        property real barZoneElevation: 0.5
         property real flipOriginX: 0.0
         property real flipOriginY: 0.0
         // Sentinel = far-future iTime. Per-hex flip phase math gives

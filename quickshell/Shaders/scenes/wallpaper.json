@@ -32,10 +32,10 @@
     "backNegSunSpeed": 0.02,
     "backSunPaletteSpeed": 0.5,
     "frontSunPaletteSpeed": 0.5,
-    "backSunCount": 3,
-    "backNegSunCount": 2,
-    "frontSunCount": 2,
-    "frontNegSunCount": 2,
+    "backSunCount": 5,
+    "backNegSunCount": 3,
+    "frontSunCount": 3,
+    "frontNegSunCount": 3,
     "frontNegSunStrength": 0.3,
     "frontNegSunSize": 0.43,
     "frontNegSunLifetime": 30,
@@ -46,6 +46,10 @@
     "fastBackSunLifetime": 18.5,
     "fastBackSunGap": 3.5,
     "fastBackSunSpeed": 0.33,
+    "barZoneEnabled": 0.0,
+    "barZoneAnchor": 0.0,
+    "barZoneThickness": 60.0,
+    "barZoneElevation": 0.5,
     "colorPrimary": "#5897e2",
     "colorSecondary": "#b711db",
     "colorPrimaryContainer": "#171556",
@@ -64,6 +68,6 @@
     "hexDepth": 0.7
   },
   "harness": {
-    "speed": 0.1
+    "speed": 0.8500000000000001
   }
 }
