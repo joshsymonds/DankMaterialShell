@@ -26,8 +26,24 @@ Singleton {
         return 1.0;
     }
 
+    // Target wallpaper refresh rate. The hexrain effect is slow ambient
+    // drift — running it at the monitor's full vsync (144Hz+) is wasted
+    // GPU. At 30Hz the motion is visually indistinguishable but the
+    // fragment shader runs ~5x less often on a high-refresh panel.
+    // The accumulator below batches frameTime so iTime advances in
+    // ~targetInterval chunks, which is what triggers the QSG redraw.
+    property real targetFps: 30.0
+    readonly property real targetInterval: 1.0 / targetFps
+    property real _accum: 0
+
     FrameAnimation {
         running: true
-        onTriggered: root.iTime += frameTime * root.speed
+        onTriggered: {
+            root._accum += frameTime;
+            if (root._accum >= root.targetInterval) {
+                root.iTime += root._accum * root.speed;
+                root._accum = 0;
+            }
+        }
     }
 }
