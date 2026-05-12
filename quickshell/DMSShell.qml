@@ -80,7 +80,11 @@ Item {
 
     // In-DMS scene editor — floating window. Edits flow into
     // SceneStateService and rebind the wallpaper instantly.
-    ShaderSceneEditor {}
+    // Currently disabled in production — re-enable when an IPC toggle
+    // wires a niri keybinding to show/hide on demand (the editor
+    // can't usefully persist its edits when scene files are
+    // nix-managed read-only anyway).
+    // ShaderSceneEditor {}
 
     DesktopWidgetLayer {}
 
