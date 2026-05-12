@@ -39,6 +39,23 @@ Item {
     property bool running: true
     property real cellSize: 14
 
+    // Time source. Default: internal FrameAnimation ticks `iTime` at
+    // `frameTime * speed` per frame. For multi-monitor wallpaper, set
+    // `autoTime: false` and bind `iTime` to a shared singleton so both
+    // outputs stay in lockstep across the bezel.
+    property real iTime: 0
+    property bool autoTime: true
+
+    // Virtual-canvas mode (multi-monitor wallpaper). When `virtualWidth`
+    // and `virtualHeight` are > 0, the shader treats them as iResolution
+    // — the size of the COMBINED canvas spanning all outputs. This
+    // window's own pixel slice is positioned via (windowOffsetX,
+    // windowOffsetY). Single-monitor consumers leave all four at 0.
+    property real virtualWidth: 0
+    property real virtualHeight: 0
+    property real windowOffsetX: 0
+    property real windowOffsetY: 0
+
     // Alt mode (chrome_hexrain). modeAmount=0 preserves the original
     // 2D matrix-rain bar look; modeAmount=1 switches to the
     // height-leak look driven by drifting point-light "suns" behind
@@ -74,6 +91,16 @@ Item {
     property real frontNegSunSize: 0.3
     property real frontNegSunSpeed: 1.0
 
+    // Fast back sun — a single light that streaks horizontally on a
+    // sin-wave path behind the hexes, independent of the slow back
+    // suns. Strength = 0 disables. frequency = appearances/sec
+    // (horizontal sweep rate); speed = wobble Hz (vertical sine rate).
+    property real fastBackSunStrength: 0.0
+    property real fastBackSunSize: 0.18
+    property real fastBackSunFrequency: 0.3
+    property real fastBackSunSpeed: 1.0
+    property real fastBackSunPaletteSpeed: 1.0
+
     // Palette flip — staging colours + propagating-ripple parameters.
     // While not flipping, the four Next colours should match the
     // four Current colours; the wave shows a visible transition only
@@ -106,7 +133,7 @@ Item {
         id: shaderEffect
         anchors.fill: parent
 
-        property real iTime: 0
+        property real iTime: root.iTime
         property real intensity: root.intensity
         property real cellSize: root.cellSize
         property real modeAmount: root.modeAmount
@@ -137,6 +164,11 @@ Item {
         property real frontNegSunStrength: root.frontNegSunStrength
         property real frontNegSunSize: root.frontNegSunSize
         property real frontNegSunSpeed: root.frontNegSunSpeed
+        property real fastBackSunStrength: root.fastBackSunStrength
+        property real fastBackSunSize: root.fastBackSunSize
+        property real fastBackSunFrequency: root.fastBackSunFrequency
+        property real fastBackSunSpeed: root.fastBackSunSpeed
+        property real fastBackSunPaletteSpeed: root.fastBackSunPaletteSpeed
         property real flipOriginX: root.flipOriginX
         property real flipOriginY: root.flipOriginY
         property real flipStartTime: root.flipStartTime
@@ -145,7 +177,22 @@ Item {
         property real depthShading: root.depthShading
         property real flipSpecular: root.flipSpecular
         property real hexDepth: root.hexDepth
-        property vector3d iResolution: Qt.vector3d(width, height, 1)
+        // iResolution = the canvas the shader thinks it's painting on.
+        // For single-monitor surfaces this is just the local size; for
+        // the multi-monitor wallpaper it's the combined bounding box of
+        // all outputs (so sun centres, drift radii, hex tiling, and the
+        // flip wave all live in one continuous space).
+        property vector3d iResolution: Qt.vector3d(
+            root.virtualWidth  > 0 ? root.virtualWidth  : width,
+            root.virtualHeight > 0 ? root.virtualHeight : height,
+            1)
+        // xy = this window's top-left in the virtual canvas; zw = this
+        // window's actual pixel size. The frag computes
+        //   px = qt_TexCoord0 * windowGeom.zw + windowGeom.xy
+        // so each output renders the correct slice of one shared field.
+        property vector4d windowGeom: Qt.vector4d(
+            root.windowOffsetX, root.windowOffsetY,
+            width, height)
         property vector4d colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
         property vector4d colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)
         property vector4d colorPrimaryContainer: Qt.vector4d(root.primaryContainerColor.r, root.primaryContainerColor.g, root.primaryContainerColor.b, root.primaryContainerColor.a)
@@ -170,7 +217,7 @@ Item {
     }
 
     FrameAnimation {
-        running: root.running
-        onTriggered: shaderEffect.iTime += frameTime * root.speed
+        running: root.running && root.autoTime
+        onTriggered: root.iTime += frameTime * root.speed
     }
 }

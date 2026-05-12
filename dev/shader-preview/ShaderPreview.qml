@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Qt.labs.folderlistmodel
 import Quickshell
 import Quickshell.Io
 
@@ -43,15 +44,32 @@ FloatingWindow {
         if (!u.endsWith("/")) u += "/";
         return u;
     }
-    readonly property string uniformsPath: harnessDir + "uniforms.json"
+    // Default paths point at the production scenes/ directory in the
+    // DMS repo so dev edits ARE the production scene state — saving
+    // here updates what the live wallpaper / bar / popouts render.
+    property string activePath: harnessDir + "../../quickshell/Shaders/scenes/wallpaper.json"
+    property string targetPath: harnessDir + "../../quickshell/Shaders/scenes/wallpaper-alt.json"
     readonly property string qsbPath: harnessDir + "../../quickshell/Shaders/qsb/chrome_hexrain.frag.qsb"
 
     // ===== Live state =====
 
-    // Mirrors the on-disk JSON. Updated on file load AND on slider/color
-    // changes from the panel; persisted back to disk via Save.
+    // Editable state — drives panel sliders + GPU uniforms. Save
+    // writes this to activePath; Flip tweens it toward targetSceneData.
     property var shaderState: ({})
     property var harnessState: ({})
+    // Last-parsed contents of each on-disk scene file. activeSceneData
+    // is the disk's view of what shaderState should be (Save updates
+    // this to match shaderState). targetSceneData is the destination
+    // for the next flip.
+    property var activeSceneData: ({})
+    property var targetSceneData: ({})
+
+    // Filename helper (just the basename, no directory).
+    function basename(p) {
+        if (!p) return "";
+        const i = p.lastIndexOf("/");
+        return (i >= 0) ? p.substring(i + 1) : p;
+    }
 
     // True when the in-memory state diverges from disk. Drives the Save
     // button label so the user knows they have unsaved changes.
@@ -95,6 +113,11 @@ FloatingWindow {
         "frontNegSunStrength": { min: 0.0, max: 1.0, step: 0.01 },
         "frontNegSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
         "frontNegSunSpeed":    { min: 0.0, max: 12.0, step: 0.1 },
+        "fastBackSunStrength":     { min: 0.0, max: 3.0, step: 0.02 },
+        "fastBackSunSize":         { min: 0.02, max: 0.6, step: 0.005 },
+        "fastBackSunFrequency":    { min: 0.0, max: 2.0, step: 0.02 },
+        "fastBackSunSpeed":        { min: 0.0, max: 8.0, step: 0.05 },
+        "fastBackSunPaletteSpeed": { min: 0.0, max: 3.0, step: 0.02 },
         "flipPropDelay":  { min: 0.0, max: 0.5, step: 0.005 },
         "flipDuration":   { min: 0.05, max: 3.0, step: 0.05 },
         "depthShading":   { min: 0.0, max: 1.0, step: 0.01 },
@@ -126,12 +149,14 @@ FloatingWindow {
             "backNegSunCount", "backNegSunSize", "backNegSunStrength",
             "backNegSunSpeed"
         ] },
+        { name: "fast back sun", keys: [
+            "fastBackSunStrength", "fastBackSunSize", "fastBackSunFrequency",
+            "fastBackSunSpeed", "fastBackSunPaletteSpeed"
+        ] },
         { name: "colors", keys: [
             "colorPrimary", "colorSecondary", "colorPrimaryContainer", "colorTertiary"
         ] },
-        { name: "flip target", keys: [
-            "colorPrimaryNext", "colorSecondaryNext",
-            "colorPrimaryContainerNext", "colorTertiaryNext",
+        { name: "flip", keys: [
             "flipPropDelay", "flipDuration", "flipSpecular"
         ] },
         { name: "harness", keys: ["speed"] }
@@ -192,10 +217,16 @@ FloatingWindow {
 
     // Internal-state uniforms that should never appear as panel rows
     // even if they live in shaderState (so applyState pushes them).
+    // *Next colour keys are derived from the secondary preset, not
+    // user-edited, so they're hidden too.
     readonly property var hiddenKeys: ({
         "flipStartTime": true,
         "flipOriginX": true,
-        "flipOriginY": true
+        "flipOriginY": true,
+        "colorPrimaryNext":           true,
+        "colorSecondaryNext":         true,
+        "colorPrimaryContainerNext":  true,
+        "colorTertiaryNext":          true
     })
 
     function rebuildSections() {
@@ -243,15 +274,45 @@ FloatingWindow {
         expanded = next;
     }
 
-    // Palette flip — sets the wave origin to a random screen position,
-    // stamps flipStartTime with the current iTime, and arms a timer
-    // that commits the new body colour once the wave has passed every
-    // hex. Lockout while flipActive prevents mid-flip re-trigger from
-    // making the field discontinuous.
+    // Preset flip — kicks off the colour wave AND a per-frame
+    // parameter tween that interpolates every numeric uniform from
+    // the active preset to the target preset over the wave duration.
+    // After the wave commits, the target preset becomes active and
+    // future flips target what was the active preset (true A↔B).
     property bool flipActive: false
+    // Keys NOT tweened: the wave's own controls, flip state, and the
+    // colour pairs (which the shader handles via per-cell flip phase).
+    readonly property var noTweenKeys: ({
+        "flipStartTime":  true,
+        "flipOriginX":    true,
+        "flipOriginY":    true,
+        "flipPropDelay":  true,
+        "flipDuration":   true,
+        "colorPrimary":           true,
+        "colorSecondary":         true,
+        "colorPrimaryContainer":  true,
+        "colorTertiary":          true,
+        "colorPrimaryNext":           true,
+        "colorSecondaryNext":         true,
+        "colorPrimaryContainerNext":  true,
+        "colorTertiaryNext":          true
+    })
+    // Snapshot of the active preset at the moment flip was triggered.
+    // Used as the "from" side of the parameter tween.
+    property var flipFromSnapshot: ({})
+    property var flipTargetPreset: ({})
+    // Wave duration in iTime-seconds — drives the tween clock.
+    property real flipTweenDuration: 1.0
+    property real flipTweenStartITime: 0.0
 
     function triggerFlip() {
         if (flipActive) return;
+        const target = targetSceneData;
+        if (Object.keys(target).length === 0) {
+            console.warn("Trigger flip: target scene is empty — Browse to a scene file first.");
+            return;
+        }
+
         const w = shaderEffect.width;
         const h = shaderEffect.height;
         const ox = Math.random() * w;
@@ -262,27 +323,34 @@ FloatingWindow {
                        ? shaderState["flipDuration"] : 0.5;
         const cellSize = shaderState["cellSize"] !== undefined
                        ? shaderState["cellSize"] : 14;
-        // Worst-case hex distance from origin to the farthest corner.
         const maxDist = Math.sqrt(
             Math.max(ox, w - ox) * Math.max(ox, w - ox) +
             Math.max(oy, h - oy) * Math.max(oy, h - oy));
         const pitch = Math.max(cellSize * 1.7320508, 1.0);
-        // totalSec is in iTime-seconds (how long the wave takes to
-        // fully traverse, measured by the cell-flip phase math).
         const totalSec = (maxDist / pitch) * propDelay + duration;
-        // Wall-clock duration depends on the harness speed multiplier
-        // applied to iTime. If speed=0.5, iTime advances at half-rate
-        // and the wave takes 2× as long in real time. Without this
-        // correction the timer commits before the wave actually
-        // finishes — visible as the wave terminating abruptly when
-        // the leading edge is still on-screen.
         const speed = root.harnessState.speed !== undefined ? root.harnessState.speed : 1.0;
-        // Wall-clock = totalSec / speed seconds, + 200ms buffer.
-        // The buffer guarantees iTime is well past flipStartTime+totalSec
-        // when commit fires; without it, frame-timing jitter can leave
-        // the last few cells/suns at phase < 1, causing a visible snap
-        // when the palette swap and flipStartTime reset happen.
         const wallClockMs = totalSec * 1000.0 / Math.max(speed, 0.01) + 200.0;
+
+        // Snapshot the active preset so the tween has a stable "from" side
+        // even if external file changes come in mid-flip.
+        flipFromSnapshot = JSON.parse(JSON.stringify(shaderState));
+        flipTargetPreset = target;
+        flipTweenDuration = totalSec;
+        flipTweenStartITime = shaderEffect.iTime;
+
+        // Wire the shader's per-cell colour wave: Next colours come from
+        // the target preset; the shader's cellFlipPhase interpolates
+        // between current and Next as the wave passes each cell.
+        const colorKeys = [
+            "colorPrimary", "colorSecondary",
+            "colorPrimaryContainer", "colorTertiary"
+        ];
+        for (let i = 0; i < colorKeys.length; i++) {
+            const k = colorKeys[i];
+            if (target[k] !== undefined) {
+                shaderState[k + "Next"] = target[k];
+            }
+        }
 
         shaderState["flipOriginX"] = ox;
         shaderState["flipOriginY"] = oy;
@@ -290,53 +358,130 @@ FloatingWindow {
         shaderState = shaderState;
         applyState();
         flipActive = true;
+        flipTweenTimer.start();
         flipCommitTimer.interval = Math.max(50, wallClockMs);
         flipCommitTimer.start();
+    }
+
+    // Per-frame numeric tween. Lerps every non-color numeric key from
+    // the active-preset snapshot to the target preset over the wave's
+    // iTime duration. Counts get rounded; cellSize gets tweened (which
+    // re-tiles the field smoothly — slightly disorienting at large
+    // deltas but acceptable for transitions).
+    Timer {
+        id: flipTweenTimer
+        interval: 16
+        repeat: true
+        running: false
+        onTriggered: {
+            const elapsed = shaderEffect.iTime - root.flipTweenStartITime;
+            let t = elapsed / Math.max(root.flipTweenDuration, 0.001);
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            // Smoothstep for a gentler ease at both ends.
+            const tt = t * t * (3.0 - 2.0 * t);
+
+            const integerKeys = {
+                "backSunCount": true, "backNegSunCount": true,
+                "frontSunCount": true, "frontNegSunCount": true
+            };
+            for (const k in root.flipFromSnapshot) {
+                if (root.noTweenKeys[k]) continue;
+                if (!(k in root.flipTargetPreset)) continue;
+                const from = root.flipFromSnapshot[k];
+                const to   = root.flipTargetPreset[k];
+                if (typeof from !== "number" || typeof to !== "number") continue;
+                let v = from + (to - from) * tt;
+                if (integerKeys[k]) v = Math.round(v);
+                root.shaderState[k] = v;
+            }
+            root.shaderState = root.shaderState;
+            root.applyState();
+            if (t >= 1.0) flipTweenTimer.stop();
+        }
     }
 
     Timer {
         id: flipCommitTimer
         repeat: false
         onTriggered: {
-            // Swap all four Current/Next palette pairs so a successive
-            // Trigger flip click animates the field back to the
-            // previous colours rather than nothing. Both body tint
-            // AND sun palette entries get swapped now that the wave
-            // drives sun colours too (step 2).
-            const pairs = [
-                ["colorPrimary",          "colorPrimaryNext"],
-                ["colorSecondary",        "colorSecondaryNext"],
-                ["colorPrimaryContainer", "colorPrimaryContainerNext"],
-                ["colorTertiary",         "colorTertiaryNext"]
+            // Stop the tween (may have already finished naturally) and
+            // apply the target preset's values WHOLESALE so we end up
+            // exactly at the destination — no rounding drift.
+            flipTweenTimer.stop();
+            for (const k in root.flipTargetPreset) {
+                if (root.noTweenKeys[k]) continue;
+                root.shaderState[k] = root.flipTargetPreset[k];
+            }
+            // Apply target colours as the new "current". The shader's
+            // *Next slots already hold the target colours from the
+            // trigger; we copy them into "current" so the post-commit
+            // render (with flipStartTime reset → phase=0 → renders
+            // current) shows the target palette exactly.
+            const colorKeys = [
+                "colorPrimary", "colorSecondary",
+                "colorPrimaryContainer", "colorTertiary"
             ];
-            for (let i = 0; i < pairs.length; i++) {
-                const cur = root.shaderState[pairs[i][0]];
-                const nxt = root.shaderState[pairs[i][1]];
-                if (cur !== undefined && nxt !== undefined) {
-                    root.shaderState[pairs[i][0]] = nxt;
-                    root.shaderState[pairs[i][1]] = cur;
+            for (let i = 0; i < colorKeys.length; i++) {
+                const k = colorKeys[i];
+                if (root.flipTargetPreset[k] !== undefined) {
+                    root.shaderState[k] = root.flipTargetPreset[k];
                 }
             }
-            // Reset to the future sentinel so per-hex flip phase
-            // clamps back to 0 and the field renders the (newly
-            // committed) Current palette cleanly.
+            // Swap active and target scenes: what was active becomes
+            // the new target (so flipping again returns to it), and
+            // what was target becomes the new active. Both the file
+            // paths and the in-memory snapshots swap.
+            const oldActiveData = JSON.parse(JSON.stringify(root.activeSceneData));
+            const oldActivePath = root.activePath;
+            root.activeSceneData = JSON.parse(JSON.stringify(root.targetSceneData));
+            root.targetSceneData = oldActiveData;
+            root.activePath = root.targetPath;
+            root.targetPath = oldActivePath;
+
+            // Refresh *Next colours so the next flip has a real delta
+            // (Next = what we'd flip to = the new target).
+            for (let i = 0; i < colorKeys.length; i++) {
+                const k = colorKeys[i];
+                if (root.targetSceneData[k] !== undefined) {
+                    root.shaderState[k + "Next"] = root.targetSceneData[k];
+                }
+            }
+            // Reset wave state to idle.
             root.shaderState["flipStartTime"] = 1.0e9;
             root.shaderState = root.shaderState;
             root.applyState();
             root.rebuildSections();
             root.flipActive = false;
-            root.dirty = true;
+            root.dirty = false;
         }
     }
 
     function setValue(section, key, value) {
         const target = (section === "shader") ? shaderState : harnessState;
         target[key] = value;
-        // var properties don't deep-watch — re-assign to trigger bindings.
-        if (section === "shader") shaderState = shaderState;
-        else                      harnessState = harnessState;
+        // QML var properties don't fire change notifications on
+        // self-assignment when the reference is unchanged — bindings
+        // on shaderState[key] would not re-evaluate. Creating a new
+        // shallow copy gives a fresh reference and triggers every
+        // dependent binding (which is what makes the live colour
+        // swatch + hex field in the panel update during picker drags).
+        if (section === "shader") shaderState = Object.assign({}, target);
+        else                      harnessState = Object.assign({}, target);
         applyState();
         dirty = true;
+        // Auto-save with debounce so any DMS surface watching this
+        // scene file picks up the change ~100ms after the user stops
+        // moving the slider. Without debounce we'd thrash the disk
+        // during a drag.
+        autoSaveTimer.restart();
+    }
+
+    Timer {
+        id: autoSaveTimer
+        interval: 100
+        repeat: false
+        onTriggered: if (root.dirty) root.persist()
     }
 
     function persist() {
@@ -346,16 +491,435 @@ FloatingWindow {
             "shader": shaderState,
             "harness": harnessState
         };
-        uniformsView.ourWrite = true;
-        uniformsView.setText(JSON.stringify(obj, null, 2) + "\n");
+        const text = JSON.stringify(obj, null, 2) + "\n";
+        activeView.ourWrite = true;
+        activeView.setText(text);
+        activeSceneData = JSON.parse(JSON.stringify(shaderState));
+        dirty = false;
+    }
+
+    // Save the current state to a new file path. Used by Save As.
+    function persistAs(newPath) {
+        // Repointing activeView's path causes it to reload from the new
+        // file IF that file already exists. To avoid that, write first
+        // (which creates/overwrites), then update activePath.
+        const obj = {
+            "_comment": "Live-reloaded by ShaderPreview.qml. Edit + save here, or use the in-window panel and click Save.",
+            "_schema": "Keys under .shader MUST match std140 uniform names in the .frag exactly. Keys under .harness drive QML behaviour (not GPU uniforms).",
+            "shader": shaderState,
+            "harness": harnessState
+        };
+        const text = JSON.stringify(obj, null, 2) + "\n";
+        // Mark our-write before changing path so the resulting load is silent.
+        activeView.ourWrite = true;
+        root.activePath = newPath;
+        activeView.setText(text);
+        activeSceneData = JSON.parse(JSON.stringify(shaderState));
         dirty = false;
     }
 
     // ===== File watchers =====
 
+    // ===== Colour picker =====
+    //
+    // Pure-QML HSV picker — native QtQuick.Dialogs.ColorDialog would
+    // crash Quickshell the same way the file dialog does (portal
+    // handshake). Saturation/Value box on the left, vertical hue
+    // slider on the right, hex field at the bottom. Updates are
+    // live: drag → shaderState[key] updates immediately.
+
+    function _hexFromRgb(r, g, b) {
+        const to = function (x) {
+            let v = Math.round(Math.max(0, Math.min(1, x)) * 255);
+            const s = v.toString(16);
+            return s.length === 1 ? "0" + s : s;
+        };
+        return "#" + to(r) + to(g) + to(b);
+    }
+
+    function _hsvToRgb(h, s, v) {
+        h = ((h % 360) + 360) % 360;
+        const c = v * s;
+        const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+        const m = v - c;
+        let r=0, g=0, b=0;
+        if      (h < 60)  { r = c; g = x; b = 0; }
+        else if (h < 120) { r = x; g = c; b = 0; }
+        else if (h < 180) { r = 0; g = c; b = x; }
+        else if (h < 240) { r = 0; g = x; b = c; }
+        else if (h < 300) { r = x; g = 0; b = c; }
+        else              { r = c; g = 0; b = x; }
+        return { r: r + m, g: g + m, b: b + m };
+    }
+
+    function _rgbToHsv(r, g, b) {
+        const mx = Math.max(r, g, b);
+        const mn = Math.min(r, g, b);
+        const d  = mx - mn;
+        let h = 0;
+        if (d > 0.0001) {
+            if      (mx === r) h = (((g - b) / d) % 6);
+            else if (mx === g) h = ((b - r) / d) + 2;
+            else               h = ((r - g) / d) + 4;
+            h *= 60;
+            if (h < 0) h += 360;
+        }
+        const s = mx === 0 ? 0 : d / mx;
+        return { h: h, s: s, v: mx };
+    }
+
+    Popup {
+        id: colorPicker
+        anchors.centerIn: Overlay.overlay
+        width: 380
+        height: 320
+        modal: true
+        focus: true
+
+        property string editingSection: "shader"
+        property string editingKey: ""
+        // Working HSV state. Bound to UI; pushing to shaderState happens
+        // each time h/s/v changes so the field updates live.
+        property real h: 0
+        property real s: 0
+        property real v: 1
+
+        function openFor(sec, key, hexValue) {
+            editingSection = sec;
+            editingKey = key;
+            const c = Qt.color(hexValue);
+            const hsv = root._rgbToHsv(c.r, c.g, c.b);
+            h = hsv.h; s = hsv.s; v = hsv.v;
+            open();
+        }
+
+        function pushColor() {
+            const rgb = root._hsvToRgb(h, s, v);
+            const hex = root._hexFromRgb(rgb.r, rgb.g, rgb.b);
+            root.setValue(editingSection, editingKey, hex);
+        }
+        onHChanged: pushColor()
+        onSChanged: pushColor()
+        onVChanged: pushColor()
+
+        background: Rectangle {
+            color: "#1a1a1a"
+            border.color: "#505050"
+            border.width: 1
+            radius: 4
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 8
+
+            Text {
+                Layout.fillWidth: true
+                color: "#cfcfcf"
+                font.family: "monospace"
+                font.pixelSize: 12
+                font.bold: true
+                text: "edit: " + colorPicker.editingKey
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 10
+
+                // Saturation × Value box. Two stacked gradients give the
+                // proper HSV space: horizontal white→hue, then vertical
+                // transparent→black overlay. A small marker dot shows
+                // the current (s,v) position. Click+drag updates s,v.
+                Item {
+                    id: svBox
+                    Layout.preferredWidth: 220
+                    Layout.fillHeight: true
+
+                    Rectangle {
+                        anchors.fill: parent
+                        gradient: Gradient {
+                            orientation: Gradient.Horizontal
+                            GradientStop { position: 0.0; color: "white" }
+                            GradientStop {
+                                position: 1.0
+                                color: {
+                                    const rgb = root._hsvToRgb(colorPicker.h, 1.0, 1.0);
+                                    return root._hexFromRgb(rgb.r, rgb.g, rgb.b);
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        anchors.fill: parent
+                        gradient: Gradient {
+                            GradientStop { position: 0.0; color: "transparent" }
+                            GradientStop { position: 1.0; color: "black" }
+                        }
+                    }
+
+                    // Position marker
+                    Rectangle {
+                        width: 10; height: 10; radius: 5
+                        color: "transparent"
+                        border.color: "#ffffff"
+                        border.width: 2
+                        x: colorPicker.s * (svBox.width - width)
+                        y: (1.0 - colorPicker.v) * (svBox.height - height)
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.CrossCursor
+                        function update(mx, my) {
+                            colorPicker.s = Math.max(0, Math.min(1, mx / svBox.width));
+                            colorPicker.v = Math.max(0, Math.min(1, 1.0 - my / svBox.height));
+                        }
+                        onPressed:         function (e) { update(e.x, e.y); }
+                        onPositionChanged: function (e) { update(e.x, e.y); }
+                    }
+                }
+
+                // Hue slider (vertical rainbow).
+                Item {
+                    id: hueBox
+                    Layout.preferredWidth: 28
+                    Layout.fillHeight: true
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 3
+                        gradient: Gradient {
+                            GradientStop { position: 0.0;       color: "#ff0000" }
+                            GradientStop { position: 0.1666667; color: "#ffff00" }
+                            GradientStop { position: 0.3333333; color: "#00ff00" }
+                            GradientStop { position: 0.5;       color: "#00ffff" }
+                            GradientStop { position: 0.6666667; color: "#0000ff" }
+                            GradientStop { position: 0.8333333; color: "#ff00ff" }
+                            GradientStop { position: 1.0;       color: "#ff0000" }
+                        }
+                    }
+                    // Position marker
+                    Rectangle {
+                        width: parent.width + 4; height: 3
+                        x: -2
+                        y: (colorPicker.h / 360.0) * (hueBox.height - height)
+                        color: "#ffffff"
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.SizeVerCursor
+                        function update(my) {
+                            colorPicker.h = Math.max(0, Math.min(360,
+                                (my / hueBox.height) * 360));
+                        }
+                        onPressed:         function (e) { update(e.y); }
+                        onPositionChanged: function (e) { update(e.y); }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Rectangle {
+                    Layout.preferredWidth: 36
+                    Layout.preferredHeight: 22
+                    radius: 3
+                    color: {
+                        const rgb = root._hsvToRgb(colorPicker.h, colorPicker.s, colorPicker.v);
+                        return root._hexFromRgb(rgb.r, rgb.g, rgb.b);
+                    }
+                    border.color: "#505050"
+                    border.width: 1
+                }
+
+                TextField {
+                    id: hexInputInPicker
+                    Layout.fillWidth: true
+                    font.family: "monospace"; font.pixelSize: 12
+                    text: {
+                        const rgb = root._hsvToRgb(colorPicker.h, colorPicker.s, colorPicker.v);
+                        return root._hexFromRgb(rgb.r, rgb.g, rgb.b);
+                    }
+                    selectByMouse: true
+                    validator: RegularExpressionValidator {
+                        regularExpression: /^#[0-9a-fA-F]{6}$/
+                    }
+                    onEditingFinished: {
+                        if (acceptableInput) {
+                            const c = Qt.color(text);
+                            const hsv = root._rgbToHsv(c.r, c.g, c.b);
+                            colorPicker.h = hsv.h;
+                            colorPicker.s = hsv.s;
+                            colorPicker.v = hsv.v;
+                        }
+                    }
+                }
+
+                Button {
+                    text: "Done"
+                    onClicked: colorPicker.close()
+                }
+            }
+        }
+    }
+
+    // ===== Scene file browser =====
+    //
+    // Native FileDialog (QtQuick.Dialogs or Qt.labs.platform) crashes
+    // inside Quickshell because there's no full QCoreApplication and
+    // the xdg-desktop-portal handshake fails. So we build our own:
+    // a FolderListModel scans for *.json scenes in harnessDir and a
+    // single Popup shows them as a clickable list. The popup is
+    // re-purposed for Open/Browse/Save-As via its `mode` and `onChoose`
+    // callback.
+
+    FolderListModel {
+        id: scenesModel
+        folder: "file://" + root.harnessDir
+        nameFilters: ["*.json"]
+        showDirs: false
+        sortField: FolderListModel.Name
+    }
+
+    Popup {
+        id: scenePicker
+        anchors.centerIn: Overlay.overlay
+        width: 480
+        height: 360
+        modal: true
+        focus: true
+        // mode = "openActive" | "openTarget" | "saveAs"
+        property string mode: "openActive"
+
+        background: Rectangle {
+            color: "#1a1a1a"
+            border.color: "#505050"
+            border.width: 1
+            radius: 4
+        }
+
+        function openFor(m) { mode = m; nameField.text = ""; open(); }
+
+        function pick(path) {
+            if (mode === "openActive") {
+                root.activePath = path;
+            } else if (mode === "openTarget") {
+                root.targetPath = path;
+            } else if (mode === "saveAs") {
+                // Path already a full path here (clicked an existing file
+                // would overwrite that file; using the text field is the
+                // way to save under a new name).
+                root.persistAs(path);
+            }
+            scenePicker.close();
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 8
+
+            Text {
+                Layout.fillWidth: true
+                color: "#cfcfcf"
+                font.family: "monospace"
+                font.pixelSize: 12
+                font.bold: true
+                text: {
+                    if (scenePicker.mode === "openActive") return "Open scene (active)";
+                    if (scenePicker.mode === "openTarget") return "Choose flip target";
+                    return "Save scene as…";
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                color: "#808080"
+                font.family: "monospace"
+                font.pixelSize: 10
+                text: root.harnessDir
+                elide: Text.ElideMiddle
+            }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+
+                ListView {
+                    id: filesList
+                    model: scenesModel
+                    spacing: 1
+
+                    delegate: Rectangle {
+                        width: ListView.view.width
+                        height: 26
+                        color: rowMA.containsMouse ? "#303030" : "transparent"
+
+                        Text {
+                            anchors.left: parent.left
+                            anchors.leftMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: "#cfcfcf"
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            text: fileName
+                        }
+                        MouseArea {
+                            id: rowMA
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                const fp = filePath.toString().replace(/^file:\/\//, "");
+                                if (scenePicker.mode === "saveAs") {
+                                    // Save As: clicking an existing file fills its
+                                    // name into the text field rather than saving
+                                    // immediately (avoids surprise overwrites).
+                                    nameField.text = fileName;
+                                } else {
+                                    scenePicker.pick(fp);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Filename input — primary entry for Save As, also used as
+            // a "type a path" fallback for Open.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 4
+
+                TextField {
+                    id: nameField
+                    Layout.fillWidth: true
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    placeholderText: scenePicker.mode === "saveAs"
+                                   ? "new-scene-name.json"
+                                   : "filename.json"
+                }
+                Button {
+                    text: scenePicker.mode === "saveAs" ? "Save" : "Open"
+                    enabled: nameField.text.length > 0
+                    onClicked: {
+                        const fp = root.harnessDir + nameField.text;
+                        scenePicker.pick(fp);
+                    }
+                }
+                Button {
+                    text: "Cancel"
+                    onClicked: scenePicker.close()
+                }
+            }
+        }
+    }
+
     FileView {
-        id: uniformsView
-        path: root.uniformsPath
+        id: activeView
+        path: root.activePath
         blockLoading: false
         watchChanges: true
 
@@ -373,18 +937,47 @@ FloatingWindow {
         onLoaded: {
             try {
                 const j = JSON.parse(text());
-                root.shaderState  = j.shader  || {};
+                root.activeSceneData = j.shader || {};
+                root.shaderState  = JSON.parse(JSON.stringify(j.shader  || {}));
                 root.harnessState = j.harness || {};
                 root.applyState();
                 root.rebuildSections();
                 root.uniformsRev += 1;
                 root.dirty = false;
             } catch (e) {
-                console.warn("uniforms.json parse error:", e.message);
+                console.warn("active scene parse error:", e.message);
             }
         }
         onSaveFailed: function (err) {
-            console.warn("uniforms.json save failed:", err);
+            console.warn("active scene save failed:", err);
+        }
+    }
+
+    FileView {
+        id: targetView
+        path: root.targetPath
+        blockLoading: false
+        watchChanges: true
+
+        property bool ourWrite: false
+
+        onFileChanged: {
+            if (ourWrite) {
+                ourWrite = false;
+                return;
+            }
+            reload();
+        }
+        onLoaded: {
+            try {
+                const j = JSON.parse(text());
+                root.targetSceneData = j.shader || {};
+            } catch (e) {
+                console.warn("target scene parse error:", e.message);
+            }
+        }
+        onSaveFailed: function (err) {
+            console.warn("target scene save failed:", err);
         }
     }
 
@@ -512,6 +1105,11 @@ FloatingWindow {
         property real frontNegSunStrength: 0.7
         property real frontNegSunSize: 0.3
         property real frontNegSunSpeed: 1.0
+        property real fastBackSunStrength: 0.0
+        property real fastBackSunSize: 0.18
+        property real fastBackSunFrequency: 0.3
+        property real fastBackSunSpeed: 1.0
+        property real fastBackSunPaletteSpeed: 1.0
         property real flipOriginX: 0.0
         property real flipOriginY: 0.0
         // Sentinel = far-future iTime. Per-hex flip phase math gives
@@ -526,6 +1124,9 @@ FloatingWindow {
         property real flipSpecular: 0.8
         property real hexDepth: 0.7
         property vector3d iResolution: Qt.vector3d(width, height, 1)
+        // Single-window preview: xy offset = 0, zw = full window size,
+        // so the new frag formula reduces to qt_TexCoord0 * iResolution.
+        property vector4d windowGeom: Qt.vector4d(0, 0, width, height)
         property vector4d colorPrimary:           Qt.vector4d(0.345, 0.588, 0.882, 1.0)
         property vector4d colorSecondary:         Qt.vector4d(0.718, 0.067, 0.859, 1.0)
         property vector4d colorPrimaryContainer:  Qt.vector4d(0.090, 0.043, 0.333, 1.0)
@@ -634,18 +1235,70 @@ FloatingWindow {
 
                 Item { Layout.fillHeight: true; Layout.minimumHeight: 12 }
 
-                Button {
+                // Scene file controls (Open / Save / Save As for active).
+                RowLayout {
                     Layout.fillWidth: true
-                    text: root.flipActive ? "flipping…" : "Trigger flip"
-                    enabled: !root.flipActive
-                    onClicked: root.triggerFlip()
+                    spacing: 4
+
+                    Text {
+                        Layout.fillWidth: true
+                        color: "#cfcfcf"
+                        font.family: "monospace"
+                        font.pixelSize: 10
+                        text: "editing: " + root.basename(root.activePath) + (root.dirty ? "  •" : "")
+                        elide: Text.ElideMiddle
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    Button {
+                        Layout.fillWidth: true
+                        text: "Open…"
+                        onClicked: scenePicker.openFor("openActive")
+                    }
+                    Button {
+                        Layout.fillWidth: true
+                        text: "Save"
+                        enabled: root.dirty
+                        onClicked: root.persist()
+                    }
+                    Button {
+                        Layout.fillWidth: true
+                        text: "Save as…"
+                        onClicked: scenePicker.openFor("saveAs")
+                    }
+                }
+
+                // Target scene + flip controls.
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    Text {
+                        Layout.fillWidth: true
+                        color: "#9090b0"
+                        font.family: "monospace"
+                        font.pixelSize: 10
+                        text: "target: " + root.basename(root.targetPath)
+                        elide: Text.ElideMiddle
+                    }
+                    Button {
+                        text: "Browse…"
+                        onClicked: scenePicker.openFor("openTarget")
+                    }
                 }
 
                 Button {
                     Layout.fillWidth: true
-                    text: root.dirty ? "Save uniforms.json  •" : "Save uniforms.json"
-                    enabled: root.dirty
-                    onClicked: root.persist()
+                    text: {
+                        if (root.flipActive) return "flipping…";
+                        return "Flip → " + root.basename(root.targetPath);
+                    }
+                    enabled: !root.flipActive
+                    onClicked: root.triggerFlip()
                 }
             }
         }
@@ -694,17 +1347,34 @@ FloatingWindow {
             readonly property var d: parent.d
             spacing: 6
 
-            // Track external changes (e.g. JSON edited in editor) → text field.
-            // Hex parsing is on text edit; bad input shows red border.
-            property string committed: d.value
+            // Live-bound to shaderState[d.key] so picker drags update
+            // the swatch and hex field instantly. The binding
+            // re-evaluates each time setValue() reassigns shaderState
+            // (which is how the picker pushes its updates).
+            readonly property string liveValue: {
+                const v = root.shaderState[d.key];
+                return (v && typeof v === "string") ? v : d.value;
+            }
+            readonly property bool liveValid: /^#[0-9a-fA-F]{6}$/.test(liveValue)
 
+            // Clickable swatch — opens the colour-picker popup configured
+            // to edit this row's key.
             Rectangle {
                 Layout.preferredWidth: 28
                 Layout.preferredHeight: 22
                 radius: 3
-                color: input.acceptableInput ? input.text : "#202020"
-                border.color: input.acceptableInput ? "#505050" : "#cc4040"
+                color: liveValid ? liveValue : "#202020"
+                border.color: swatchMA.containsMouse
+                            ? "#a0a0a0"
+                            : (liveValid ? "#505050" : "#cc4040")
                 border.width: 1
+                MouseArea {
+                    id: swatchMA
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: colorPicker.openFor(d.section, d.key, liveValue)
+                }
             }
 
             Text {
@@ -718,9 +1388,12 @@ FloatingWindow {
                 id: input
                 Layout.fillWidth: true
                 font.family: "monospace"; font.pixelSize: 12
-                text: d.value
+                // Bind to liveValue but DON'T overwrite while user is
+                // actively focused (else mid-typing edits get clobbered
+                // by external picker updates). Read-only sync handled
+                // by the Binding-when-not-focused block below.
+                text: liveValue
                 selectByMouse: true
-                // QtQuick.Controls TextField has acceptableInput driven by validator.
                 validator: RegularExpressionValidator {
                     regularExpression: /^#[0-9a-fA-F]{6}$/
                 }

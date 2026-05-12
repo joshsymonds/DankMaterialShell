@@ -71,7 +71,16 @@ Item {
         sourceComponent: BlurredWallpaperBackground {}
     }
 
-    WallpaperBackground {}
+    // WallpaperBackground {}   // image/colour wallpaper — disabled while iterating
+
+    // Shader-driven wallpaper layer. Reads uniforms from
+    // SceneStateService singleton; replaces WallpaperBackground while
+    // we're tuning the look.
+    ShaderWallpaperBackground {}
+
+    // In-DMS scene editor — floating window. Edits flow into
+    // SceneStateService and rebind the wallpaper instantly.
+    ShaderSceneEditor {}
 
     DesktopWidgetLayer {}
 

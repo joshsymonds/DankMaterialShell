@@ -138,6 +138,29 @@ layout(std140, binding = 0) uniform buf {
     float flipStartTime;
     float flipPropDelay;
     float flipDuration;
+    // ── Fast back sun ────────────────────────────────────────────
+    // Single light that streaks horizontally across the field on a
+    // sin-wave path, much faster than the regular back suns. Each
+    // appearance is hash-seeded for a fresh vertical centre, wave
+    // phase, and palette start point — so consecutive sweeps don't
+    // look like the same sun on a loop.
+    //   strength: overall brightness (0 = disabled)
+    //   size:     gaussian sigma as fraction of larger screen dim
+    //   frequency: appearances per second (Hz, governs x sweep rate)
+    //   speed:    sin-wobble rate (Hz, governs y oscillation)
+    //   paletteSpeed: how fast its colour cycles through the palette
+    float fastBackSunStrength;
+    float fastBackSunSize;
+    float fastBackSunFrequency;
+    float fastBackSunSpeed;
+    float fastBackSunPaletteSpeed;
+    // xy = this window's top-left in the virtual canvas (multi-monitor
+    // wallpaper). zw = this window's pixel size. For single-monitor
+    // surfaces, xy = 0 and zw = iResolution.xy. The frag computes
+    //   px = qt_TexCoord0 * windowGeom.zw + windowGeom.xy
+    // so noise/hex tiling/sun positions all live in one shared space
+    // even when split across outputs.
+    vec4 windowGeom;
 } ubuf;
 
 const float PI3 = 1.04719755;        // π / 3
@@ -243,7 +266,10 @@ float hexHeight(vec2 center, float time) {
 }
 
 void main() {
-    vec2 px = qt_TexCoord0 * ubuf.iResolution.xy;
+    // Map this window's [0,1] quad coords into the virtual canvas. For
+    // single-monitor surfaces windowGeom.xy = 0 and windowGeom.zw =
+    // iResolution.xy, so this reduces to the original formula.
+    vec2 px = qt_TexCoord0 * ubuf.windowGeom.zw + ubuf.windowGeom.xy;
     float i = max(1.0, ubuf.cellSize);
 
     // ── Hex tiling ─────────────────────────────────────────────────
@@ -454,6 +480,52 @@ void main() {
         lightRaw += col * g;
     }
     lightRaw *= ubuf.backSunStrength;
+
+    // ── Fast back sun ────────────────────────────────────────────
+    // One sun at a time streaks across the screen. Horizontal sweep
+    // phase is driven by fastBackSunFrequency (Hz) — each integer
+    // step of t*frequency is a new appearance. Within a sweep, the
+    // sun lerps from off-left to off-right. Vertical position adds
+    // a sinusoidal wobble on its own clock (fastBackSunSpeed, Hz),
+    // so wobble rate is independent of how often it appears.
+    //
+    // Per-appearance hashes pick a fresh vertical centre and palette
+    // phase so consecutive sweeps don't look identical. Goes into
+    // lightRaw AFTER backSunStrength has scaled the slow suns —
+    // fastBackSunStrength is its own knob — but BEFORE the hue cap,
+    // so when it overlaps slow suns the field saturates gracefully
+    // instead of pushing past 1.0 into white.
+    if (ubuf.fastBackSunStrength > 0.001 && ubuf.fastBackSunFrequency > 0.001) {
+        float sweepT   = ubuf.iTime * ubuf.fastBackSunFrequency;
+        float sweepIdx = floor(sweepT);
+        float sweepF   = fract(sweepT);
+        float hCenter  = hash(vec2(sweepIdx, 13.7));   // [0,1] vertical centre
+        float hWobble  = hash(vec2(sweepIdx, 27.3));   // [0,1] wobble phase
+        float hPalette = hash(vec2(sweepIdx, 41.9));   // [0,1] palette start
+
+        float fbDim   = max(ubuf.iResolution.x, ubuf.iResolution.y);
+        float fbSigma = max(ubuf.fastBackSunSize * fbDim, 1.0);
+        float fbMargin = fbSigma * 2.5;
+        float fbX = mix(-fbMargin, ubuf.iResolution.x + fbMargin, sweepF);
+        float centerY = mix(0.2, 0.8, hCenter) * ubuf.iResolution.y;
+        float wobbleAmp = ubuf.iResolution.y * 0.22;
+        float fbY = centerY + sin(ubuf.iTime * ubuf.fastBackSunSpeed * TWO_PI
+                                  + hWobble * TWO_PI) * wobbleAmp;
+        vec2 fbPos = vec2(fbX, fbY);
+
+        float fbInvSig2 = 1.0 / (fbSigma * fbSigma);
+        vec2 fbD = px - fbPos;
+        float fbG = exp(-dot(fbD, fbD) * fbInvSig2);
+
+        float fbPhaseColor = ubuf.iTime * 0.1 * ubuf.fastBackSunPaletteSpeed
+                           + hPalette * 3.0;
+        float fbFlip = positionFlipPhase(fbPos, pitchY);
+        vec3 fbCol = mix(paletteCycle(fbPhaseColor),
+                         paletteCycleNext(fbPhaseColor),
+                         fbFlip);
+        lightRaw += fbCol * fbG * ubuf.fastBackSunStrength;
+    }
+
     // Hue-preserving cap on the sun field itself. When three
     // saturated sun colours overlap, the raw additive sum can push
     // every channel past 1.0 → would otherwise clip to neutral white.
