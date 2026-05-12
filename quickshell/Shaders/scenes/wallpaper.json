@@ -2,8 +2,8 @@
   "_comment": "Edited via DMS scene editor. Live-reloaded by surfaces watching this file.",
   "_schema": "Keys under .shader MUST match std140 uniform names in the .frag exactly.",
   "shader": {
-    "intensity": 0.46,
-    "cellSize": 32,
+    "intensity": 0.66,
+    "cellSize": 29,
     "modeAmount": 0.77,
     "domeStrength": 0.78,
     "seamGlow": 2.26,
@@ -30,12 +30,12 @@
     "backNegSunLifetime": 35,
     "backNegSunGap": 18,
     "backNegSunSpeed": 0.02,
-    "backSunPaletteSpeed": 0.5,
+    "backSunPaletteSpeed": 0.84,
     "frontSunPaletteSpeed": 0.5,
-    "backSunCount": 5,
-    "backNegSunCount": 3,
-    "frontSunCount": 3,
-    "frontNegSunCount": 3,
+    "backSunCount": 4,
+    "backNegSunCount": 4,
+    "frontSunCount": 4,
+    "frontNegSunCount": 4,
     "frontNegSunStrength": 0.3,
     "frontNegSunSize": 0.43,
     "frontNegSunLifetime": 30,
@@ -43,14 +43,16 @@
     "frontNegSunSpeed": 0.025,
     "fastBackSunStrength": 1.12,
     "fastBackSunSize": 0.25,
-    "fastBackSunLifetime": 18.5,
-    "fastBackSunGap": 3.5,
-    "fastBackSunSpeed": 0.33,
-    "barZoneEnabled": 1.0,
-    "barZoneAnchor": 2.0,
-    "barZoneThickness": 48.0,
-    "barZoneElevation": 0.5,
-    "barZoneScreens": ["DP-2"],
+    "fastBackSunLifetime": 26,
+    "fastBackSunGap": 37,
+    "fastBackSunSpeed": 0.145,
+    "barZoneEnabled": 1,
+    "barZoneAnchor": 2,
+    "barZoneThickness": 80,
+    "barZoneElevation": 2,
+    "barZoneScreens": [
+      "DP-2"
+    ],
     "colorPrimary": "#5897e2",
     "colorSecondary": "#b711db",
     "colorPrimaryContainer": "#171556",
@@ -69,6 +71,6 @@
     "hexDepth": 0.7
   },
   "harness": {
-    "speed": 0.8500000000000001
+    "speed": 0.5
   }
 }

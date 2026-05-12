@@ -78,10 +78,6 @@ Item {
     // we're tuning the look.
     ShaderWallpaperBackground {}
 
-    // In-DMS scene editor — floating window. Edits flow into
-    // SceneStateService and rebind the wallpaper instantly.
-    ShaderSceneEditor {}
-
     DesktopWidgetLayer {}
 
     Lock {
