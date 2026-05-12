@@ -44,83 +44,53 @@ layout(std140, binding = 0) uniform buf {
                             //         cycle every 12-36 seconds (random
                             //         per hex so they don't pulse in
                             //         lockstep); >1 = faster.
-    float frontSunStrength; // 0..N — brightness of the front-sun
-                            //         pass. 0 disables. The front sun
-                            //         is a single localised light
-                            //         (NOT directional) that drifts
-                            //         across the field on a Lissajous
-                            //         path; hexes near it get the
-                            //         additive warm illumination,
-                            //         hexes far from it stay at
-                            //         ambient body colour.
-    float frontSunSpeed;    // 0..N — orbit rate of the front-sun
-                            //         position. 0 freezes it.
-    float frontSunSize;     // 0..1 — radius of the sun's reach as a
-                            //         fraction of the larger screen
-                            //         dimension. Small = tight focused
-                            //         spotlight; large = broad wash.
-    float frontSunShadowLength;  // 0..N — multiplier on the cast
-                                 //         shadow's decay length.
-                                 //         1 = baseline; higher
-                                 //         stretches shadows deeper
-                                 //         across receiver hexes.
-    float frontSunShadowDarkness; // 0..1 — peak darkening a cast
-                                  //         shadow can apply to a
-                                  //         body, before clamping.
-                                  //         Higher = inkier shadows.
-    float backSunSize;       // 0..1 — gaussian sigma of each back
-                             //         (underglow) sun, as a fraction
-                             //         of the larger screen dim. Small
-                             //         = tight isolated suns with deep
-                             //         dark between; large = broad
-                             //         overlapping wash.
-    float backSunStrength;   // 0..N — overall intensity multiplier on
-                             //         the back-sun additive light.
-                             //         Dial below 1 to darken the
-                             //         field, above 1 to push toward
-                             //         fully-saturated hue at peaks.
-    float backNegSunSize;    // 0..1 — gaussian sigma of the negative
-                             //         back sun (a moving anti-light
-                             //         that EATS the underglow where
-                             //         it is, creating shifting voids).
-    float backNegSunStrength;// 0..1 — depth of darkening at the
-                             //         centre of the negative sun. 0
-                             //         disables; 1 nearly snuffs the
-                             //         underglow out under it.
-    float backNegSunSpeed;   // 0..N — drift rate of the negative
-                             //         sun's Lissajous path (independent
-                             //         of the positive suns).
-    float backSunPaletteSpeed; // 0..N — rate at which the three back
-                               //         suns cycle through the palette
-                               //         colours. 0 freezes them in
-                               //         the primary/secondary/tertiary
-                               //         assignment; higher values
-                               //         morph each sun continuously
-                               //         through all three hues.
-    float frontSunPaletteSpeed; // 0..N — same idea for the front sun.
-                                //         At 0 it stays at colorTertiary
-                                //         (today's default); higher
-                                //         values morph it through the
-                                //         palette over time.
-    float backSunCount;      // 0..10 — number of back positive suns
-                             //         (rounded). Each gets its own
-                             //         Lissajous phase + palette offset
-                             //         so they spread across both the
-                             //         screen and the palette cycle.
-    float backNegSunCount;   // 0..10 — number of back negative suns
-                             //         (voids in the underglow).
-    float frontSunCount;     // 0..10 — number of front (illuminating)
-                             //         spotlights. Each casts its own
-                             //         hex shadows; reaches accumulate
-                             //         additively (clamped at 1).
-    float frontNegSunCount;  // 0..10 — number of front anti-spots that
-                             //         darken bodies in their reach.
-    float frontNegSunStrength; // 0..1 — peak darkening of body colour
-                               //         under a front-negative sun.
-    float frontNegSunSize;     // 0..1 — sigma as fraction of larger
-                               //         screen dim (same scaling as
-                               //         frontSunSize).
-    float frontNegSunSpeed;    // 0..N — orbit rate.
+    // ── Suns (unified placement) ─────────────────────────────────
+    // Every sun in every category follows the same lifecycle: spawn at
+    // a hashed point along a random edge, traverse a straight line to
+    // a hashed point along a *different* random edge over `lifetime`
+    // seconds, then sit invisible for `gap` seconds (with a random
+    // offset within the cycle for unpredictability) before the slot
+    // respawns from a fresh pair of edges. Per-slot phase staggers
+    // ensure slots don't bunch up. See sunPlacement() below.
+    float frontSunStrength;       // 0..N — brightness of each spotlight.
+    float frontSunSize;           // 0..1 — gaussian sigma as fraction of
+                                  //         larger virtual canvas dim.
+    float frontSunLifetime;       // sec — how long each appearance lasts.
+    float frontSunGap;            // sec — mean dead time between appearances.
+    float frontSunSpeed;          // wander rate (Perlin time scale).
+    float frontSunShadowLength;   // 0..N — cast-shadow decay length mult.
+    float frontSunShadowDarkness; // 0..1 — peak shadow darkening.
+    float backSunSize;            // 0..1 — sigma of back (underglow) suns.
+    float backSunStrength;        // 0..N — additive light intensity mult.
+    float backSunLifetime;        // sec.
+    float backSunGap;             // sec.
+    float backSunSpeed;           // wander rate.
+    float backNegSunSize;         // 0..1 — anti-light sigma.
+    float backNegSunStrength;     // 0..1 — depth of darkening at centre.
+    float backNegSunLifetime;     // sec.
+    float backNegSunGap;          // sec.
+    float backNegSunSpeed;        // wander rate.
+    float backSunPaletteSpeed;    // 0..N — palette cycle rate.
+    float frontSunPaletteSpeed;   // 0..N — palette cycle rate.
+    float backSunCount;           // 0..10 — slot count.
+    float backNegSunCount;        // 0..10.
+    float frontSunCount;          // 0..10.
+    float frontNegSunCount;       // 0..10.
+    float frontNegSunStrength;    // 0..1 — body darkening depth.
+    float frontNegSunSize;        // 0..1.
+    float frontNegSunLifetime;    // sec.
+    float frontNegSunGap;         // sec.
+    float frontNegSunSpeed;       // wander rate.
+    // Single-slot fast streak that lives separately from the slow back
+    // sun pool — its own lifetime/gap/speed so you can dial in a quiet
+    // background of slow suns + the occasional zippy comet that
+    // wanders briefly across the canvas before fading. Uses the same
+    // sunPlacement() machinery as everything else.
+    float fastBackSunStrength;
+    float fastBackSunSize;
+    float fastBackSunLifetime;
+    float fastBackSunGap;
+    float fastBackSunSpeed;
     // ── Palette flip wave ────────────────────────────────────────
     // Propagating colour wave that sweeps the field, transitioning
     // each hex from the current body tint (colorPrimaryContainer) to
@@ -138,22 +108,6 @@ layout(std140, binding = 0) uniform buf {
     float flipStartTime;
     float flipPropDelay;
     float flipDuration;
-    // ── Fast back sun ────────────────────────────────────────────
-    // Single light that streaks horizontally across the field on a
-    // sin-wave path, much faster than the regular back suns. Each
-    // appearance is hash-seeded for a fresh vertical centre, wave
-    // phase, and palette start point — so consecutive sweeps don't
-    // look like the same sun on a loop.
-    //   strength: overall brightness (0 = disabled)
-    //   size:     gaussian sigma as fraction of larger screen dim
-    //   frequency: appearances per second (Hz, governs x sweep rate)
-    //   speed:    sin-wobble rate (Hz, governs y oscillation)
-    //   paletteSpeed: how fast its colour cycles through the palette
-    float fastBackSunStrength;
-    float fastBackSunSize;
-    float fastBackSunFrequency;
-    float fastBackSunSpeed;
-    float fastBackSunPaletteSpeed;
     // xy = this window's top-left in the virtual canvas (multi-monitor
     // wallpaper). zw = this window's pixel size. For single-monitor
     // surfaces, xy = 0 and zw = iResolution.xy. The frag computes
@@ -237,6 +191,73 @@ vec3 paletteCycleNext(float phase) {
         c1 = ubuf.colorPrimaryNext.rgb;
     }
     return mix(c0, c1, frac);
+}
+
+// Unified sun placement. Each slot lives in a (lifetime + gap)-second
+// cycle. Within an active window the sun's position is a Perlin-style
+// noise lookup of (time * speed), so it wanders smoothly and never
+// repeats. A per-appearance hash shifts the noise time axis, so
+// consecutive appearances trace genuinely different paths — fading in
+// somewhere, wandering, fading out somewhere else.
+//
+//   slotId:   stable per-slot identifier (mix in a per-type constant
+//             so the same numeric slot in two categories doesn't share
+//             a trajectory)
+//   lifetime: how long each appearance lasts (sec)
+//   gap:      mean dead time between appearances in this slot (sec)
+//   speed:    wander rate; low = barely moves, high = visibly drifts
+//   t:        scaled time (iTime * sunDriftSpeed)
+//
+// Returns:
+//   xy = world-space position in the virtual canvas
+//   z  = active mask 0..1 (smooth fade-in/out at endpoints)
+//   w  = per-appearance hash 0..1 (palette-phase offset etc.)
+vec4 sunPlacement(float slotId, float lifetime, float gap, float speed, float t) {
+    float cyclePeriod = max(lifetime + gap, 0.05);
+    // Per-slot phase: stagger so multiple slots don't all spawn at the
+    // same moment. Constant across cycles for this slot.
+    float slotPhase = hash(vec2(slotId * 41.0 + 17.0, 7.3)) * cyclePeriod;
+
+    float tLocal = t - slotPhase;
+    float cycleIdx = floor(tLocal / cyclePeriod);
+    float cycleT = tLocal - cycleIdx * cyclePeriod;
+
+    // Per-appearance hash seed (unique per slot+cycle).
+    vec2 seed = vec2(slotId * 41.0 + 17.0, cycleIdx * 31.0 + 5.0);
+
+    // Semi-random start within the gap window — gives unpredictable
+    // appearance cadence without breaking cycle period.
+    float startDelay = hash(seed + vec2(0.0, 23.0)) * gap;
+    float life = cycleT - startDelay;
+    float fInLife = clamp(life / max(lifetime, 0.001), 0.0, 1.0);
+    float aliveWindow = step(0.0, life) * step(life, lifetime);
+    // Soft fade-in/out so the sun doesn't pop at the endpoints —
+    // visually it just materialises out of/dissolves into the field.
+    float fade = smoothstep(0.0, 0.08, fInLife) * smoothstep(1.0, 0.92, fInLife);
+    float activeMask = aliveWindow * fade;
+
+    // Per-appearance offsets into the noise time axis so each
+    // appearance starts from a different point in the noise field —
+    // ensures consecutive appearances don't look like the same loop.
+    // 100x scale spreads them far apart.
+    float ox = hash(seed + vec2(7.0, 0.0)) * 100.0;
+    float oy = hash(seed + vec2(0.0, 7.0)) * 100.0;
+
+    // 2D noise wander. The y-axis seed in each noise() call is a
+    // constant slice (= per-slot identifier), so as t advances the
+    // lookup walks smoothly along a 1D slice of the 2D noise field.
+    // x and y use different slices so their motions are uncorrelated.
+    float wx = noise(vec2(t * speed + ox, slotId * 13.0 + 11.0));
+    float wy = noise(vec2(t * speed + oy, slotId * 13.0 + 91.0));
+
+    // Map noise [0,1] onto the canvas with a small overshoot margin
+    // so the sun can drift just off-edge (then back) for variety.
+    float margin = 0.18;
+    vec2 pos = ubuf.iResolution.xy * vec2(
+        mix(-margin, 1.0 + margin, wx),
+        mix(-margin, 1.0 + margin, wy));
+
+    return vec4(pos, activeMask, hash(seed + vec2(41.0, 17.0)));
 }
 
 // Per-position flip phase. Same math as cellFlipPhase but takes an
@@ -429,101 +450,94 @@ void main() {
     // nearest behind it — the field looks like coloured light bleeding
     // through stained-glass scales.
 
-    // N suns on Lissajous-like screen-space paths. The number of suns
-    // is dynamic (backSunCount, rounded). Each sun gets a unique
-    // Lissajous phase and frequency offset so they don't lock in
-    // formation, plus a palette-cycle offset so they spread evenly
-    // across the three hues even when the cycle is frozen.
+    // N back-positive suns. Each slot uses sunPlacement() to traverse
+    // the virtual canvas edge-to-edge over backSunLifetime seconds,
+    // then sits invisibly for backSunGap seconds (with a random
+    // start-offset per cycle) before respawning from a fresh pair of
+    // edges. Slots stagger by per-slot hash so they don't bunch.
     //
     // Hard cap of 10 — loop is bounded by a compile-time constant
-    // with `break` when the dynamic count is reached, which is the
-    // standard idiom for dynamic loop bounds in GLSL.
+    // with `break` when the dynamic count is reached.
     float t = ubuf.iTime * ubuf.sunDriftSpeed;
-    vec2 screenC = ubuf.iResolution.xy * 0.5;
-    vec2 screenR = ubuf.iResolution.xy * 0.40;
 
     float sigma = max(ubuf.backSunSize *
                       max(ubuf.iResolution.x, ubuf.iResolution.y), 1.0);
     float invSig2 = 1.0 / (sigma * sigma);
 
-    float pt = ubuf.iTime * 0.1 * ubuf.backSunPaletteSpeed;
     int nBackPos = int(ubuf.backSunCount + 0.5);
     float fnBackPos = max(float(nBackPos), 1.0);
 
     vec3 lightRaw = vec3(0.0);
     for (int s = 0; s < 10; s++) {
         if (s >= nBackPos) break;
-        float fs = float(s);
-        // Phase + frequency offsets per sun. The constants are chosen
-        // to roughly match the original A/B/C feel at count=3 while
-        // giving every higher s a visibly different path.
-        float phaseShift = fs * 2.094;  // 2π/3 per step
-        vec2 freq = vec2(0.13 + fs * 0.02, 0.17 + fs * 0.015);
-        vec2 sunPos = screenC + vec2(
-            cos(t * freq.x + phaseShift)         * screenR.x,
-            sin(t * freq.y + phaseShift * 1.41 + 1.0) * screenR.y);
+        // Per-type constant (+7.0) so the same numeric slot in another
+        // sun category gets a completely different hash trajectory.
+        vec4 place = sunPlacement(float(s) + 7.0,
+                                  ubuf.backSunLifetime,
+                                  ubuf.backSunGap,
+                                  ubuf.backSunSpeed,
+                                  t);
+        vec2 sunPos = place.xy;
+        float actMask = place.z;
+        float colorHash = place.w;
+
         vec2 d = px - sunPos;
         float g = exp(-dot(d, d) * invSig2);
-        // Spread palette offsets evenly so all three hues are always
-        // represented for any count >= 3, and any pair always picks
-        // up two different points on the cycle for count = 2.
-        float phaseColor = pt + fs * 3.0 / fnBackPos;
-        // Per-sun flip phase: blend the sun's colour from current →
-        // next palette based on whether the wave has reached its
-        // current position. The wave's leading edge sweeps through
-        // the field; each sun's emitted colour transitions when the
-        // wave passes its position.
+        // Per-slot colour distribution: each slot owns a 1/count slice
+        // of the palette (so two slots can't pile onto the same hue at
+        // spawn). colorHash dithers within that slice so the EXACT
+        // hue varies appearance-to-appearance. Per-sun rate variance
+        // (0.6x..1.4x of backSunPaletteSpeed) lets neighbours drift
+        // past each other only briefly — most of the time they look
+        // visibly distinct.
+        float segWidth = 3.0 / fnBackPos;
+        float slotAnchor = float(s) * segWidth;
+        float slotJitter = (colorHash - 0.5) * segWidth * 0.8;
+        float rateVar = 0.6 + colorHash * 0.8;
+        float phaseColor = ubuf.iTime * 0.1 * ubuf.backSunPaletteSpeed * rateVar
+                         + slotAnchor + slotJitter;
         float sunFlip = positionFlipPhase(sunPos, pitchY);
         vec3 col = mix(paletteCycle(phaseColor),
                        paletteCycleNext(phaseColor),
                        sunFlip);
-        lightRaw += col * g;
+        lightRaw += col * g * actMask;
     }
     lightRaw *= ubuf.backSunStrength;
 
-    // ── Fast back sun ────────────────────────────────────────────
-    // One sun at a time streaks across the screen. Horizontal sweep
-    // phase is driven by fastBackSunFrequency (Hz) — each integer
-    // step of t*frequency is a new appearance. Within a sweep, the
-    // sun lerps from off-left to off-right. Vertical position adds
-    // a sinusoidal wobble on its own clock (fastBackSunSpeed, Hz),
-    // so wobble rate is independent of how often it appears.
-    //
-    // Per-appearance hashes pick a fresh vertical centre and palette
-    // phase so consecutive sweeps don't look identical. Goes into
-    // lightRaw AFTER backSunStrength has scaled the slow suns —
-    // fastBackSunStrength is its own knob — but BEFORE the hue cap,
-    // so when it overlaps slow suns the field saturates gracefully
-    // instead of pushing past 1.0 into white.
-    if (ubuf.fastBackSunStrength > 0.001 && ubuf.fastBackSunFrequency > 0.001) {
-        float sweepT   = ubuf.iTime * ubuf.fastBackSunFrequency;
-        float sweepIdx = floor(sweepT);
-        float sweepF   = fract(sweepT);
-        float hCenter  = hash(vec2(sweepIdx, 13.7));   // [0,1] vertical centre
-        float hWobble  = hash(vec2(sweepIdx, 27.3));   // [0,1] wobble phase
-        float hPalette = hash(vec2(sweepIdx, 41.9));   // [0,1] palette start
+    // ── Fast back sun: one streak with its own clock ─────────────
+    // Lives outside the regular back-sun pool so you can layer a quiet
+    // background of slow suns with the occasional fast streak. Same
+    // placement model, just dialled hot — short lifetime, higher
+    // speed. Strength applies AFTER backSunStrength so it has its
+    // own brightness knob; goes into lightRaw before the hue cap so
+    // overlap with slow suns saturates gracefully.
+    if (ubuf.fastBackSunStrength > 0.001) {
+        vec4 fbPlace = sunPlacement(401.0,
+                                    ubuf.fastBackSunLifetime,
+                                    ubuf.fastBackSunGap,
+                                    ubuf.fastBackSunSpeed,
+                                    t);
+        vec2 fbPos = fbPlace.xy;
+        float fbActMask = fbPlace.z;
+        float fbColorHash = fbPlace.w;
 
-        float fbDim   = max(ubuf.iResolution.x, ubuf.iResolution.y);
-        float fbSigma = max(ubuf.fastBackSunSize * fbDim, 1.0);
-        float fbMargin = fbSigma * 2.5;
-        float fbX = mix(-fbMargin, ubuf.iResolution.x + fbMargin, sweepF);
-        float centerY = mix(0.2, 0.8, hCenter) * ubuf.iResolution.y;
-        float wobbleAmp = ubuf.iResolution.y * 0.22;
-        float fbY = centerY + sin(ubuf.iTime * ubuf.fastBackSunSpeed * TWO_PI
-                                  + hWobble * TWO_PI) * wobbleAmp;
-        vec2 fbPos = vec2(fbX, fbY);
-
+        float fbSigma = max(ubuf.fastBackSunSize *
+                            max(ubuf.iResolution.x, ubuf.iResolution.y), 1.0);
         float fbInvSig2 = 1.0 / (fbSigma * fbSigma);
         vec2 fbD = px - fbPos;
         float fbG = exp(-dot(fbD, fbD) * fbInvSig2);
 
-        float fbPhaseColor = ubuf.iTime * 0.1 * ubuf.fastBackSunPaletteSpeed
-                           + hPalette * 3.0;
+        // Per-appearance random palette phase: each streak picks a
+        // fresh hue from the cycle so consecutive appearances don't
+        // look the same. Shares the back-sun palette clock so the
+        // wallpaper's overall colour rotation stays unified.
+        float fbPhase = ubuf.iTime * 0.1 * ubuf.backSunPaletteSpeed
+                      + fbColorHash * 3.0;
         float fbFlip = positionFlipPhase(fbPos, pitchY);
-        vec3 fbCol = mix(paletteCycle(fbPhaseColor),
-                         paletteCycleNext(fbPhaseColor),
+        vec3 fbCol = mix(paletteCycle(fbPhase),
+                         paletteCycleNext(fbPhase),
                          fbFlip);
-        lightRaw += fbCol * fbG * ubuf.fastBackSunStrength;
+        lightRaw += fbCol * fbG * fbActMask * ubuf.fastBackSunStrength;
     }
 
     // Hue-preserving cap on the sun field itself. When three
@@ -536,27 +550,29 @@ void main() {
     float lightMax = max(lightRaw.r, max(lightRaw.g, lightRaw.b));
     vec3 lightFromSuns = lightRaw / max(lightMax, 1.0);
 
-    // Negative back suns: anti-lights drifting on their own Lissajous
-    // paths that attenuate whatever underglow happens to be there.
-    // Each one carves a moving void in the colour field. Speeds and
-    // Lissajous frequencies are deliberately different from the
-    // positive suns so they never lock in phase.
-    float negT = ubuf.iTime * 0.05 * ubuf.backNegSunSpeed;
+    // Negative back suns: anti-lights that attenuate whatever underglow
+    // happens to be there. Same placement model as the positives, so
+    // each void enters from a random edge and exits via another —
+    // creating shifting dark patches that drift through the field.
+    // Per-type offset (+101.0) ensures negatives don't share trajectories
+    // with positives that happen to use the same slot index.
     float negSunSigma = max(ubuf.backNegSunSize *
                             max(ubuf.iResolution.x, ubuf.iResolution.y), 1.0);
     float negInvSig2 = 1.0 / (negSunSigma * negSunSigma);
     int nBackNeg = int(ubuf.backNegSunCount + 0.5);
     for (int s = 0; s < 10; s++) {
         if (s >= nBackNeg) break;
-        float fs = float(s);
-        float phaseShift = fs * 2.137;
-        vec2 freq = vec2(0.19 + fs * 0.013, 0.13 + fs * 0.019);
-        vec2 negSunPos = screenC + vec2(
-            cos(negT * freq.x + 2.7 + phaseShift) * screenR.x,
-            sin(negT * freq.y + 5.1 + phaseShift) * screenR.y);
+        vec4 place = sunPlacement(float(s) + 101.0,
+                                  ubuf.backNegSunLifetime,
+                                  ubuf.backNegSunGap,
+                                  ubuf.backNegSunSpeed,
+                                  t);
+        vec2 negSunPos = place.xy;
+        float actMask = place.z;
         vec2 toNegSun = negSunPos - px;
         float negSunReach = exp(-dot(toNegSun, toNegSun) * negInvSig2);
-        float darkFactor = clamp(negSunReach * ubuf.backNegSunStrength, 0.0, 0.98);
+        float darkFactor = clamp(negSunReach * ubuf.backNegSunStrength * actMask,
+                                 0.0, 0.98);
         lightFromSuns *= (1.0 - darkFactor);
     }
 
@@ -648,13 +664,13 @@ void main() {
 
     float altMask = clamp(totalIntensity * ubuf.heightAmount, 0.0, 1.0);
 
-    // ── Front-positive suns: N localised spotlights drifting on
-    // independent Lissajous paths. Each one illuminates hexes within
-    // its reach and casts hex-shaped shadows from taller-reach
-    // neighbours onto lower-reach receivers. Reaches accumulate
-    // across all suns; shadows take the max (the darkest applicable
-    // shadow wins).
-    float fst = ubuf.iTime * 0.05 * ubuf.frontSunSpeed;
+    // ── Front-positive suns: N localised spotlights using the same
+    // edge-to-edge placement as the back suns. Each illuminates hexes
+    // within its reach and casts hex-shaped shadows from taller-reach
+    // neighbours onto lower-reach receivers. Reaches accumulate across
+    // all suns; shadows take the max (the darkest applicable wins).
+    // Per-type offset (+211.0) keeps trajectories distinct from
+    // every other sun category.
     float frontSunSigma = max(ubuf.frontSunSize *
                               max(ubuf.iResolution.x, ubuf.iResolution.y) * 0.5,
                               1.0);
@@ -670,15 +686,16 @@ void main() {
     float frontFlipWeight = 0.0;
     for (int s = 0; s < 10; s++) {
         if (s >= nFrontPos) break;
-        float fs = float(s);
-        float phaseShift = fs * 1.31;
-        vec2 freq = vec2(0.23 + fs * 0.019, 0.31 + fs * 0.013);
-        vec2 sunPos = ubuf.iResolution.xy * 0.5 + ubuf.iResolution.xy * 0.45 *
-                      vec2(cos(fst * freq.x + 0.5 + phaseShift),
-                           sin(fst * freq.y + 1.7 + phaseShift));
+        vec4 place = sunPlacement(float(s) + 211.0,
+                                  ubuf.frontSunLifetime,
+                                  ubuf.frontSunGap,
+                                  ubuf.frontSunSpeed,
+                                  t);
+        vec2 sunPos = place.xy;
+        float actMask = place.z;
 
         vec2 toSun = sunPos - px;
-        float pxReach = exp(-dot(toSun, toSun) * frontInvSig2);
+        float pxReach = exp(-dot(toSun, toSun) * frontInvSig2) * actMask;
         frontSunReach += pxReach;
         // Accumulate per-sun flip phase weighted by pxReach so suns
         // contributing more to this pixel dominate its colour blend.
@@ -710,7 +727,8 @@ void main() {
                 float shadowMask = 1.0 - smoothstep(-shadowSize * 0.4,
                                                     shadowSize * 0.7,
                                                     hexDist);
-                float thisShadow = diffWeight * clamp(litDiff * 2.5, 0.0, 1.0) * shadowMask;
+                float thisShadow = diffWeight * clamp(litDiff * 2.5, 0.0, 1.0)
+                                 * shadowMask * actMask;
                 castShadow = max(castShadow, thisShadow);
             }
         }
@@ -722,11 +740,10 @@ void main() {
     frontSunReach = clamp(frontSunReach, 0.0, 1.0);
 
     // ── Front-negative suns: anti-spots that DARKEN bodies in their
-    // reach. Independent of the positive suns; each one carves a
-    // moving dark blob across the field. Strongest one at this pixel
-    // wins (max, not sum, so multiple piling up don't go past the
-    // strength cap).
-    float fnt = ubuf.iTime * 0.05 * ubuf.frontNegSunSpeed;
+    // reach. Independent placement (+307.0 type offset) so they don't
+    // share trajectories with the positives. Strongest one at this
+    // pixel wins (max, not sum) so multiple piling up don't go past
+    // the strength cap.
     float frontNegSigma = max(ubuf.frontNegSunSize *
                               max(ubuf.iResolution.x, ubuf.iResolution.y) * 0.5,
                               1.0);
@@ -735,14 +752,15 @@ void main() {
     float frontDarkness = 0.0;
     for (int s = 0; s < 10; s++) {
         if (s >= nFrontNeg) break;
-        float fs = float(s);
-        float phaseShift = fs * 1.91;
-        vec2 freq = vec2(0.21 + fs * 0.011, 0.27 + fs * 0.017);
-        vec2 negPos = ubuf.iResolution.xy * 0.5 + ubuf.iResolution.xy * 0.4 *
-                      vec2(cos(fnt * freq.x + 3.2 + phaseShift),
-                           sin(fnt * freq.y + 4.7 + phaseShift));
+        vec4 place = sunPlacement(float(s) + 307.0,
+                                  ubuf.frontNegSunLifetime,
+                                  ubuf.frontNegSunGap,
+                                  ubuf.frontNegSunSpeed,
+                                  t);
+        vec2 negPos = place.xy;
+        float actMask = place.z;
         vec2 toNeg = negPos - px;
-        float reach = exp(-dot(toNeg, toNeg) * frontNegInvSig2);
+        float reach = exp(-dot(toNeg, toNeg) * frontNegInvSig2) * actMask;
         frontDarkness = max(frontDarkness, reach * ubuf.frontNegSunStrength);
     }
     frontDarkness = clamp(frontDarkness, 0.0, 0.98);

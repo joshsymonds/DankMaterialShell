@@ -39,15 +39,22 @@ FloatingWindow {
         "hexBevel":       { min: 0.0, max: 1.0, step: 0.01 },
         "heightDriftSpeed": { min: 0.0, max: 3.0, step: 0.05 },
         "frontSunStrength": { min: 0.0, max: 5.0, step: 0.02 },
-        "frontSunSpeed":    { min: 0.0, max: 12.0, step: 0.1 },
         "frontSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
+        "frontSunLifetime": { min: 5.0, max: 180.0, step: 1.0 },
+        "frontSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
+        "frontSunSpeed":    { min: 0.0, max: 0.5, step: 0.002 },
         "frontSunShadowLength":   { min: 0.0, max: 4.0, step: 0.05 },
         "frontSunShadowDarkness": { min: 0.0, max: 3.0, step: 0.02 },
         "backSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
         "backSunStrength": { min: 0.0, max: 3.0, step: 0.02 },
+        "backSunLifetime": { min: 5.0, max: 180.0, step: 1.0 },
+        "backSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
+        "backSunSpeed":    { min: 0.0, max: 0.5, step: 0.002 },
         "backNegSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
         "backNegSunStrength": { min: 0.0, max: 1.0, step: 0.01 },
-        "backNegSunSpeed":    { min: 0.0, max: 5.0, step: 0.05 },
+        "backNegSunLifetime": { min: 5.0, max: 180.0, step: 1.0 },
+        "backNegSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
+        "backNegSunSpeed":    { min: 0.0, max: 0.5, step: 0.002 },
         "backSunPaletteSpeed":  { min: 0.0, max: 3.0, step: 0.02 },
         "frontSunPaletteSpeed": { min: 0.0, max: 3.0, step: 0.02 },
         "backSunCount":      { min: 0, max: 10, step: 1 },
@@ -56,12 +63,14 @@ FloatingWindow {
         "frontNegSunCount":  { min: 0, max: 10, step: 1 },
         "frontNegSunStrength": { min: 0.0, max: 1.0, step: 0.01 },
         "frontNegSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
-        "frontNegSunSpeed":    { min: 0.0, max: 12.0, step: 0.1 },
-        "fastBackSunStrength":     { min: 0.0, max: 3.0, step: 0.02 },
-        "fastBackSunSize":         { min: 0.02, max: 0.6, step: 0.005 },
-        "fastBackSunFrequency":    { min: 0.0, max: 2.0, step: 0.02 },
-        "fastBackSunSpeed":        { min: 0.0, max: 8.0, step: 0.05 },
-        "fastBackSunPaletteSpeed": { min: 0.0, max: 3.0, step: 0.02 },
+        "frontNegSunLifetime": { min: 5.0, max: 180.0, step: 1.0 },
+        "frontNegSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
+        "frontNegSunSpeed":    { min: 0.0, max: 0.5, step: 0.002 },
+        "fastBackSunStrength": { min: 0.0, max: 3.0, step: 0.02 },
+        "fastBackSunSize":     { min: 0.02, max: 0.6, step: 0.005 },
+        "fastBackSunLifetime": { min: 1.0, max: 60.0, step: 0.5 },
+        "fastBackSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
+        "fastBackSunSpeed":    { min: 0.0, max: 1.0, step: 0.005 },
         "flipPropDelay":  { min: 0.0, max: 0.5, step: 0.005 },
         "flipDuration":   { min: 0.05, max: 3.0, step: 0.05 },
         "depthShading":   { min: 0.0, max: 1.0, step: 0.01 },
@@ -78,23 +87,26 @@ FloatingWindow {
             "hexBevel", "heightDriftSpeed", "depthShading", "hexDepth"
         ] },
         { name: "front sun", keys: [
-            "frontSunCount", "frontSunStrength", "frontSunSpeed", "frontSunSize",
+            "frontSunCount", "frontSunStrength", "frontSunSize",
+            "frontSunLifetime", "frontSunGap", "frontSunSpeed",
             "frontSunShadowLength", "frontSunShadowDarkness", "frontSunPaletteSpeed"
         ] },
         { name: "negative front sun", keys: [
             "frontNegSunCount", "frontNegSunStrength", "frontNegSunSize",
-            "frontNegSunSpeed"
+            "frontNegSunLifetime", "frontNegSunGap", "frontNegSunSpeed"
         ] },
         { name: "back sun", keys: [
-            "backSunCount", "backSunSize", "backSunStrength", "backSunPaletteSpeed"
+            "backSunCount", "backSunStrength", "backSunSize",
+            "backSunLifetime", "backSunGap", "backSunSpeed",
+            "backSunPaletteSpeed"
         ] },
         { name: "negative back sun", keys: [
-            "backNegSunCount", "backNegSunSize", "backNegSunStrength",
-            "backNegSunSpeed"
+            "backNegSunCount", "backNegSunStrength", "backNegSunSize",
+            "backNegSunLifetime", "backNegSunGap", "backNegSunSpeed"
         ] },
         { name: "fast back sun", keys: [
-            "fastBackSunStrength", "fastBackSunSize", "fastBackSunFrequency",
-            "fastBackSunSpeed", "fastBackSunPaletteSpeed"
+            "fastBackSunStrength", "fastBackSunSize",
+            "fastBackSunLifetime", "fastBackSunGap", "fastBackSunSpeed"
         ] },
         { name: "colors", keys: [
             "colorPrimary", "colorSecondary", "colorPrimaryContainer", "colorTertiary"

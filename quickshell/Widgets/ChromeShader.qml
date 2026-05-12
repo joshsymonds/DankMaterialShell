@@ -71,16 +71,29 @@ Item {
     property real bleedBack: 0.03
     property real hexBevel: 0.6
     property real heightDriftSpeed: 0.0
+    // Sun motion: each slot fades in, wanders along a Perlin-noise
+    // path for <type>SunLifetime seconds, fades out, then sits
+    // invisibly for <type>SunGap seconds before a new appearance
+    // starts from a different place. <type>SunSpeed is the wander
+    // rate (low = barely moves). sunDriftSpeed is a global clock
+    // multiplier on top of all of this.
     property real frontSunStrength: 0.0
-    property real frontSunSpeed: 0.0
     property real frontSunSize: 0.3
+    property real frontSunLifetime: 40.0
+    property real frontSunGap: 10.0
+    property real frontSunSpeed: 0.02
     property real frontSunShadowLength: 1.0
     property real frontSunShadowDarkness: 0.85
     property real backSunSize: 0.4
     property real backSunStrength: 1.0
+    property real backSunLifetime: 45.0
+    property real backSunGap: 12.0
+    property real backSunSpeed: 0.02
     property real backNegSunSize: 0.3
     property real backNegSunStrength: 0.0
-    property real backNegSunSpeed: 1.0
+    property real backNegSunLifetime: 35.0
+    property real backNegSunGap: 18.0
+    property real backNegSunSpeed: 0.02
     property real backSunPaletteSpeed: 0.0
     property real frontSunPaletteSpeed: 0.0
     property real backSunCount: 3
@@ -89,17 +102,17 @@ Item {
     property real frontNegSunCount: 0
     property real frontNegSunStrength: 0.7
     property real frontNegSunSize: 0.3
-    property real frontNegSunSpeed: 1.0
+    property real frontNegSunLifetime: 30.0
+    property real frontNegSunGap: 15.0
+    property real frontNegSunSpeed: 0.02
 
-    // Fast back sun — a single light that streaks horizontally on a
-    // sin-wave path behind the hexes, independent of the slow back
-    // suns. Strength = 0 disables. frequency = appearances/sec
-    // (horizontal sweep rate); speed = wobble Hz (vertical sine rate).
+    // Fast back sun: single-slot zippy streak, lives outside the slow
+    // back-sun pool with its own knobs. Default off (strength = 0).
     property real fastBackSunStrength: 0.0
-    property real fastBackSunSize: 0.18
-    property real fastBackSunFrequency: 0.3
-    property real fastBackSunSpeed: 1.0
-    property real fastBackSunPaletteSpeed: 1.0
+    property real fastBackSunSize: 0.25
+    property real fastBackSunLifetime: 6.0
+    property real fastBackSunGap: 12.0
+    property real fastBackSunSpeed: 0.18
 
     // Palette flip — staging colours + propagating-ripple parameters.
     // While not flipping, the four Next colours should match the
@@ -146,14 +159,21 @@ Item {
         property real hexBevel: root.hexBevel
         property real heightDriftSpeed: root.heightDriftSpeed
         property real frontSunStrength: root.frontSunStrength
-        property real frontSunSpeed: root.frontSunSpeed
         property real frontSunSize: root.frontSunSize
+        property real frontSunLifetime: root.frontSunLifetime
+        property real frontSunGap: root.frontSunGap
+        property real frontSunSpeed: root.frontSunSpeed
         property real frontSunShadowLength: root.frontSunShadowLength
         property real frontSunShadowDarkness: root.frontSunShadowDarkness
         property real backSunSize: root.backSunSize
         property real backSunStrength: root.backSunStrength
+        property real backSunLifetime: root.backSunLifetime
+        property real backSunGap: root.backSunGap
+        property real backSunSpeed: root.backSunSpeed
         property real backNegSunSize: root.backNegSunSize
         property real backNegSunStrength: root.backNegSunStrength
+        property real backNegSunLifetime: root.backNegSunLifetime
+        property real backNegSunGap: root.backNegSunGap
         property real backNegSunSpeed: root.backNegSunSpeed
         property real backSunPaletteSpeed: root.backSunPaletteSpeed
         property real frontSunPaletteSpeed: root.frontSunPaletteSpeed
@@ -163,12 +183,14 @@ Item {
         property real frontNegSunCount: root.frontNegSunCount
         property real frontNegSunStrength: root.frontNegSunStrength
         property real frontNegSunSize: root.frontNegSunSize
+        property real frontNegSunLifetime: root.frontNegSunLifetime
+        property real frontNegSunGap: root.frontNegSunGap
         property real frontNegSunSpeed: root.frontNegSunSpeed
         property real fastBackSunStrength: root.fastBackSunStrength
         property real fastBackSunSize: root.fastBackSunSize
-        property real fastBackSunFrequency: root.fastBackSunFrequency
+        property real fastBackSunLifetime: root.fastBackSunLifetime
+        property real fastBackSunGap: root.fastBackSunGap
         property real fastBackSunSpeed: root.fastBackSunSpeed
-        property real fastBackSunPaletteSpeed: root.fastBackSunPaletteSpeed
         property real flipOriginX: root.flipOriginX
         property real flipOriginY: root.flipOriginY
         property real flipStartTime: root.flipStartTime
