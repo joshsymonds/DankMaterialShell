@@ -1,3 +1,10 @@
+# Fork-local: out-of-tree directories used by the josh/integration model.
+# `worktrees/` for `git worktree add` per-topic checkouts; `reference/` for
+# shallow clones of related projects (mutter, kwin, other Quickshell shells)
+# we read for context. Both are gitignored so they never leak into a PR diff.
+/worktrees/
+/reference/
+
 # C++ objects and libs
 *.slo
 *.lo
