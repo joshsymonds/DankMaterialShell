@@ -1,7 +1,9 @@
 import QtQuick
+import QtQuick.Effects
 import QtQuick.Shapes
 import qs.Common
 import qs.Services
+import qs.Widgets
 
 Item {
     id: root
@@ -229,6 +231,68 @@ Item {
                 }
             }
         }
+    }
+
+    // Animated shader background overlay. Renders ChromeShader to an offscreen
+    // texture, then MultiEffect composites it masked to the same SVG path the
+    // bar's painted Shape uses — so the shader respects gothic-corner geometry
+    // and never spills past the bar's body. Mask is a separate invisible Shape
+    // with the same path (FileBrowserListDelegate.qml:186-204 pattern); leaves
+    // the visible barShape rendering path untouched.
+    Item {
+        id: barShapeMask
+        anchors.fill: parent
+        layer.enabled: true
+        layer.smooth: true
+        visible: false
+
+        Shape {
+            anchors.fill: parent
+            preferredRendererType: Shape.CurveRenderer
+            ShapePath {
+                fillColor: "white"
+                strokeColor: "transparent"
+                strokeWidth: 0
+                PathSvg {
+                    path: root.mainPath
+                }
+            }
+        }
+    }
+
+    // Bar-config-driven shader color overrides. Matugen's dominant-color
+    // algorithm flattens sparse high-chroma wallpaper accents (e.g. neon
+    // hexagon glows) into muted pastels, so we let the user pin specific
+    // hex strings via nix-config. Falls back to Theme.* when keys are
+    // absent. SettingsStore.js loads barConfigs raw without per-key spec
+    // validation (SettingsStore.js:25 only strips top-level unknowns), so
+    // extra keys in barConfigs[0] propagate from nix-config to QML.
+    ChromeShader {
+        id: chromeShader
+        anchors.fill: parent
+        mode: barConfig?.shaderMode || "aurora"
+        cellSize: barConfig?.shaderHexSize || 14
+        // hexrain paints only edges so it can afford full saturation; aurora
+        // covers most of the bar and would over-saturate at 1.0.
+        intensity: (barConfig?.shaderMode === "hexrain") ? 1.0 : 0.6
+        speed: 1.0
+        visible: false
+        layer.enabled: true
+
+        primaryColor:          barConfig?.shaderPrimaryColor          ? Qt.color(barConfig.shaderPrimaryColor)          : Theme.primary
+        secondaryColor:        barConfig?.shaderSecondaryColor        ? Qt.color(barConfig.shaderSecondaryColor)        : Theme.secondary
+        primaryContainerColor: barConfig?.shaderPrimaryContainerColor ? Qt.color(barConfig.shaderPrimaryContainerColor) : Theme.primaryContainer
+        tertiaryColor:         barConfig?.shaderTertiaryColor         ? Qt.color(barConfig.shaderTertiaryColor)         : Theme.tertiary
+    }
+
+    MultiEffect {
+        anchors.fill: parent
+        source: chromeShader
+        maskEnabled: true
+        maskSource: barShapeMask
+        maskThresholdMin: 0.5
+        maskSpreadAtMin: 1
+        visible: root.mainPathCorrectShape
     }
 
     function generatePathForPosition(w, h) {

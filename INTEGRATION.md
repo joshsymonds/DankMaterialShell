@@ -14,6 +14,7 @@ what's deployed without spelunking the merge graph.
 |---|---|---|---|
 | `josh/chrome-shader` | local | Not yet PRed upstream | The big chrome+wallpaper overhaul. Live-rendered wallpaper as a multi-monitor canvas with the "hexrain" scene (continuous-direction cast shadows, palette-flip wave, dynamic sun counts, bar-zone elevation/anchor, per-output activation). Includes ShaderSceneEditor for live iteration (toggleable). Adds `Theme.widgetBackgroundColor = "scl"` (surfaceContainerLowest) and a `barConfig.widgetPill` toggle for capsule-shaped chrome. SceneStateService writes to an XDG state shadow so saves persist without polluting the source. |
 | `josh/wider-pills` | local | Not yet PRed upstream | Single-line change to `Modules/DankBar/DankBarWindow.qml`: bumps `widgetThickness` base from `26` to `36`. Combined with `innerPadding=0` in the user's `barConfigs`, pills go from ~28px to ~36px wide while the bar stays at 40px — eliminates the "pills floating in a wide channel" look. |
+| `josh/icon-cleanup` | local | Not yet PRed upstream | `RamMonitor.qml`: icon `developer_board` → `memory_alt`. Visually `developer_board` (PCB with chips) reads as a graphics card / motherboard, not a RAM stick; `memory_alt` (rectangle with vertical bars + connector pegs) is the DIMM-shaped icon. Frees `developer_board` for downstream GPU plugins (dms-gpu-pill) to use without clashing with the CPU's `memory` icon. |
 
 ## Tooling commit
 

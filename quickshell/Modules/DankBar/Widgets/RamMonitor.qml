@@ -38,7 +38,7 @@ BasePill {
                 spacing: 1
 
                 DankIcon {
-                    name: "developer_board"
+                    name: "memory_alt"
                     size: Theme.barIconSize(root.barThickness, undefined, root.barConfig?.maximizeWidgetIcons, root.barConfig?.iconScale)
                     color: {
                         if (DgopService.memoryUsage > 90) {
@@ -88,7 +88,7 @@ BasePill {
 
                 DankIcon {
                     id: ramIcon
-                    name: "developer_board"
+                    name: "memory_alt"
                     size: Theme.barIconSize(root.barThickness, undefined, root.barConfig?.maximizeWidgetIcons, root.barConfig?.iconScale)
                     color: {
                         if (DgopService.memoryUsage > 90) {

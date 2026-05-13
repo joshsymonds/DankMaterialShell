@@ -427,7 +427,7 @@ PanelWindow {
     readonly property int notificationCount: NotificationService.notifications.length
     readonly property real effectiveBarThickness: SettingsData.frameEnabled ? SettingsData.frameBarSize : Theme.snap(Math.max(barWindow.widgetThickness + (barConfig?.innerPadding ?? 4) + 4, Theme.barHeight - 4 - (8 - (barConfig?.innerPadding ?? 4))), _dpr)
     readonly property bool effectiveOpenOnOverview: SettingsData.frameEnabled ? SettingsData.frameShowOnOverview : (barConfig?.openOnOverview ?? false)
-    readonly property real widgetThickness: Theme.snap(Math.max(20, 26 + (barConfig?.innerPadding ?? 4) * 0.6), _dpr)
+    readonly property real widgetThickness: Theme.snap(Math.max(20, 36 + (barConfig?.innerPadding ?? 4) * 0.6), _dpr)
 
     readonly property bool hasAdjacentTopBar: {
         if (barConfig?.autoHide ?? false)

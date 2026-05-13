@@ -31,6 +31,18 @@ Item {
     readonly property real horizontalPadding: (barConfig?.removeWidgetPadding ?? false) ? 0 : Theme.snap((barConfig?.widgetPadding ?? 12) * (widgetThickness / 30), dpr)
     readonly property real visualWidth: Theme.snap(isVerticalOrientation ? widgetThickness : (contentLoader.item ? (contentLoader.item.implicitWidth + horizontalPadding * 2) : 0), dpr)
     readonly property real visualHeight: Theme.snap(isVerticalOrientation ? (contentLoader.item ? (contentLoader.item.implicitHeight + horizontalPadding * 2) : 0) : widgetThickness, dpr)
+    // Pill (capsule) mode for the widget background and outline. When
+    // barConfig.widgetPill is true, the rectangle radius is forced to
+    // min(width, height) / 2, which gives full half-circle ends on the
+    // short axis — squares become true circles, wider widgets become
+    // stadium shapes. Use case: bar that hides its own panel and lets
+    // each widget read as a self-contained chip floating on the
+    // wallpaper. Falls back to the usual `Theme.cornerRadius` when the
+    // flag is absent or false.
+    readonly property real pillRadius: Math.min(visualWidth, visualHeight) / 2
+    readonly property real widgetRadius: (barConfig?.widgetPill ?? false)
+        ? pillRadius
+        : ((barConfig?.noBackground ?? false) ? 0 : Theme.cornerRadius)
     readonly property alias visualContent: visualContent
     readonly property real barEdgeExtension: 1000
     readonly property real gapExtension: sectionSpacing
@@ -68,7 +80,7 @@ Item {
                 const borderWidth = (barConfig?.widgetOutlineEnabled ?? false) ? (barConfig?.widgetOutlineThickness ?? 1) : 0;
                 return parent.height + borderWidth * 2;
             }
-            radius: (barConfig?.noBackground ?? false) ? 0 : Theme.cornerRadius
+            radius: root.widgetRadius
             color: "transparent"
             border.width: {
                 if (barConfig?.widgetOutlineEnabled ?? false) {
@@ -98,7 +110,7 @@ Item {
         Rectangle {
             id: background
             anchors.fill: parent
-            radius: (barConfig?.noBackground ?? false) ? 0 : Theme.cornerRadius
+            radius: root.widgetRadius
             color: {
                 if (barConfig?.noBackground ?? false) {
                     return "transparent";

@@ -756,6 +756,41 @@ Singleton {
         });
     }
 
+    function focusSourceForNotification(notif) {
+        if (!notif || windows.length === 0)
+            return false;
+        const desktopEntry = (notif.desktopEntry || "").toString().toLowerCase();
+        const appName = (notif.appName || "").toString().toLowerCase();
+        if (!desktopEntry && !appName)
+            return false;
+        let bestMatch = null;
+        let bestScore = -1;
+        for (let i = 0; i < windows.length; i++) {
+            const w = windows[i];
+            const aid = (w.app_id || "").toString().toLowerCase();
+            if (!aid)
+                continue;
+            let score = -1;
+            if (desktopEntry && aid === desktopEntry)
+                score = 4;
+            else if (desktopEntry && (aid.includes(desktopEntry) || desktopEntry.includes(aid)))
+                score = 3;
+            else if (appName && aid === appName)
+                score = 2;
+            else if (appName && (aid.includes(appName) || appName.includes(aid)))
+                score = 1;
+            if (score > bestScore) {
+                bestScore = score;
+                bestMatch = w;
+            }
+        }
+        if (bestMatch && bestMatch.id !== undefined) {
+            focusWindow(bestMatch.id);
+            return true;
+        }
+        return false;
+    }
+
     function powerOffMonitors() {
         return send({
             "Action": {
