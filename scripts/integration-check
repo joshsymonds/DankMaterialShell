@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Oracle gate for josh/integration (long-lived, maintained — see CLAUDE.md).
+#
+# Asserts the delta this integration adds over origin/josh/integration is
+# EXACTLY the union of the merged josh/<topic> branches' own deltas, with
+# tooling files excluded. If integration touches a file no merged patch
+# branch touches, a merge resolution silently dropped or mangled patch
+# content — fail, do NOT push.
+#
+# Fail-closed by construction: a merge whose subject omits the branch
+# name only SHRINKS the patch-union and makes the gate flag more
+# readily; it can never hide an extra file.
+set -euo pipefail
+
+int_delta=$(mktemp); pat_delta=$(mktemp)
+trap 'rm -f "$int_delta" "$pat_delta"' EXIT
+
+git fetch origin --quiet
+base=origin/master
+prev=origin/josh/integration
+
+# Tooling files legitimately diverge from prev; exclude them.
+git diff --name-only "$prev" HEAD -- \
+    ':!CLAUDE.md' ':!INTEGRATION.md' ':!.gitignore' ':!scripts/integration-check' \
+    | sort -u > "$int_delta"
+
+# Branch list parsed from merge-commit subjects in base..HEAD. Relies on
+# the default `Merge ... 'josh/<topic>' ...` subject (any subject
+# containing the branch name works). A custom -m subject that omits the
+# name is excluded — fail-closed, never fail-open.
+for b in $(git log --merges --format=%s "$base..HEAD" \
+             | grep -oE 'josh/[a-z0-9-]+' \
+             | grep -vx 'josh/integration' | sort -u); do
+    ref="origin/$b"
+    git rev-parse --verify --quiet "$ref" >/dev/null || ref="$b"
+    mb=$(git merge-base "$base" "$ref" 2>/dev/null) || continue
+    git diff --name-only "$mb" "$ref"
+done | sort -u > "$pat_delta"
+
+extra=$(comm -23 "$int_delta" "$pat_delta" || true)
+if [ -n "$extra" ]; then
+    echo "ORACLE FAIL — integration changed files no patch branch touches:"
+    echo "$extra" | sed 's/^/  /'
+    echo "A merge resolution likely dropped or mangled patch content. Do NOT push."
+    exit 1
+fi
+echo "integration-check OK — delta is exactly the merged patch branches'."
