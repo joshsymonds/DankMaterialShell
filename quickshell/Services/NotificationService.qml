@@ -656,7 +656,15 @@ Singleton {
                 }
             }
 
-            if (SettingsData.soundsEnabled && SettingsData.soundNewNotification) {
+            // Honor the freedesktop "suppress-sound" hint: a sender that
+            // plays its own audio for a notification can ask the server
+            // not to double up. Without this, whether DMS's sound fires
+            // is nondeterministic for such senders — it's skipped only
+            // when an identically-keyed popup happens to still be on
+            // screen (the dedup early-return above), so transient
+            // notifications double-sound while lingering ones don't.
+            const suppressSound = !!(notif.hints && notif.hints["suppress-sound"]);
+            if (SettingsData.soundsEnabled && SettingsData.soundNewNotification && !suppressSound) {
                 if (policy.urgency === NotificationUrgency.Critical) {
                     AudioService.playCriticalNotificationSound();
                 } else {
