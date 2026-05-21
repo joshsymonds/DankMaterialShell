@@ -44,14 +44,21 @@ Item {
         Item {
             id: contentHolder
             width: parent.width
-            // Computed height: parent (Column) minus label rows and their spacing,
-            // so the slot is at least Theme.iconSize and grows to fill remaining
-            // OSD body. Works the same for horizontal (~40 high) and vertical
-            // (whatever the OSD's tall axis allows).
+            // Computed height: Column body minus whichever single label is
+            // visible (plus its inter-row spacing). topLabel and bottomLabel
+            // are mutually exclusive by construction — their `visible`
+            // bindings split on `useVertical` — so at most one of topH/botH
+            // is ever non-zero. We never double-count spacing.
+            //
+            // Works the same for horizontal (~40 high) and vertical
+            // (whatever the OSD's tall axis allows). No floor: if the
+            // residual is too small to fit the slot's content, the bug is
+            // upstream in the consumer's osdHeight and should be exposed,
+            // not papered over here.
             height: {
                 const topH = topLabel.visible ? topLabel.implicitHeight + parent.spacing : 0;
                 const botH = bottomLabel.visible ? bottomLabel.implicitHeight + parent.spacing : 0;
-                return Math.max(Theme.iconSize, parent.height - topH - botH);
+                return parent.height - topH - botH;
             }
         }
 

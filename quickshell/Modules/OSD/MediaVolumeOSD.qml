@@ -162,7 +162,7 @@ DankOSD {
                     radius: Theme.iconSize / 2
                     color: "transparent"
                     anchors.horizontalCenter: parent.horizontalCenter
-                    y: gap
+                    y: parent.gap
 
                     DankIcon {
                         anchors.centerIn: parent
