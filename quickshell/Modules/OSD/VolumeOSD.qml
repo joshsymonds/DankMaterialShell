@@ -15,8 +15,12 @@ DankOSD {
         _displayVolume = Math.min(AudioService.sinkMaxVolume, Math.round(AudioService.sink.audio.volume * 100));
     }
 
+    // Horizontal: 40 (icon/slider row) + fontSizeSmall (label) + spacingS*3
+    // (Column margins top+bottom + spacingXS between label and content, rounded
+    // up). Vertical keeps original width — label fits at ~48px after elision;
+    // bump later if visual review on a vertical-bar setup shows clipping.
     osdWidth: useVertical ? (40 + Theme.spacingS * 2) : Math.min(260, Screen.width - Theme.spacingM * 2)
-    osdHeight: useVertical ? Math.min(260, Screen.height - Theme.spacingM * 2) : (40 + Theme.spacingS * 2)
+    osdHeight: useVertical ? Math.min(260, Screen.height - Theme.spacingM * 2) : (40 + Theme.fontSizeSmall + Theme.spacingS * 3)
     autoHideInterval: 3000
     enableMouseInteraction: true
 
@@ -53,73 +57,77 @@ DankOSD {
     Component {
         id: horizontalContent
 
-        Item {
-            property int gap: Theme.spacingS
+        OSDLabeledContent {
+            anchors.fill: parent
+            title: AudioService.displayName(AudioService.sink) || ""
+            useVertical: false
 
-            anchors.centerIn: parent
-            width: parent.width - Theme.spacingS * 2
-            height: 40
+            Item {
+                property int gap: Theme.spacingS
 
-            Rectangle {
-                width: Theme.iconSize
-                height: Theme.iconSize
-                radius: Theme.iconSize / 2
-                color: "transparent"
-                x: parent.gap
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.fill: parent
 
-                DankIcon {
-                    anchors.centerIn: parent
-                    name: AudioService.sink?.audio?.muted ? "volume_off" : "volume_up"
-                    size: Theme.iconSize
-                    color: muteButton.containsMouse ? Theme.primary : Theme.surfaceText
+                Rectangle {
+                    width: Theme.iconSize
+                    height: Theme.iconSize
+                    radius: Theme.iconSize / 2
+                    color: "transparent"
+                    x: parent.gap
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    DankIcon {
+                        anchors.centerIn: parent
+                        name: AudioService.sink?.audio?.muted ? "volume_off" : "volume_up"
+                        size: Theme.iconSize
+                        color: muteButton.containsMouse ? Theme.primary : Theme.surfaceText
+                    }
+
+                    MouseArea {
+                        id: muteButton
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: AudioService.toggleMute()
+                        onContainsMouseChanged: setChildHovered(containsMouse || volumeSlider.containsMouse)
+                    }
                 }
 
-                MouseArea {
-                    id: muteButton
+                DankSlider {
+                    id: volumeSlider
 
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: AudioService.toggleMute()
-                    onContainsMouseChanged: setChildHovered(containsMouse || volumeSlider.containsMouse)
-                }
-            }
+                    width: parent.width - Theme.iconSize - parent.gap * 3
+                    height: 40
+                    x: parent.gap * 2 + Theme.iconSize
+                    anchors.verticalCenter: parent.verticalCenter
+                    minimum: 0
+                    maximum: AudioService.sinkMaxVolume
+                    enabled: AudioService.sink?.audio ?? false
+                    showValue: true
+                    unit: "%"
+                    thumbOutlineColor: Theme.surfaceContainer
+                    valueOverride: root._displayVolume
+                    alwaysShowValue: SettingsData.osdAlwaysShowValue
 
-            DankSlider {
-                id: volumeSlider
+                    Component.onCompleted: {
+                        root._syncVolume();
+                        value = root._displayVolume;
+                    }
 
-                width: parent.width - Theme.iconSize - parent.gap * 3
-                height: 40
-                x: parent.gap * 2 + Theme.iconSize
-                anchors.verticalCenter: parent.verticalCenter
-                minimum: 0
-                maximum: AudioService.sinkMaxVolume
-                enabled: AudioService.sink?.audio ?? false
-                showValue: true
-                unit: "%"
-                thumbOutlineColor: Theme.surfaceContainer
-                valueOverride: root._displayVolume
-                alwaysShowValue: SettingsData.osdAlwaysShowValue
+                    onSliderValueChanged: newValue => {
+                        if (!AudioService.sink?.audio)
+                            return;
+                        SessionData.suppressOSDTemporarily();
+                        AudioService.sink.audio.volume = newValue / 100;
+                        resetHideTimer();
+                    }
 
-                Component.onCompleted: {
-                    root._syncVolume();
-                    value = root._displayVolume;
-                }
+                    onContainsMouseChanged: setChildHovered(containsMouse || muteButton.containsMouse)
 
-                onSliderValueChanged: newValue => {
-                    if (!AudioService.sink?.audio)
-                        return;
-                    SessionData.suppressOSDTemporarily();
-                    AudioService.sink.audio.volume = newValue / 100;
-                    resetHideTimer();
-                }
-
-                onContainsMouseChanged: setChildHovered(containsMouse || muteButton.containsMouse)
-
-                Binding on value {
-                    value: root._displayVolume
-                    when: !volumeSlider.pressed
+                    Binding on value {
+                        value: root._displayVolume
+                        when: !volumeSlider.pressed
+                    }
                 }
             }
         }
@@ -128,17 +136,22 @@ DankOSD {
     Component {
         id: verticalContent
 
-        Item {
+        OSDLabeledContent {
             anchors.fill: parent
-            property int gap: Theme.spacingS
+            title: AudioService.displayName(AudioService.sink) || ""
+            useVertical: true
 
-            Rectangle {
-                width: Theme.iconSize
-                height: Theme.iconSize
-                radius: Theme.iconSize / 2
-                color: "transparent"
-                anchors.horizontalCenter: parent.horizontalCenter
-                y: gap
+            Item {
+                anchors.fill: parent
+                property int gap: Theme.spacingS
+
+                Rectangle {
+                    width: Theme.iconSize
+                    height: Theme.iconSize
+                    radius: Theme.iconSize / 2
+                    color: "transparent"
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: gap
 
                 DankIcon {
                     anchors.centerIn: parent
@@ -240,14 +253,15 @@ DankOSD {
                 }
             }
 
-            StyledText {
-                anchors.bottom: parent.bottom
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.bottomMargin: gap
-                text: vertSlider.value + "%"
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                visible: SettingsData.osdAlwaysShowValue
+                StyledText {
+                    anchors.bottom: parent.bottom
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottomMargin: parent.gap
+                    text: vertSlider.value + "%"
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceText
+                    visible: SettingsData.osdAlwaysShowValue
+                }
             }
         }
     }
