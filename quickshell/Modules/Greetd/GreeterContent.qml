@@ -702,7 +702,7 @@ Item {
         smooth: true
         asynchronous: false
         cache: true
-        visible: source !== ""
+        visible: source !== "" && !GreetdSettings.greeterTransparentBackground
         layer.enabled: true
 
         layer.effect: MultiEffect {
@@ -725,6 +725,7 @@ Item {
         anchors.fill: parent
         color: "black"
         opacity: 0.4
+        visible: !GreetdSettings.greeterTransparentBackground
     }
 
     SystemClock {

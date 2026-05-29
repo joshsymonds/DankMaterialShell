@@ -37,6 +37,14 @@ Singleton {
     property string greeterLockDateFormat: ""
     property string greeterFontFamily: ""
     property string greeterWallpaperFillMode: ""
+    // When true, the greeter renders no wallpaper Image and no dim
+    // Rectangle — the layer surface (already transparent) reveals
+    // whatever the underlying compositor is painting. Intended for
+    // hosts like halmasuit (Linux system compositor) which paint the
+    // wallpaper themselves; without this, DMS's own SessionData
+    // fallback paints opaque on top. Default false preserves upstream
+    // behavior; flip true only in greeter contexts.
+    property bool greeterTransparentBackground: false
     property bool useFahrenheit: false
     property bool nightModeEnabled: false
     property string weatherLocation: "New York, NY"
@@ -94,6 +102,7 @@ Singleton {
             greeterLockDateFormat = settings.greeterLockDateFormat !== undefined ? settings.greeterLockDateFormat : "";
             greeterFontFamily = settings.greeterFontFamily !== undefined ? settings.greeterFontFamily : "";
             greeterWallpaperFillMode = settings.greeterWallpaperFillMode !== undefined ? settings.greeterWallpaperFillMode : "";
+            greeterTransparentBackground = settings.greeterTransparentBackground !== undefined ? settings.greeterTransparentBackground : false;
             useFahrenheit = settings.useFahrenheit !== undefined ? settings.useFahrenheit : false;
             nightModeEnabled = settings.nightModeEnabled !== undefined ? settings.nightModeEnabled : false;
             weatherLocation = settings.weatherLocation !== undefined ? settings.weatherLocation : "New York, NY";
