@@ -118,12 +118,18 @@ vec4 quatMul(vec4 a, vec4 b) {
                 a.w * b.w - dot(a.xyz, b.xyz));
 }
 
-// Flip axis: in-plane, perpendicular to the direction from the wave
-// origin, so scales tip over away from it like dominoes.
+// Flip axis: in-plane, roughly perpendicular to the direction from the
+// wave origin so scales tip over away from it like dominoes, snapped to
+// the nearest of the hexagon's symmetry lines (every 30°). A half-turn
+// about any other line mirrors the hexagon into a rotated copy of
+// itself that no longer lines up with its neighbours; about a symmetry
+// line it lands exactly on its own outline.
 vec2 flipAxis(vec2 center) {
     vec2 out_ = center - vec2(ubuf.flipOriginX, ubuf.flipOriginY);
-    float len = length(out_);
-    return len > 0.001 ? vec2(-out_.y, out_.x) / len : vec2(1.0, 0.0);
+    if (length(out_) < 0.001) return vec2(1.0, 0.0);
+    float stride = PI3 * 0.5;
+    float angle = floor(atan(out_.x, -out_.y) / stride + 0.5) * stride;
+    return vec2(cos(angle), sin(angle));
 }
 
 // Bar-zone elevation bump for a cell at the given virtual-canvas

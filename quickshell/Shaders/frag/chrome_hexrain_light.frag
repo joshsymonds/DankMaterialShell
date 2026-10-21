@@ -163,9 +163,11 @@ vec3 paletteCycleNext(float phase) {
     return mix(c0, c1, frac);
 }
 
-// Flip-wave phase at a world-space position (here, a sun's): hex steps
-// from the origin delay the start; each position then walks 0 → 1 over
-// flipDuration.
+// Flip-wave phase at a world-space position: hex steps from the origin
+// delay the start; each position then walks 0 → 1 over flipDuration.
+// Sun light changes palette per point as the wave passes it, so the
+// background's colour sweeps with the wave rather than a whole sun's
+// glow switching at once when the wave reaches its centre.
 float positionFlipPhase(vec2 worldPos, float pitchY) {
     vec2 flipOrigin = vec2(ubuf.flipOriginX, ubuf.flipOriginY);
     float distFromOrigin = distance(worldPos, flipOrigin);
@@ -210,7 +212,7 @@ vec3 underglow(vec2 px, float pitchY) {
         float rateVar = 0.6 + colorHash * 0.8;
         float phaseColor = ubuf.backPaletteClock * 0.1 * rateVar
                          + slotAnchor + slotJitter;
-        float sunFlip = positionFlipPhase(sunPos, pitchY);
+        float sunFlip = positionFlipPhase(px, pitchY);
         vec3 col = mix(paletteCycle(phaseColor),
                        paletteCycleNext(phaseColor),
                        sunFlip);
@@ -231,7 +233,7 @@ vec3 underglow(vec2 px, float pitchY) {
         // palette clock.
         float fbPhase = ubuf.backPaletteClock * 0.1
                       + fbPlace.w * 3.0;
-        float fbFlip = positionFlipPhase(fbPlace.xy, pitchY);
+        float fbFlip = positionFlipPhase(px, pitchY);
         vec3 fbCol = mix(paletteCycle(fbPhase),
                          paletteCycleNext(fbPhase),
                          fbFlip);
@@ -302,22 +304,9 @@ void main() {
     }
 
     // Front-sun colour starts at colorTertiary (paletteCycle offset +2)
-    // and optionally cycles on frontPaletteClock. During a flip it
-    // blends to the Next palette by the reach-weighted average flip phase
-    // of the front suns lighting this point.
-    float frontFlipBlend = 0.0;
-    float frontFlipWeight = 0.0;
-    for (int s = 0; s < 10; s++) {
-        if (s >= nFrontPos) break;
-        vec4 place = frontSunSlot(s);
-        vec2 toSun = place.xy - px;
-        float pxReach = exp(-dot(toSun, toSun) * frontInvSig2) * place.z;
-        frontFlipBlend  += positionFlipPhase(place.xy, pitchY) * pxReach;
-        frontFlipWeight += pxReach;
-    }
-    float frontFlipNorm = (frontFlipWeight > 0.001)
-                        ? frontFlipBlend / frontFlipWeight
-                        : 0.0;
+    // and optionally cycles on frontPaletteClock; it changes palette as
+    // the flip wave passes this point.
+    float frontFlipNorm = positionFlipPhase(px, pitchY);
     float fpt = ubuf.frontPaletteClock * 0.1;
     vec3 frontSunColor = mix(paletteCycle(fpt + 2.0),
                              paletteCycleNext(fpt + 2.0),

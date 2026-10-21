@@ -339,6 +339,9 @@ FloatingWindow {
     // Snapshot of the active preset at the moment flip was triggered.
     // Used as the "from" side of the parameter tween.
     property var flipFromSnapshot: ({})
+    // Set while a flip commit switches activePath to the scene that's
+    // already live, so the resulting file load doesn't re-apply it.
+    property bool adoptingActive: false
     property var flipTargetPreset: ({})
     // Wave duration in iTime-seconds — drives the tween clock.
     property real flipTweenDuration: 1.0
@@ -367,8 +370,6 @@ FloatingWindow {
             Math.max(oy, h - oy) * Math.max(oy, h - oy));
         const pitch = Math.max(cellSize * 1.7320508, 1.0);
         const totalSec = (maxDist / pitch) * propDelay + duration;
-        const speed = root.harnessState.speed !== undefined ? root.harnessState.speed : 1.0;
-        const wallClockMs = totalSec * 1000.0 / Math.max(speed, 0.01) + 200.0;
 
         // Snapshot the active preset so the tween has a stable "from" side
         // even if external file changes come in mid-flip.
@@ -398,8 +399,6 @@ FloatingWindow {
         applyState();
         flipActive = true;
         flipTweenTimer.start();
-        flipCommitTimer.interval = Math.max(50, wallClockMs);
-        flipCommitTimer.start();
     }
 
     // Per-frame numeric tween. Lerps every non-color numeric key from
@@ -431,64 +430,69 @@ FloatingWindow {
             }
             root.shaderState = root.shaderState;
             root.applyState();
-            if (t >= 1.0) flipTweenTimer.stop();
+            // The tween runs exactly as long as the wave, in shader time,
+            // so finishing it is when every scale has turned: commit then,
+            // with every tweened value already at the target.
+            if (t >= 1.0) {
+                flipTweenTimer.stop();
+                root.commitFlip();
+            }
         }
     }
 
-    Timer {
-        id: flipCommitTimer
-        repeat: false
-        onTriggered: {
-            // Stop the tween (may have already finished naturally) and
-            // apply the target preset's values WHOLESALE so we end up
-            // exactly at the destination — no rounding drift.
-            flipTweenTimer.stop();
-            for (const k in root.flipTargetPreset) {
-                if (root.noTweenKeys[k]) continue;
+    // Ends a flip: the target becomes the active scene.
+    function commitFlip() {
+        // Apply the target preset's values WHOLESALE so we end up
+        // exactly at the destination — no rounding drift.
+        for (const k in root.flipTargetPreset) {
+            if (root.noTweenKeys[k]) continue;
+            root.shaderState[k] = root.flipTargetPreset[k];
+        }
+        // Apply target colours as the new "current". The shader's
+        // *Next slots already hold the target colours from the
+        // trigger; we copy them into "current" so the post-commit
+        // render (with flipStartTime reset → phase=0 → renders
+        // current) shows the target palette exactly.
+        const colorKeys = [
+            "colorPrimary", "colorSecondary",
+            "colorPrimaryContainer", "colorTertiary"
+        ];
+        for (let i = 0; i < colorKeys.length; i++) {
+            const k = colorKeys[i];
+            if (root.flipTargetPreset[k] !== undefined) {
                 root.shaderState[k] = root.flipTargetPreset[k];
             }
-            // Apply target colours as the new "current". The shader's
-            // *Next slots already hold the target colours from the
-            // trigger; we copy them into "current" so the post-commit
-            // render (with flipStartTime reset → phase=0 → renders
-            // current) shows the target palette exactly.
-            const colorKeys = [
-                "colorPrimary", "colorSecondary",
-                "colorPrimaryContainer", "colorTertiary"
-            ];
-            for (let i = 0; i < colorKeys.length; i++) {
-                const k = colorKeys[i];
-                if (root.flipTargetPreset[k] !== undefined) {
-                    root.shaderState[k] = root.flipTargetPreset[k];
-                }
-            }
-            // Swap active and target scenes: what was active becomes
-            // the new target (so flipping again returns to it), and
-            // what was target becomes the new active. Both the file
-            // paths and the in-memory snapshots swap.
-            const oldActiveData = JSON.parse(JSON.stringify(root.activeSceneData));
-            const oldActivePath = root.activePath;
-            root.activeSceneData = JSON.parse(JSON.stringify(root.targetSceneData));
-            root.targetSceneData = oldActiveData;
-            root.activePath = root.targetPath;
-            root.targetPath = oldActivePath;
-
-            // Refresh *Next colours so the next flip has a real delta
-            // (Next = what we'd flip to = the new target).
-            for (let i = 0; i < colorKeys.length; i++) {
-                const k = colorKeys[i];
-                if (root.targetSceneData[k] !== undefined) {
-                    root.shaderState[k + "Next"] = root.targetSceneData[k];
-                }
-            }
-            // Reset wave state to idle.
-            root.shaderState["flipStartTime"] = 1.0e9;
-            root.shaderState = root.shaderState;
-            root.applyState();
-            root.rebuildSections();
-            root.flipActive = false;
-            root.dirty = false;
         }
+        // Swap active and target scenes: what was active becomes
+        // the new target (so flipping again returns to it), and
+        // what was target becomes the new active. Both the file
+        // paths and the in-memory snapshots swap.
+        const oldActiveData = JSON.parse(JSON.stringify(root.activeSceneData));
+        const oldActivePath = root.activePath;
+        root.activeSceneData = JSON.parse(JSON.stringify(root.targetSceneData));
+        root.targetSceneData = oldActiveData;
+        // The live state already is the new active scene; don't let
+        // the file watcher's load of the new path replace it (that
+        // would bring back values kept out of the tween, like cellSize).
+        root.adoptingActive = true;
+        root.activePath = root.targetPath;
+        root.targetPath = oldActivePath;
+
+        // Refresh *Next colours so the next flip has a real delta
+        // (Next = what we'd flip to = the new target).
+        for (let i = 0; i < colorKeys.length; i++) {
+            const k = colorKeys[i];
+            if (root.targetSceneData[k] !== undefined) {
+                root.shaderState[k + "Next"] = root.targetSceneData[k];
+            }
+        }
+        // Reset wave state to idle.
+        root.shaderState["flipStartTime"] = 1.0e9;
+        root.shaderState = root.shaderState;
+        root.applyState();
+        root.rebuildSections();
+        root.flipActive = false;
+        root.dirty = false;
     }
 
     function setValue(section, key, value) {
@@ -969,6 +973,10 @@ FloatingWindow {
             reload();
         }
         onLoaded: {
+            if (root.adoptingActive) {
+                root.adoptingActive = false;
+                return;
+            }
             try {
                 const j = JSON.parse(text());
                 root.activeSceneData = j.shader || {};
@@ -1159,7 +1167,7 @@ FloatingWindow {
         // Sentinel = far-future iTime. Per-hex flip phase math gives
         // a negative numerator → clamped to 0 → renders the Current
         // palette. triggerFlip() sets this to the actual current
-        // iTime to kick off the wave; flipCommitTimer resets back to
+        // iTime to kick off the wave; commitFlip() resets back to
         // sentinel after the wave finishes.
         flipStartTime: 1.0e9
         flipPropDelay: 0.05

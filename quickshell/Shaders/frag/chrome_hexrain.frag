@@ -239,8 +239,9 @@ struct Hit {
 // Ray (ro, rd) against the scale of `cell`: a hexagonal slab of inradius
 // `apothem` and half-thickness `halfT` (edges facing the six neighbour
 // directions), centred on its cell lifted by its height and oriented by
-// its quaternion. A scale at rest is tested by its top face alone: its
-// tilted rim would show only as sub-pixel slivers. A turning scale is
+// its quaternion. A scale at rest — either way up, before or after its
+// half-turn — is tested by the face toward the camera alone: its tilted
+// rim would show only as sub-pixel slivers. A turning scale is
 // tested as the full slab (slab method over the z pair and three edge
 // pairs), so its rim shows as it goes edge-on. Keeps the two nearest
 // hits in `best` and `next`.
@@ -256,7 +257,7 @@ void testScale(vec2 cell, vec3 ro, vec3 rd, float pitchX, float pitchY,
     float t;
     float face = 0.0;
     float side = d.z < 0.0 ? 1.0 : -1.0;
-    if (pose.y < 0.02) {
+    if (pose.y < 0.02 || pose.y > 3.1216) {
         t = (side * halfT - o.z) / dz;
         if (!(t > 0.0) || hexExtent(o.xy + d.xy * t) > apothem)
             return;
@@ -299,12 +300,17 @@ float openingLight(float opening, float halfT) {
     return smoothstep(0.0, 2.0 * halfT + 2.0, opening);
 }
 
-// Height of neighbour k (angle k·60°) of scale `cell` minus the scale's
-// own, in px (cell pass).
-float edgeDelta(vec2 cell, float k) {
-    vec4 d = cellTexel(cell, k < 3.5 ? 6.0 : 7.0);
-    float j = k < 3.5 ? k : k - 4.0;
-    return j < 0.5 ? d.x : j < 1.5 ? d.y : j < 2.5 ? d.z : d.w;
+// A scale's neighbour height differences (cell pass): neighbour k's
+// height minus the scale's own, in px, k = 0..3 in d03 and 4, 5 in d45.
+// Fetched once per scale and handed to everything that reads them.
+void cellDeltas(vec2 cell, out vec4 d03, out vec4 d45) {
+    d03 = cellTexel(cell, 6.0);
+    d45 = cellTexel(cell, 7.0);
+}
+
+float deltaAt(vec4 d03, vec4 d45, float k) {
+    return k < 0.5 ? d03.x : k < 1.5 ? d03.y : k < 2.5 ? d03.z
+         : k < 3.5 ? d03.w : k < 4.5 ? d45.x : d45.y;
 }
 
 // How much of a light shining along `toLight` (unit, toward the light)
@@ -314,32 +320,41 @@ float edgeDelta(vec2 cell, float k) {
 // of, brightening this scale along that edge, so its shadow gives way to
 // that light as the opening widens: at any edge it's light from below or
 // a shadow, never both.
-// Each scale is treated as a flat hex at its top; the shadow test walks
-// from the point toward the light up to that height and checks the hex
-// there, with a penumbra that widens with the height difference. A
-// turning scale's footprint narrows across its flip axis, so its shadow
-// thins to nothing edge-on.
-float heightShadow(vec3 point, vec3 toLight, vec2 cell, float pitchX, float pitchY,
-                   float apothem, float halfT) {
+// Each scale is treated as a flat hex at its top, so a neighbour's shadow
+// is its hex shifted along the light by the height difference to the
+// point (the neighbour deltas plus the point's own offset from this
+// scale's top, `selfTop`); the test checks the point against it, with a
+// penumbra that widens with the height difference. While a flip runs, a
+// turning neighbour's footprint narrows across its flip axis, so its
+// shadow thins to nothing edge-on.
+float heightShadow(vec3 point, vec3 toLight, vec2 cell, vec4 d03, vec4 d45, float selfTop,
+                   bool turning, float pitchX, float pitchY, float apothem, float halfT) {
     // A low light would throw shadows past the neighbour ring; keep it
     // at least ~24° up.
     vec3 l = toLight.z < 0.4 ? normalize(vec3(toLight.xy, 0.0)) * 0.9165 + vec3(0.0, 0.0, 0.4) : toLight;
+    // The (up to) three neighbours facing the light: the one nearest its
+    // direction and the two either side.
+    float facing = mod(floor(atan(l.y, l.x) / PI3 + 0.5) + 6.0, 6.0);
     float shadow = 0.0;
-    for (int k = 0; k < 6; k++) {
-        float ang = float(k) * PI3;
-        if (dot(vec2(cos(ang), sin(ang)), l.xy) <= 0.05) continue;
-        float open = openingLight(edgeDelta(cell, float(k)) - 2.0 * halfT, halfT);
+    for (int n = -1; n <= 1; n++) {
+        float kf = mod(facing + float(n) + 6.0, 6.0);
+        int k = int(kf + 0.5);
+        if (dot(vec2(cos(kf * PI3), sin(kf * PI3)), l.xy) <= 0.05) continue;
+        float delta = deltaAt(d03, d45, kf);
+        float open = openingLight(delta - 2.0 * halfT, halfT);
         if (open >= 1.0) continue;
-        vec2 c = neighbourIdx(cell, k);
-        vec4 pose = cellTexel(c, 9.0);
         // Height difference only: the dome is shading curvature, and a
         // scale's rim (what shades its neighbour) sits at its flat top.
-        float rise = pose.x + halfT - point.z;
+        float rise = delta + selfTop - point.z;
         if (rise <= 0.5) continue;
+        vec2 c = neighbourIdx(cell, k);
         vec2 q = point.xy + l.xy * (rise / l.z) - latticeCenter(c, pitchX, pitchY);
-        vec2 axis = pose.zw;
-        vec2 across = vec2(-axis.y, axis.x);
-        q = axis * dot(q, axis) + across * (dot(q, across) / max(abs(cos(pose.y)), 0.05));
+        if (turning) {
+            vec4 pose = cellTexel(c, 9.0);
+            vec2 axis = pose.zw;
+            vec2 across = vec2(-axis.y, axis.x);
+            q = axis * dot(q, axis) + across * (dot(q, across) / max(abs(cos(pose.y)), 0.05));
+        }
         float penumbra = 0.6 + rise * 0.12;
         shadow = max(shadow, smoothstep(-penumbra, penumbra, apothem - hexExtent(q)) * (1.0 - open));
     }
@@ -351,7 +366,7 @@ float heightShadow(vec3 point, vec3 toLight, vec2 cell, float pitchX, float pitc
 // them the more open edge carries through, fading over 2 px: light from
 // an open gap spills into the junction and a dim seam begins past it,
 // rather than the dim seam eating into the end of the lit one.
-float edgeOpening(vec2 cell, vec2 p, float halfT) {
+float edgeOpening(vec4 d03, vec4 d45, vec2 p, float halfT) {
     float d0 = -1e9, d1 = -1e9;
     float k0 = 0.0, k1 = 0.0;
     for (int k = 0; k < 6; k++) {
@@ -364,8 +379,8 @@ float edgeOpening(vec2 cell, vec2 p, float halfT) {
             d1 = d; k1 = float(k);
         }
     }
-    float open0 = openingLight(abs(edgeDelta(cell, k0)) - 2.0 * halfT, halfT);
-    float open1 = openingLight(abs(edgeDelta(cell, k1)) - 2.0 * halfT, halfT);
+    float open0 = openingLight(abs(deltaAt(d03, d45, k0)) - 2.0 * halfT, halfT);
+    float open1 = openingLight(abs(deltaAt(d03, d45, k1)) - 2.0 * halfT, halfT);
     return max(open0, open1 * (1.0 - smoothstep(0.0, 2.0, d0 - d1)));
 }
 
@@ -386,6 +401,9 @@ vec3 underlayer(vec3 ro, vec3 rd, float opening) {
 // Shade a scale hit.
 vec3 shadeScale(Hit hit, vec3 ro, vec3 rd, float i, float pitchX, float pitchY,
                 float apothem, float halfT) {
+    vec4 d03, d45;
+    cellDeltas(hit.cell, d03, d45);
+    bool turning = ubuf.iTime > ubuf.flipStartTime;
     vec3 world = ro + rd * hit.t;
     vec4 lightA = lightAt(world.xy, 0.0);   // underglow, front reach
     vec4 lightB = lightAt(world.xy, 1.0);   // front colour, front darkness
@@ -439,7 +457,7 @@ vec3 shadeScale(Hit hit, vec3 ro, vec3 rd, float i, float pitchX, float pitchY,
         float stream = 0.0;
         float lip = 0.0;
         for (int k = 0; k < 6; k++) {
-            float delta = edgeDelta(hit.cell, float(k));
+            float delta = deltaAt(d03, d45, float(k));
             float ang = float(k) * PI3;
             float distIn = max(0.0, apothem - dot(faceXY, vec2(cos(ang), sin(ang))));
             if (delta - 2.0 * halfT > 0.0)
@@ -471,9 +489,12 @@ vec3 shadeScale(Hit hit, vec3 ro, vec3 rd, float i, float pitchX, float pitchY,
     // light itself stays modest (0.5×) so it never drowns the underglow;
     // the shadows are what show where a sun is.
     float lambert = max(0.0, (dot(normal, frontDir) + 0.1) / 1.1);
-    float sunShadow = lightA.a > 0.01
+    float sunLight = ubuf.frontSunStrength * 0.5 * lightA.a * lambert
+                   * max(lightB.r, max(lightB.g, lightB.b));
+    float sunShadow = sunLight > 0.01
         ? ubuf.scaleShadow * (1.0 - lit)
-          * heightShadow(world, frontDir, hit.cell, pitchX, pitchY, apothem, halfT)
+          * heightShadow(world, frontDir, hit.cell, d03, d45, hit.pose.x + halfT, turning,
+                         pitchX, pitchY, apothem, halfT)
         : 0.0;
     vec3 front = lightB.rgb * ubuf.frontSunStrength * 0.5 * lightA.a * lambert * (1.0 - sunShadow);
 
@@ -483,7 +504,8 @@ vec3 shadeScale(Hit hit, vec3 ro, vec3 rd, float i, float pitchX, float pitchY,
     // never reaches a lit edge.
     float keyLambert = max(0.0, (dot(normal, KEY_DIR) + 0.1) / 1.1);
     float shadow = ubuf.scaleShadow * (1.0 - lit)
-                 * heightShadow(world, KEY_DIR, hit.cell, pitchX, pitchY, apothem, halfT);
+                 * heightShadow(world, KEY_DIR, hit.cell, d03, d45, hit.pose.x + halfT, turning,
+                                pitchX, pitchY, apothem, halfT);
 
     // Body: the matte tint under ambient + key light, plus front light,
     // all modulated by grain, depth and shadow, then eaten by front-
@@ -492,13 +514,17 @@ vec3 shadeScale(Hit hit, vec3 ro, vec3 rd, float i, float pitchX, float pitchY,
     vec3 body = (tint * (0.55 * (1.0 - 0.35 * shadow) + ubuf.keyLight * 1.6 * keyLambert * (1.0 - shadow))
                  + front * (1.0 - 0.6 * shadow))
               * albedo * depthShade * (1.0 - lightB.a);
+    // A turned-up underside carries the glow it spent its life facing,
+    // in the new palette: full as it comes into view edge-on, fading as
+    // the scale settles face-up (sin of its turn: 1 at 90°, 0 at 180°).
+    float afterglow = hit.face < 0.5 && hit.side < 0.0 ? sin(hit.pose.y) : 0.0;
     vec3 glow = underglow * ubuf.seamGlow
-              * (leak
+              * (leak + afterglow
                  + ubuf.rimGlow * (1.0 - abs(normal.z)) * (hit.face < 0.5 ? 0.0 : 1.0)
                  + max(-normal.z, 0.0) * ubuf.rimGlow);
     vec3 color = body + glow;
     if (hit.face < 0.5) {
-        float pour = edgeOpening(hit.cell, faceXY, halfT);
+        float pour = edgeOpening(d03, d45, faceXY, halfT);
         if (pour > 0.0)
             color = mix(color, underlayer(ro, rd, pour),
                         pour * (1.0 - smoothstep(0.0, HALO_PX, apothem - hexExtent(hit.p.xy))));
@@ -516,7 +542,9 @@ vec3 standInScale(Hit hit, vec3 ro, vec3 rd, float i, float apothem, float halfT
               * (1.0 - ubuf.occlusion * 0.45 * lowness) * (1.0 - 0.35 * ubuf.scaleShadow);
     // Near an opening it is lit like the full shading would light it:
     // light streaming in from the edge, the seam colour at the edge.
-    float pour = edgeOpening(hit.cell, hit.p.xy, halfT);
+    vec4 d03, d45;
+    cellDeltas(hit.cell, d03, d45);
+    float pour = edgeOpening(d03, d45, hit.p.xy, halfT);
     if (pour <= 0.0)
         return body;
     float distIn = max(apothem - hexExtent(hit.p.xy), 0.0);
@@ -576,7 +604,18 @@ vec3 scaleField(vec2 px, float i, float pitchX, float pitchY) {
 
     // Through the gaps: the underglow itself, as much as the gap beside
     // the nearest edge lets out.
-    float gapOpening = edgeOpening(cellIdx, local, halfT);
+    vec4 gap03, gap45;
+    cellDeltas(cellIdx, gap03, gap45);
+    float gapOpening = edgeOpening(gap03, gap45, local, halfT);
+    // During a flip the wave front is a band of light: where scales stand
+    // on edge the gaps open wide (by sin of the turn there, evaluated per
+    // pixel so the band is a smooth line following the wave).
+    if (turning) {
+        float steps = distance(px, vec2(ubuf.flipOriginX, ubuf.flipOriginY)) / max(pitchY, 1.0);
+        float phase = clamp((ubuf.iTime - ubuf.flipStartTime - steps * ubuf.flipPropDelay)
+                            / max(ubuf.flipDuration, 0.001), 0.0, 1.0);
+        gapOpening = max(gapOpening, sin(3.14159265 * smoothstep(0.0, 1.0, phase)));
+    }
     if (hit.t > 1e29)
         return underlayer(ro, rd, gapOpening);
 
@@ -586,9 +625,7 @@ vec3 scaleField(vec2 px, float i, float pitchX, float pitchY) {
     // another by parallax shows only where the front one doesn't), and
     // the underglow in the gap whatever remains.
     float coverage = hit.face < 0.5 ? hexCoverage(hit.p.xy, apothem) : 1.0;
-    if (coverage >= 1.0)
-        return shadeScale(hit, ro, rd, i, pitchX, pitchY, apothem, halfT);
-    float behindCoverage = behind.t < 1e29 && behind.face < 0.5
+    float behindCoverage = coverage < 1.0 && behind.t < 1e29 && behind.face < 0.5
         ? min(hexCoverage(behind.p.xy, apothem), 1.0 - coverage) : 0.0;
 
     // The surface covering more of the pixel gets the full shading, the
@@ -606,6 +643,8 @@ vec3 scaleField(vec2 px, float i, float pitchX, float pitchY) {
         otherCoverage = coverage;
     }
     vec3 color = shadeScale(main, ro, rd, i, pitchX, pitchY, apothem, halfT) * mainCoverage;
+    if (mainCoverage >= 1.0)
+        return color;
     if (otherCoverage > 0.0)
         color += standInScale(other, ro, rd, i, apothem, halfT) * otherCoverage;
     float gap = 1.0 - coverage - behindCoverage;
