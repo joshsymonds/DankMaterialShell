@@ -5,9 +5,8 @@
 // the shader as per-slot uniforms (see HexrainEffect.qml) rather than
 // re-derived by every fragment.
 //
-// The arithmetic mirrors GLSL float32: every intermediate goes through
-// Math.fround, and GLSL literals are rounded the same way, so positions match
-// what the shader would compute itself to within GPU rounding.
+// The hash and noise are the shaders' own, in float32 (every intermediate
+// through Math.fround, GLSL literals rounded the same way).
 
 // Slots per category; the shader declares this many uniforms per category.
 var SLOTS = 10;
@@ -72,19 +71,21 @@ function noise(x, y) {
 
 // One sun appearance cycle: fade in at a hashed point, wander a 2D noise path
 // for `lifetime` seconds, fade out, then sit dark for (up to) `gap` seconds
-// before the slot respawns somewhere new. `t` is iTime * sunDriftSpeed.
+// before the slot respawns somewhere new. `cycles` counts appearance cycles
+// elapsed for the slot's category and `wander` how far along the noise path
+// it has drifted (see advance()), so lifetime, gap and speed can change
+// without the sun jumping.
 //
 // Returns [x, y, activeMask, appearanceHash]: virtual-canvas position, 0..1
 // visibility (smooth fade at the ends), and a per-appearance hash the shader
 // uses to pick palette phase.
-function placement(slotId, lifetime, gap, speed, t, resX, resY) {
+function placement(slotId, lifetime, gap, cycles, wander, resX, resY) {
     const period = Math.max(f(lifetime + gap), K_MIN_PERIOD);
     const seedX = f(f(slotId * 41) + 17);
-    const slotPhase = f(hash(seedX, K_SLOT_PHASE_Y) * period);
-
-    const tLocal = f(t - slotPhase);
-    const cycleIdx = Math.floor(f(tLocal / period));
-    const cycleT = f(tLocal - f(cycleIdx * period));
+    // Per-slot phase (fraction of a cycle) so slots don't spawn together.
+    const cyclePos = cycles - hash(seedX, K_SLOT_PHASE_Y);
+    const cycleIdx = Math.floor(cyclePos);
+    const cycleT = f((cyclePos - cycleIdx) * period);
 
     const seedY = f(f(cycleIdx * 31) + 5);
 
@@ -98,7 +99,7 @@ function placement(slotId, lifetime, gap, speed, t, resX, resY) {
     const ox = f(hash(f(seedX + 7), seedY) * 100);
     const oy = f(hash(seedX, f(seedY + 7)) * 100);
 
-    const drift = f(t * speed);
+    const drift = f(wander);
     const wx = noise(f(drift + ox), f(f(slotId * 13) + 11));
     const wy = noise(f(drift + oy), f(f(slotId * 13) + 91));
 
@@ -108,15 +109,25 @@ function placement(slotId, lifetime, gap, speed, t, resX, resY) {
     return [x, y, activeMask, hash(f(seedX + 41), f(seedY + 17))];
 }
 
+// Slots a (possibly fractional) count touches: the last one fades in with
+// the fraction, so a count tweened from 4 to 5 brings the fifth sun in
+// smoothly instead of popping it.
 function slotCount(count) {
-    return Math.min(SLOTS, Math.max(0, Math.floor(f(count + 0.5))));
+    return Math.min(SLOTS, Math.max(0, Math.ceil(count - 1e-6)));
 }
 
-function category(baseId, count, lifetime, gap, speed, t, resX, resY) {
+function category(baseId, count, lifetime, gap, clock, resX, resY) {
     const n = slotCount(count);
     const out = [];
-    for (let s = 0; s < SLOTS; s++)
-        out.push(s < n ? placement(f(s + baseId), f(lifetime), f(gap), f(speed), t, resX, resY) : [0, 0, 0, 0]);
+    for (let s = 0; s < SLOTS; s++) {
+        if (s >= n) {
+            out.push([0, 0, 0, 0]);
+            continue;
+        }
+        const p = placement(f(s + baseId), f(lifetime), f(gap), clock.cycles, clock.wander, resX, resY);
+        p[2] = f(p[2] * clamp(count - s, 0, 1));
+        out.push(p);
+    }
     return out;
 }
 
@@ -138,17 +149,57 @@ function empty() {
     };
 }
 
+// Sun categories by uniform prefix.
+var CATEGORIES = ["backSun", "fastBackSun", "backNegSun", "frontSun", "frontNegSun"];
+
+// Clocks for every rate-driven motion in chrome_hexrain, each advanced by
+// rate × Δt so changing a rate (a slider, or a scene tween across a flip)
+// changes speed from that moment on. Computing phase as time × rate instead
+// would jump every phase when the rate moves, since time is large.
+//   height, tilt          scale bob / tilt drift (heightDriftSpeed,
+//                         tiltDriftSpeed)
+//   backPalette,          sun palette cycling (backSunPaletteSpeed,
+//   frontPalette          frontSunPaletteSpeed)
+//   <category>.cycles     appearance cycles: sunDriftSpeed / (lifetime + gap)
+//   <category>.wander     noise-path travel: sunDriftSpeed × speed
+//
+// `prev` is the previous frame's clocks (null to start). A backwards or
+// multi-second jump in iTime restarts the clocks at time × rate.
+function advance(prev, u) {
+    const t = u.iTime;
+    const dt = prev ? t - prev.time : -1;
+    const restart = !(dt >= 0 && dt <= 5);
+    const span = restart ? t : dt;
+    const base = restart ? null : prev;
+    const k = {
+        time: t,
+        height: (base ? base.height : 0) + span * u.heightDriftSpeed,
+        tilt: (base ? base.tilt : 0) + span * u.tiltDriftSpeed,
+        backPalette: (base ? base.backPalette : 0) + span * u.backSunPaletteSpeed,
+        frontPalette: (base ? base.frontPalette : 0) + span * u.frontSunPaletteSpeed
+    };
+    for (const c of CATEGORIES) {
+        const period = Math.max(u[c + "Lifetime"] + u[c + "Gap"], K_MIN_PERIOD);
+        k[c] = {
+            cycles: (base ? base[c].cycles : 0) + span * u.sunDriftSpeed / period,
+            wander: (base ? base[c].wander : 0) + span * u.sunDriftSpeed * u[c + "Speed"]
+        };
+    }
+    return k;
+}
+
 // Every sun placement for one frame. `u` carries the shader's uniform values
-// by name (a HexrainEffect, or any object with the same properties).
-function field(u) {
-    const t = f(f(u.iTime) * f(u.sunDriftSpeed));
+// by name (a HexrainEffect, or any object with the same properties); `clocks`
+// comes from advance().
+function field(u, clocks) {
     const resX = f(u.iResolution.x);
     const resY = f(u.iResolution.y);
     return {
-        back: category(BACK_ID, u.backSunCount, u.backSunLifetime, u.backSunGap, u.backSunSpeed, t, resX, resY),
-        fastBack: placement(FAST_BACK_ID, f(u.fastBackSunLifetime), f(u.fastBackSunGap), f(u.fastBackSunSpeed), t, resX, resY),
-        backNeg: category(BACK_NEG_ID, u.backNegSunCount, u.backNegSunLifetime, u.backNegSunGap, u.backNegSunSpeed, t, resX, resY),
-        front: category(FRONT_ID, u.frontSunCount, u.frontSunLifetime, u.frontSunGap, u.frontSunSpeed, t, resX, resY),
-        frontNeg: category(FRONT_NEG_ID, u.frontNegSunCount, u.frontNegSunLifetime, u.frontNegSunGap, u.frontNegSunSpeed, t, resX, resY)
+        back: category(BACK_ID, u.backSunCount, u.backSunLifetime, u.backSunGap, clocks.backSun, resX, resY),
+        fastBack: placement(FAST_BACK_ID, f(u.fastBackSunLifetime), f(u.fastBackSunGap),
+                            clocks.fastBackSun.cycles, clocks.fastBackSun.wander, resX, resY),
+        backNeg: category(BACK_NEG_ID, u.backNegSunCount, u.backNegSunLifetime, u.backNegSunGap, clocks.backNegSun, resX, resY),
+        front: category(FRONT_ID, u.frontSunCount, u.frontSunLifetime, u.frontSunGap, clocks.frontSun, resX, resY),
+        frontNeg: category(FRONT_NEG_ID, u.frontNegSunCount, u.frontNegSunLifetime, u.frontNegSunGap, clocks.frontNegSun, resX, resY)
     };
 }

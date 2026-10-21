@@ -9,13 +9,15 @@ layout(location = 0) out vec4 fragColor;
 // bilinearly sample in the main pass. Only the front suns' hex-shaped cast
 // shadows are sharp; those stay per-pixel in the main pass.
 //
-// The texture is two lightCols x lightRows halves side by side, both covering
-// the whole virtual canvas (texel k centred on canvas pixel (k + 0.5) *
-// lightTexelPx):
-//   left  rgb = back-sun underglow after the hue cap and negative suns
-//         a   = front-sun reach (summed, clamped)
-//   right rgb = front-sun colour (palette, blended through the flip wave)
-//         a   = front-negative-sun darkness
+// The texture is three lightCols x lightRows blocks side by side, each
+// covering the whole virtual canvas (texel k centred on canvas pixel
+// (k + 0.5) * lightTexelPx):
+//   0  rgb = back-sun underglow after the hue cap and negative suns
+//      a   = front-sun reach (summed, clamped)
+//   1  rgb = front-sun colour (palette, blended through the flip wave)
+//      a   = front-negative-sun darkness
+//   2  xyz = dominant front-light direction (unit, toward the suns, which
+//            hang frontSunHeight px above the canvas; reach-weighted)
 layout(std140, binding = 0) uniform buf {
     mat4 qt_Matrix;
     float qt_Opacity;
@@ -29,12 +31,13 @@ layout(std140, binding = 0) uniform buf {
     vec4 colorSecondaryNext;
     vec4 colorTertiaryNext;
     float frontSunSize;
+    float frontSunHeight;
     float backSunSize;
     float backSunStrength;
     float backNegSunSize;
     float backNegSunStrength;
-    float backSunPaletteSpeed;
-    float frontSunPaletteSpeed;
+    float backPaletteClock;   // ∫ backSunPaletteSpeed dt (SunField.advance)
+    float frontPaletteClock;  // ∫ frontSunPaletteSpeed dt
     float backSunCount;
     float backNegSunCount;
     float frontSunCount;
@@ -160,9 +163,11 @@ vec3 paletteCycleNext(float phase) {
     return mix(c0, c1, frac);
 }
 
-// Flip-wave phase at a world-space position (here, a sun's): hex steps
-// from the origin delay the start; each position then walks 0 → 1 over
-// flipDuration.
+// Flip-wave phase at a world-space position: hex steps from the origin
+// delay the start; each position then walks 0 → 1 over flipDuration.
+// Sun light changes palette per point as the wave passes it, so the
+// background's colour sweeps with the wave rather than a whole sun's
+// glow switching at once when the wave reaches its centre.
 float positionFlipPhase(vec2 worldPos, float pitchY) {
     vec2 flipOrigin = vec2(ubuf.flipOriginX, ubuf.flipOriginY);
     float distFromOrigin = distance(worldPos, flipOrigin);
@@ -180,8 +185,10 @@ vec3 underglow(vec2 px, float pitchY) {
 
     float sigma = max(ubuf.backSunSize * canvasMax, 1.0);
     float invSig2 = 1.0 / (sigma * sigma);
-    int nBackPos = int(ubuf.backSunCount + 0.5);
-    float fnBackPos = max(float(nBackPos), 1.0);
+    // Counts may be fractional mid-tween; the partial slot's mask carries
+    // the fraction (SunField.js).
+    int nBackPos = int(ceil(ubuf.backSunCount - 1e-6));
+    float fnBackPos = max(ubuf.backSunCount, 1.0);
 
     vec3 lightRaw = vec3(0.0);
     for (int s = 0; s < 10; s++) {
@@ -197,15 +204,15 @@ vec3 underglow(vec2 px, float pitchY) {
         // of the palette (so two slots can't pile onto the same hue at
         // spawn). colorHash dithers within that slice so the exact hue
         // varies appearance-to-appearance; per-sun rate variance
-        // (0.6x..1.4x of backSunPaletteSpeed) lets neighbours drift past
+        // (0.6x..1.4x of the palette clock) lets neighbours drift past
         // each other only briefly.
         float segWidth = 3.0 / fnBackPos;
         float slotAnchor = float(s) * segWidth;
         float slotJitter = (colorHash - 0.5) * segWidth * 0.8;
         float rateVar = 0.6 + colorHash * 0.8;
-        float phaseColor = ubuf.iTime * 0.1 * ubuf.backSunPaletteSpeed * rateVar
+        float phaseColor = ubuf.backPaletteClock * 0.1 * rateVar
                          + slotAnchor + slotJitter;
-        float sunFlip = positionFlipPhase(sunPos, pitchY);
+        float sunFlip = positionFlipPhase(px, pitchY);
         vec3 col = mix(paletteCycle(phaseColor),
                        paletteCycleNext(phaseColor),
                        sunFlip);
@@ -224,9 +231,9 @@ vec3 underglow(vec2 px, float pitchY) {
         float fbG = exp(-dot(fbD, fbD) * fbInvSig2);
         // Per-appearance random palette phase on the shared back-sun
         // palette clock.
-        float fbPhase = ubuf.iTime * 0.1 * ubuf.backSunPaletteSpeed
+        float fbPhase = ubuf.backPaletteClock * 0.1
                       + fbPlace.w * 3.0;
-        float fbFlip = positionFlipPhase(fbPlace.xy, pitchY);
+        float fbFlip = positionFlipPhase(px, pitchY);
         vec3 fbCol = mix(paletteCycle(fbPhase),
                          paletteCycleNext(fbPhase),
                          fbFlip);
@@ -243,7 +250,7 @@ vec3 underglow(vec2 px, float pitchY) {
     // is there, as drifting dark patches.
     float negSunSigma = max(ubuf.backNegSunSize * canvasMax, 1.0);
     float negInvSig2 = 1.0 / (negSunSigma * negSunSigma);
-    int nBackNeg = int(ubuf.backNegSunCount + 0.5);
+    int nBackNeg = int(ceil(ubuf.backNegSunCount - 1e-6));
     for (int s = 0; s < 10; s++) {
         if (s >= nBackNeg) break;
         vec4 place = backNegSunSlot(s);
@@ -260,16 +267,29 @@ void main() {
     float pitchY = 1.7320508 * max(1.0, ubuf.cellSize);
     float canvasMax = max(ubuf.iResolution.x, ubuf.iResolution.y);
 
-    vec2 texel = floor(qt_TexCoord0 * vec2(ubuf.lightCols * 2.0, ubuf.lightRows));
-    bool rightHalf = texel.x >= ubuf.lightCols;
-    if (rightHalf) texel.x -= ubuf.lightCols;
+    vec2 texel = floor(qt_TexCoord0 * vec2(ubuf.lightCols * 3.0, ubuf.lightRows));
+    float block = floor(texel.x / ubuf.lightCols);
+    texel.x -= block * ubuf.lightCols;
     vec2 px = (texel + 0.5) * ubuf.lightTexelPx;
 
     float frontSunSigma = max(ubuf.frontSunSize * canvasMax * 0.5, 1.0);
     float frontInvSig2 = 1.0 / (frontSunSigma * frontSunSigma);
-    int nFrontPos = int(ubuf.frontSunCount + 0.5);
+    int nFrontPos = int(ceil(ubuf.frontSunCount - 1e-6));
 
-    if (!rightHalf) {
+    if (block > 1.5) {
+        vec3 dir = vec3(0.0);
+        for (int s = 0; s < 10; s++) {
+            if (s >= nFrontPos) break;
+            vec4 place = frontSunSlot(s);
+            vec2 toSun = place.xy - px;
+            float reach = exp(-dot(toSun, toSun) * frontInvSig2) * place.z;
+            dir += normalize(vec3(toSun, ubuf.frontSunHeight)) * reach;
+        }
+        fragColor = vec4(length(dir) > 1e-6 ? normalize(dir) : vec3(0.0, 0.0, 1.0), 1.0);
+        return;
+    }
+
+    if (block < 0.5) {
         float frontSunReach = 0.0;
         for (int s = 0; s < 10; s++) {
             if (s >= nFrontPos) break;
@@ -284,23 +304,10 @@ void main() {
     }
 
     // Front-sun colour starts at colorTertiary (paletteCycle offset +2)
-    // and optionally cycles at frontSunPaletteSpeed. During a flip it
-    // blends to the Next palette by the reach-weighted average flip phase
-    // of the front suns lighting this point.
-    float frontFlipBlend = 0.0;
-    float frontFlipWeight = 0.0;
-    for (int s = 0; s < 10; s++) {
-        if (s >= nFrontPos) break;
-        vec4 place = frontSunSlot(s);
-        vec2 toSun = place.xy - px;
-        float pxReach = exp(-dot(toSun, toSun) * frontInvSig2) * place.z;
-        frontFlipBlend  += positionFlipPhase(place.xy, pitchY) * pxReach;
-        frontFlipWeight += pxReach;
-    }
-    float frontFlipNorm = (frontFlipWeight > 0.001)
-                        ? frontFlipBlend / frontFlipWeight
-                        : 0.0;
-    float fpt = ubuf.iTime * 0.1 * ubuf.frontSunPaletteSpeed;
+    // and optionally cycles on frontPaletteClock; it changes palette as
+    // the flip wave passes this point.
+    float frontFlipNorm = positionFlipPhase(px, pitchY);
+    float fpt = ubuf.frontPaletteClock * 0.1;
     vec3 frontSunColor = mix(paletteCycle(fpt + 2.0),
                              paletteCycleNext(fpt + 2.0),
                              frontFlipNorm);
@@ -309,7 +316,7 @@ void main() {
     // Strongest one wins (max, not sum) so overlaps can't pass the cap.
     float frontNegSigma = max(ubuf.frontNegSunSize * canvasMax * 0.5, 1.0);
     float frontNegInvSig2 = 1.0 / (frontNegSigma * frontNegSigma);
-    int nFrontNeg = int(ubuf.frontNegSunCount + 0.5);
+    int nFrontNeg = int(ceil(ubuf.frontNegSunCount - 1e-6));
     float frontDarkness = 0.0;
     for (int s = 0; s < 10; s++) {
         if (s >= nFrontNeg) break;

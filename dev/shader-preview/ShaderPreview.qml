@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import Qt.labs.folderlistmodel
 import Quickshell
 import Quickshell.Io
-import "../../quickshell/Widgets"
+import "hexrain/Widgets"
 
 // Standalone Quickshell scene for iterating on a chrome-family shader (currently
 // chrome_hexrain — chrome_aurora shares the same uniforms and would slot in by
@@ -92,7 +92,6 @@ FloatingWindow {
         "sunDriftSpeed":  { min: 0.0, max: 3.0, step: 0.05 },
         "heightAmount":   { min: 0.0, max: 1.0, step: 0.01 },
         "matteness":      { min: 0.0, max: 1.0, step: 0.01 },
-        "bleedBack":      { min: 0.0, max: 0.3, step: 0.005 },
         "hexBevel":       { min: 0.0, max: 1.0, step: 0.01 },
         "heightDriftSpeed": { min: 0.0, max: 3.0, step: 0.05 },
         "frontSunStrength": { min: 0.0, max: 5.0, step: 0.02 },
@@ -100,8 +99,6 @@ FloatingWindow {
         "frontSunLifetime": { min: 5.0, max: 180.0, step: 1.0 },
         "frontSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
         "frontSunSpeed":    { min: 0.0, max: 0.5, step: 0.002 },
-        "frontSunShadowLength":   { min: 0.0, max: 4.0, step: 0.05 },
-        "frontSunShadowDarkness": { min: 0.0, max: 3.0, step: 0.02 },
         "backSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
         "backSunStrength": { min: 0.0, max: 3.0, step: 0.02 },
         "backSunLifetime": { min: 5.0, max: 180.0, step: 1.0 },
@@ -134,9 +131,20 @@ FloatingWindow {
         "barZoneElevation": { min: 0.0, max: 2.0, step: 0.02 },
         "flipPropDelay":  { min: 0.0, max: 0.5, step: 0.005 },
         "flipDuration":   { min: 0.05, max: 3.0, step: 0.05 },
-        "depthShading":   { min: 0.0, max: 1.0, step: 0.01 },
-        "flipSpecular":   { min: 0.0, max: 3.0, step: 0.02 },
-        "hexDepth":       { min: 0.0, max: 1.5, step: 0.02 }
+        "heightRange": { min: 0.0, max: 30.0, step: 0.25 },
+        "tiltMax": { min: 0.0, max: 0.4, step: 0.005 },
+        "tiltDriftSpeed": { min: 0.0, max: 3.0, step: 0.05 },
+        "slabThickness": { min: 0.5, max: 20.0, step: 0.25 },
+        "domeHeight": { min: 0.0, max: 12.0, step: 0.1 },
+        "cameraDistance": { min: 800.0, max: 20000.0, step: 50.0 },
+        "frontSunHeight": { min: 50.0, max: 3000.0, step: 10.0 },
+        "grainScale": { min: 0.02, max: 0.4, step: 0.01 },
+        "grainStrength": { min: 0.0, max: 2.0, step: 0.02 },
+        "rimGlow": { min: 0.0, max: 3.0, step: 0.02 },
+        "keyLight": { min: 0.0, max: 2.0, step: 0.02 },
+        "scaleShadow": { min: 0.0, max: 1.0, step: 0.01 },
+        "seamBase": { min: 0.0, max: 1.0, step: 0.01 },
+        "occlusion": { min: 0.0, max: 1.0, step: 0.01 }
     })
 
     // Section grouping: a fixed-order list of named sections, each with the
@@ -145,13 +153,21 @@ FloatingWindow {
     readonly property var sectionMap: ([
         { name: "field", keys: [
             "intensity", "cellSize", "modeAmount", "domeStrength", "seamGlow",
-            "sunDriftSpeed", "heightAmount", "matteness", "bleedBack",
-            "hexBevel", "heightDriftSpeed", "depthShading", "hexDepth"
+            "sunDriftSpeed", "heightAmount", "matteness",
+            "hexBevel"
+        ] },
+        { name: "scales", keys: [
+            "heightRange", "heightDriftSpeed", "tiltMax", "tiltDriftSpeed",
+            "slabThickness", "domeHeight", "cameraDistance"
+        ] },
+        { name: "material", keys: [
+            "grainScale", "grainStrength", "rimGlow", "keyLight", "scaleShadow", "seamBase", "occlusion"
         ] },
         { name: "front sun", keys: [
             "frontSunCount", "frontSunStrength", "frontSunSize",
             "frontSunLifetime", "frontSunGap", "frontSunSpeed",
-            "frontSunShadowLength", "frontSunShadowDarkness", "frontSunPaletteSpeed"
+            "frontSunPaletteSpeed",
+            "frontSunHeight"
         ] },
         { name: "negative front sun", keys: [
             "frontNegSunCount", "frontNegSunStrength", "frontNegSunSize",
@@ -177,7 +193,7 @@ FloatingWindow {
             "colorPrimary", "colorSecondary", "colorPrimaryContainer", "colorTertiary"
         ] },
         { name: "flip", keys: [
-            "flipPropDelay", "flipDuration", "flipSpecular"
+            "flipPropDelay", "flipDuration"
         ] },
         { name: "harness", keys: ["speed"] }
     ])
@@ -302,7 +318,10 @@ FloatingWindow {
     property bool flipActive: false
     // Keys NOT tweened: the wave's own controls, flip state, and the
     // colour pairs (which the shader handles via per-cell flip phase).
+    // cellSize is the grid itself: tweening it mid-flip slides every scale
+    // under the turning ones, so it stays at the active scene's value.
     readonly property var noTweenKeys: ({
+        "cellSize":       true,
         "flipStartTime":  true,
         "flipOriginX":    true,
         "flipOriginY":    true,
@@ -320,6 +339,9 @@ FloatingWindow {
     // Snapshot of the active preset at the moment flip was triggered.
     // Used as the "from" side of the parameter tween.
     property var flipFromSnapshot: ({})
+    // Set while a flip commit switches activePath to the scene that's
+    // already live, so the resulting file load doesn't re-apply it.
+    property bool adoptingActive: false
     property var flipTargetPreset: ({})
     // Wave duration in iTime-seconds — drives the tween clock.
     property real flipTweenDuration: 1.0
@@ -348,8 +370,6 @@ FloatingWindow {
             Math.max(oy, h - oy) * Math.max(oy, h - oy));
         const pitch = Math.max(cellSize * 1.7320508, 1.0);
         const totalSec = (maxDist / pitch) * propDelay + duration;
-        const speed = root.harnessState.speed !== undefined ? root.harnessState.speed : 1.0;
-        const wallClockMs = totalSec * 1000.0 / Math.max(speed, 0.01) + 200.0;
 
         // Snapshot the active preset so the tween has a stable "from" side
         // even if external file changes come in mid-flip.
@@ -379,8 +399,6 @@ FloatingWindow {
         applyState();
         flipActive = true;
         flipTweenTimer.start();
-        flipCommitTimer.interval = Math.max(50, wallClockMs);
-        flipCommitTimer.start();
     }
 
     // Per-frame numeric tween. Lerps every non-color numeric key from
@@ -401,80 +419,80 @@ FloatingWindow {
             // Smoothstep for a gentler ease at both ends.
             const tt = t * t * (3.0 - 2.0 * t);
 
-            const integerKeys = {
-                "backSunCount": true, "backNegSunCount": true,
-                "frontSunCount": true, "frontNegSunCount": true
-            };
             for (const k in root.flipFromSnapshot) {
                 if (root.noTweenKeys[k]) continue;
                 if (!(k in root.flipTargetPreset)) continue;
                 const from = root.flipFromSnapshot[k];
                 const to   = root.flipTargetPreset[k];
                 if (typeof from !== "number" || typeof to !== "number") continue;
-                let v = from + (to - from) * tt;
-                if (integerKeys[k]) v = Math.round(v);
-                root.shaderState[k] = v;
+                // Sun counts tween fractionally too: the partial sun fades.
+                root.shaderState[k] = from + (to - from) * tt;
             }
             root.shaderState = root.shaderState;
             root.applyState();
-            if (t >= 1.0) flipTweenTimer.stop();
+            // The tween runs exactly as long as the wave, in shader time,
+            // so finishing it is when every scale has turned: commit then,
+            // with every tweened value already at the target.
+            if (t >= 1.0) {
+                flipTweenTimer.stop();
+                root.commitFlip();
+            }
         }
     }
 
-    Timer {
-        id: flipCommitTimer
-        repeat: false
-        onTriggered: {
-            // Stop the tween (may have already finished naturally) and
-            // apply the target preset's values WHOLESALE so we end up
-            // exactly at the destination — no rounding drift.
-            flipTweenTimer.stop();
-            for (const k in root.flipTargetPreset) {
-                if (root.noTweenKeys[k]) continue;
+    // Ends a flip: the target becomes the active scene.
+    function commitFlip() {
+        // Apply the target preset's values WHOLESALE so we end up
+        // exactly at the destination — no rounding drift.
+        for (const k in root.flipTargetPreset) {
+            if (root.noTweenKeys[k]) continue;
+            root.shaderState[k] = root.flipTargetPreset[k];
+        }
+        // Apply target colours as the new "current". The shader's
+        // *Next slots already hold the target colours from the
+        // trigger; we copy them into "current" so the post-commit
+        // render (with flipStartTime reset → phase=0 → renders
+        // current) shows the target palette exactly.
+        const colorKeys = [
+            "colorPrimary", "colorSecondary",
+            "colorPrimaryContainer", "colorTertiary"
+        ];
+        for (let i = 0; i < colorKeys.length; i++) {
+            const k = colorKeys[i];
+            if (root.flipTargetPreset[k] !== undefined) {
                 root.shaderState[k] = root.flipTargetPreset[k];
             }
-            // Apply target colours as the new "current". The shader's
-            // *Next slots already hold the target colours from the
-            // trigger; we copy them into "current" so the post-commit
-            // render (with flipStartTime reset → phase=0 → renders
-            // current) shows the target palette exactly.
-            const colorKeys = [
-                "colorPrimary", "colorSecondary",
-                "colorPrimaryContainer", "colorTertiary"
-            ];
-            for (let i = 0; i < colorKeys.length; i++) {
-                const k = colorKeys[i];
-                if (root.flipTargetPreset[k] !== undefined) {
-                    root.shaderState[k] = root.flipTargetPreset[k];
-                }
-            }
-            // Swap active and target scenes: what was active becomes
-            // the new target (so flipping again returns to it), and
-            // what was target becomes the new active. Both the file
-            // paths and the in-memory snapshots swap.
-            const oldActiveData = JSON.parse(JSON.stringify(root.activeSceneData));
-            const oldActivePath = root.activePath;
-            root.activeSceneData = JSON.parse(JSON.stringify(root.targetSceneData));
-            root.targetSceneData = oldActiveData;
-            root.activePath = root.targetPath;
-            root.targetPath = oldActivePath;
-
-            // Refresh *Next colours so the next flip has a real delta
-            // (Next = what we'd flip to = the new target).
-            for (let i = 0; i < colorKeys.length; i++) {
-                const k = colorKeys[i];
-                if (root.targetSceneData[k] !== undefined) {
-                    root.shaderState[k + "Next"] = root.targetSceneData[k];
-                }
-            }
-            // Reset wave state to idle.
-            root.shaderState["flipStartTime"] = 1.0e9;
-            root.shaderState = root.shaderState;
-            root.applyState();
-            root.rebuildSections();
-            root.flipActive = false;
-            root.dirty = false;
         }
+        // Swap active and target scenes: what was active becomes
+        // the new target (so flipping again returns to it), and
+        // what was target becomes the new active. Both the file
+        // paths and the in-memory snapshots swap.
+        const oldActiveData = JSON.parse(JSON.stringify(root.activeSceneData));
+        const oldActivePath = root.activePath;
+        root.activeSceneData = JSON.parse(JSON.stringify(root.targetSceneData));
+        root.targetSceneData = oldActiveData;
+        // The live state already is the new active scene; don't let
+        // the file watcher's load of the new path replace it (that
+        // would bring back values kept out of the tween, like cellSize).
+        root.adoptingActive = true;
+        root.activePath = root.targetPath;
+        root.targetPath = oldActivePath;
+
+        // Refresh *Next colours so the next flip has a real delta
+        // (Next = what we'd flip to = the new target).
+        for (let i = 0; i < colorKeys.length; i++) {
+            const k = colorKeys[i];
+            if (root.targetSceneData[k] !== undefined) {
+                root.shaderState[k + "Next"] = root.targetSceneData[k];
+            }
+        }
+        // Reset wave state to idle.
+        root.shaderState["flipStartTime"] = 1.0e9;
+        root.shaderState = root.shaderState;
+        root.applyState();
+        root.rebuildSections();
+        root.flipActive = false;
+        root.dirty = false;
     }
 
     function setValue(section, key, value) {
@@ -955,6 +973,10 @@ FloatingWindow {
             reload();
         }
         onLoaded: {
+            if (root.adoptingActive) {
+                root.adoptingActive = false;
+                return;
+            }
             try {
                 const j = JSON.parse(text());
                 root.activeSceneData = j.shader || {};
@@ -1103,7 +1125,6 @@ FloatingWindow {
         sunDriftSpeed: 1.0
         heightAmount: 1.0
         matteness: 0.70
-        bleedBack: 0.03
         hexBevel: 0.6
         heightDriftSpeed: 0.6
         frontSunStrength: 1.5
@@ -1111,8 +1132,6 @@ FloatingWindow {
         frontSunLifetime: 40.0
         frontSunGap: 10.0
         frontSunSpeed: 0.02
-        frontSunShadowLength: 1.8
-        frontSunShadowDarkness: 0.95
         backSunSize: 0.4
         backSunStrength: 1.0
         backSunLifetime: 45.0
@@ -1148,14 +1167,11 @@ FloatingWindow {
         // Sentinel = far-future iTime. Per-hex flip phase math gives
         // a negative numerator → clamped to 0 → renders the Current
         // palette. triggerFlip() sets this to the actual current
-        // iTime to kick off the wave; flipCommitTimer resets back to
+        // iTime to kick off the wave; commitFlip() resets back to
         // sentinel after the wave finishes.
         flipStartTime: 1.0e9
         flipPropDelay: 0.05
         flipDuration: 0.5
-        property real depthShading: 0.35
-        property real flipSpecular: 0.8
-        property real hexDepth: 0.7
         iResolution: Qt.vector3d(width, height, 1)
         // Single-window preview: xy offset = 0, zw = full window size,
         // so the new frag formula reduces to qt_TexCoord0 * iResolution.

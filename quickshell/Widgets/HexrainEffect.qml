@@ -39,7 +39,6 @@ ShaderEffect {
     property real sunDriftSpeed: 1.0
     property real heightAmount: 0.0
     property real matteness: 0.70
-    property real bleedBack: 0.03
     property real hexBevel: 0.6
     property real heightDriftSpeed: 0.0
     property real frontSunStrength: 0.0
@@ -47,8 +46,6 @@ ShaderEffect {
     property real frontSunLifetime: 40.0
     property real frontSunGap: 10.0
     property real frontSunSpeed: 0.02
-    property real frontSunShadowLength: 1.0
-    property real frontSunShadowDarkness: 0.85
     property real backSunSize: 0.4
     property real backSunStrength: 1.0
     property real backSunLifetime: 45.0
@@ -83,6 +80,21 @@ ShaderEffect {
     property real flipOriginY: 0.0
     property real flipStartTime: 1.0e9
     property real flipPropDelay: 0.05
+    // 3D scale field.
+    property real heightRange: 7.0  // px — scale heights span ±heightRange
+    property real tiltMax: 0.12  // rad — largest tilt a scale drifts to
+    property real tiltDriftSpeed: 0.5  // tilt drift rate (0 = frozen)
+    property real slabThickness: 4.0  // px — scale thickness
+    property real domeHeight: 8.0  // px — face bulge at the centre
+    property real cameraDistance: 5000.0  // px — camera height; larger = flatter perspective
+    property real frontSunHeight: 500.0  // px — front suns' height above the canvas
+    property real grainScale: 0.3  // 1/px — matte grain frequency
+    property real grainStrength: 0.4  // matte grain relief
+    property real rimGlow: 0.8  // underglow caught by scale rims
+    property real keyLight: 0.6  // soft upper-left light shaping every scale
+    property real scaleShadow: 0.7  // key-light shadows onto lower scales
+    property real seamBase: 0.3  // glow through a gap between level neighbours
+    property real occlusion: 0.6  // darkening of scales sitting low in the height range
     property real flipDuration: 0.5
 
     readonly property var grid: HexrainGrid.grid(cellSize, iResolution.x, iResolution.y)
@@ -93,14 +105,23 @@ ShaderEffect {
     readonly property real lightCols: grid.lightCols
     readonly property real lightRows: grid.lightRows
     readonly property real lightTexelPx: grid.lightTexelPx
+    readonly property real lightBlocks: grid.lightBlocks
 
-    readonly property var sunField: passesEnabled ? SunField.field(root) : SunField.empty()
+    // Rate-driven motion runs on integrated clocks (SunField.advance) so
+    // rates can change without phases jumping.
+    property var clocks: null
+    onITimeChanged: if (passesEnabled) clocks = SunField.advance(clocks, root)
+    readonly property real heightClock: clocks ? clocks.height : 0
+    readonly property real tiltClock: clocks ? clocks.tilt : 0
+    readonly property real backPaletteClock: clocks ? clocks.backPalette : 0
+    readonly property real frontPaletteClock: clocks ? clocks.frontPalette : 0
+    readonly property var sunField: passesEnabled && clocks ? SunField.field(root, clocks) : SunField.empty()
 
     function slot(v) {
         return Qt.vector4d(v[0], v[1], v[2], v[3]);
     }
 
-    // Front suns feed both pre-passes (cell: cast shadows; light: reach).
+    // Front-sun placements for the light pass.
     property vector4d frontSun0: slot(sunField.front[0])
     property vector4d frontSun1: slot(sunField.front[1])
     property vector4d frontSun2: slot(sunField.front[2])
@@ -126,31 +147,28 @@ ShaderEffect {
         fragmentShader: root.cellShader
         property real iTime: root.iTime
         property real cellSize: root.cellSize
-        property real heightDriftSpeed: root.heightDriftSpeed
-        property real bleedBack: root.bleedBack
-        property real frontSunSize: root.frontSunSize
-        property real frontSunShadowLength: root.frontSunShadowLength
-        property real frontSunCount: root.frontSunCount
+        property real heightClock: root.heightClock
+        property real heightRange: root.heightRange
+        property real tiltMax: root.tiltMax
+        property real tiltClock: root.tiltClock
+        property real flipOriginX: root.flipOriginX
+        property real flipOriginY: root.flipOriginY
+        property real flipStartTime: root.flipStartTime
+        property real flipPropDelay: root.flipPropDelay
+        property real flipDuration: root.flipDuration
         property real barZoneEnabled: root.barZoneEnabled
         property real barZoneAnchor: root.barZoneAnchor
         property real barZoneThickness: root.barZoneThickness
         property real barZoneElevation: root.barZoneElevation
+        property vector3d iResolution: root.iResolution
+        property real hexBevel: root.hexBevel
+        property real slabThickness: root.slabThickness
+        property real cameraDistance: root.cameraDistance
         property real gridCols: root.gridCols
         property real gridRows: root.gridRows
         property real gridMargin: root.gridMargin
         property real gridCellTexels: root.gridCellTexels
-        property vector3d iResolution: root.iResolution
         property vector4d windowGeom: root.windowGeom
-        property vector4d frontSun0: root.frontSun0
-        property vector4d frontSun1: root.frontSun1
-        property vector4d frontSun2: root.frontSun2
-        property vector4d frontSun3: root.frontSun3
-        property vector4d frontSun4: root.frontSun4
-        property vector4d frontSun5: root.frontSun5
-        property vector4d frontSun6: root.frontSun6
-        property vector4d frontSun7: root.frontSun7
-        property vector4d frontSun8: root.frontSun8
-        property vector4d frontSun9: root.frontSun9
     }
 
     ShaderEffectSource {
@@ -164,18 +182,19 @@ ShaderEffect {
 
     ShaderEffect {
         id: lightPass
-        width: root.lightCols * 2
+        width: root.lightCols * root.lightBlocks
         height: root.lightRows
         fragmentShader: root.lightShader
         property real iTime: root.iTime
         property real cellSize: root.cellSize
         property real frontSunSize: root.frontSunSize
+        property real frontSunHeight: root.frontSunHeight
         property real backSunSize: root.backSunSize
         property real backSunStrength: root.backSunStrength
         property real backNegSunSize: root.backNegSunSize
         property real backNegSunStrength: root.backNegSunStrength
-        property real backSunPaletteSpeed: root.backSunPaletteSpeed
-        property real frontSunPaletteSpeed: root.frontSunPaletteSpeed
+        property real backPaletteClock: root.backPaletteClock
+        property real frontPaletteClock: root.frontPaletteClock
         property real backSunCount: root.backSunCount
         property real backNegSunCount: root.backNegSunCount
         property real frontSunCount: root.frontSunCount

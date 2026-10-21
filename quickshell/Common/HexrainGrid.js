@@ -6,9 +6,13 @@
 // Cells of margin around the canvas so neighbours of edge cells are in range.
 var GRID_MARGIN = 2;
 
-// Cell-pass texels per cell: 6 edge buckets, 4 leak-coefficient texels and 10
-// front-sun shadow slots.
-var CELL_TEXELS = 20;
+// Cell-pass texels per cell: 6 edge buckets, 2 of neighbour height
+// differences, the scale's orientation, its pose, and its neighbours' reach.
+var CELL_TEXELS = 11;
+
+// Light-pass blocks, each covering the whole canvas: underglow + front reach,
+// front colour + darkness, dominant front-light direction.
+var LIGHT_BLOCKS = 3;
 
 // Canvas pixels per light-pass texel. The sun field's narrowest gaussians are
 // hundreds of pixels wide, so bilinear sampling at this pitch is visually
@@ -26,6 +30,7 @@ function grid(cellSize, resX, resY) {
         cellTexels: CELL_TEXELS,
         lightCols: Math.ceil(Math.max(resX, 0) / LIGHT_TEXEL_PX) + 1,
         lightRows: Math.ceil(Math.max(resY, 0) / LIGHT_TEXEL_PX) + 1,
-        lightTexelPx: LIGHT_TEXEL_PX
+        lightTexelPx: LIGHT_TEXEL_PX,
+        lightBlocks: LIGHT_BLOCKS
     };
 }
