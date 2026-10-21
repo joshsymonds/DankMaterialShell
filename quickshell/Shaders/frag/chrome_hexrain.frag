@@ -61,8 +61,8 @@ layout(std140, binding = 0) uniform buf {
     float keyLight;        // 0..2 — soft light from the upper left that
                            //         always shapes the scales (domes,
                            //         tilt, grain), suns or not
-    float scaleShadow;     // 0..1 — key-light shadows scales cast onto
-                           //         lower neighbours
+    float scaleShadow;     // 0..1 — shadows scales cast onto lower
+                           //         neighbours (key light and suns)
     float occlusion;       // 0..1 — darkening of scales sitting low in the
                            //         height range
     // Front suns: localised spotlights (reach, colour and direction from
@@ -307,23 +307,27 @@ float edgeDelta(vec2 cell, float k) {
     return j < 0.5 ? d.x : j < 1.5 ? d.y : j < 2.5 ? d.z : d.w;
 }
 
-// How much of the key light the neighbours of scale `cell` block at
-// `point` on it (0..1). The light comes from the upper left and shadows
-// run at most ~20 px, so only the three neighbours toward the light
-// (k = 3, 4, 5: left, upper left, upper right) can cast onto it. A
-// neighbour that floats clear of this scale leaves an opening the
-// underglow pours out of, brightening this scale along that edge, so its
-// shadow gives way to that light as the opening widens: at any edge it's
-// light from below or a shadow, never both.
+// How much of a light shining along `toLight` (unit, toward the light)
+// the neighbours of scale `cell` block at `point` on it (0..1). Only the
+// neighbours lying toward the light can cast onto it. A neighbour that
+// floats clear of this scale leaves an opening the underglow pours out
+// of, brightening this scale along that edge, so its shadow gives way to
+// that light as the opening widens: at any edge it's light from below or
+// a shadow, never both.
 // Each scale is treated as a flat hex at its top; the shadow test walks
 // from the point toward the light up to that height and checks the hex
 // there, with a penumbra that widens with the height difference. A
 // turning scale's footprint narrows across its flip axis, so its shadow
 // thins to nothing edge-on.
-float keyShadow(vec3 point, vec2 cell, float pitchX, float pitchY,
-                float apothem, float halfT) {
+float heightShadow(vec3 point, vec3 toLight, vec2 cell, float pitchX, float pitchY,
+                   float apothem, float halfT) {
+    // A low light would throw shadows past the neighbour ring; keep it
+    // at least ~24° up.
+    vec3 l = toLight.z < 0.4 ? normalize(vec3(toLight.xy, 0.0)) * 0.9165 + vec3(0.0, 0.0, 0.4) : toLight;
     float shadow = 0.0;
-    for (int k = 3; k < 6; k++) {
+    for (int k = 0; k < 6; k++) {
+        float ang = float(k) * PI3;
+        if (dot(vec2(cos(ang), sin(ang)), l.xy) <= 0.05) continue;
         float open = openingLight(edgeDelta(cell, float(k)) - 2.0 * halfT, halfT);
         if (open >= 1.0) continue;
         vec2 c = neighbourIdx(cell, k);
@@ -332,7 +336,7 @@ float keyShadow(vec3 point, vec2 cell, float pitchX, float pitchY,
         // scale's rim (what shades its neighbour) sits at its flat top.
         float rise = pose.x + halfT - point.z;
         if (rise <= 0.5) continue;
-        vec2 q = point.xy + KEY_DIR.xy * (rise / KEY_DIR.z) - latticeCenter(c, pitchX, pitchY);
+        vec2 q = point.xy + l.xy * (rise / l.z) - latticeCenter(c, pitchX, pitchY);
         vec2 axis = pose.zw;
         vec2 across = vec2(-axis.y, axis.x);
         q = axis * dot(q, axis) + across * (dot(q, across) / max(abs(cos(pose.y)), 0.05));
@@ -371,7 +375,7 @@ float edgeOpening(vec2 cell, vec2 p, float halfT) {
 // floats clear of the other and the light streams out — the same opening
 // that lights the lower scale's face, so a bright seam always comes with
 // light on the scale beside it (and no shadow from that neighbour there;
-// see keyShadow).
+// see heightShadow).
 vec3 underlayer(vec3 ro, vec3 rd, float opening) {
     float z = -(ubuf.heightRange + 6.0);
     vec3 point = ro + rd * ((z - ro.z) / rd.z);
@@ -428,18 +432,24 @@ vec3 shadeScale(Hit hit, vec3 ro, vec3 rd, float i, float pitchX, float pitchY,
         // it is, fading over the matte. A neighbour that doesn't clear
         // this face (or a level or lower one) lets none through, so that
         // edge stays unlit; actual shadows come only from the key light.
+        // Where this scale is the one floating clear, the same light
+        // catches its overhanging lip instead, fading within a few px, so
+        // light shows on both sides of an opening.
         float reachScale = mix(1.6, 0.35, ubuf.matteness);
         float stream = 0.0;
+        float lip = 0.0;
         for (int k = 0; k < 6; k++) {
-            float opening = edgeDelta(hit.cell, float(k)) - 2.0 * halfT;
-            if (opening > 0.0) {
-                float ang = float(k) * PI3;
-                float distIn = max(0.0, apothem - dot(faceXY, vec2(cos(ang), sin(ang))));
-                stream += openingLight(opening, halfT) * exp(-distIn / ((2.0 + opening * 1.5) * reachScale));
-            }
+            float delta = edgeDelta(hit.cell, float(k));
+            float ang = float(k) * PI3;
+            float distIn = max(0.0, apothem - dot(faceXY, vec2(cos(ang), sin(ang))));
+            if (delta - 2.0 * halfT > 0.0)
+                stream += openingLight(delta - 2.0 * halfT, halfT)
+                        * exp(-distIn / ((2.0 + (delta - 2.0 * halfT) * 1.5) * reachScale));
+            else if (-delta - 2.0 * halfT > 0.0)
+                lip += openingLight(-delta - 2.0 * halfT, halfT) * exp(-distIn / 2.5);
         }
-        leak = clamp(stream * ubuf.heightAmount, 0.0, 1.0) * ubuf.domeStrength;
-        lit = clamp(stream * 2.0, 0.0, 1.0);
+        leak = clamp((stream + lip * 0.6) * ubuf.heightAmount, 0.0, 1.0) * ubuf.domeStrength;
+        lit = clamp((stream + lip) * 2.0, 0.0, 1.0);
         // Depth: less light overall the lower the scale sits in its
         // height range.
         float lowness = clamp(0.5 - hit.pose.x / max(ubuf.heightRange, 0.001) * 0.5, 0.0, 1.0);
@@ -455,9 +465,17 @@ vec3 shadeScale(Hit hit, vec3 ro, vec3 rd, float i, float pitchX, float pitchY,
     }
 
     // Front suns: matte (wrapped Lambert) light from the dominant front
-    // direction, gated by reach.
+    // direction, gated by reach, and shadowed by the scales standing
+    // toward the suns — so the shadows swing round beneath each sun as it
+    // drifts. Light from below fills them in like the key light's. The
+    // light itself stays modest (0.5×) so it never drowns the underglow;
+    // the shadows are what show where a sun is.
     float lambert = max(0.0, (dot(normal, frontDir) + 0.1) / 1.1);
-    vec3 front = lightB.rgb * ubuf.frontSunStrength * 0.6 * lightA.a * lambert;
+    float sunShadow = lightA.a > 0.01
+        ? ubuf.scaleShadow * (1.0 - lit)
+          * heightShadow(world, frontDir, hit.cell, pitchX, pitchY, apothem, halfT)
+        : 0.0;
+    vec3 front = lightB.rgb * ubuf.frontSunStrength * 0.5 * lightA.a * lambert * (1.0 - sunShadow);
 
     // Key light: so every scale's dome, tilt and grain read even outside
     // the suns' reach. Taller neighbours shadow it — except where light
@@ -465,7 +483,7 @@ vec3 shadeScale(Hit hit, vec3 ro, vec3 rd, float i, float pitchX, float pitchY,
     // never reaches a lit edge.
     float keyLambert = max(0.0, (dot(normal, KEY_DIR) + 0.1) / 1.1);
     float shadow = ubuf.scaleShadow * (1.0 - lit)
-                 * keyShadow(world, hit.cell, pitchX, pitchY, apothem, halfT);
+                 * heightShadow(world, KEY_DIR, hit.cell, pitchX, pitchY, apothem, halfT);
 
     // Body: the matte tint under ambient + key light, plus front light,
     // all modulated by grain, depth and shadow, then eaten by front-
