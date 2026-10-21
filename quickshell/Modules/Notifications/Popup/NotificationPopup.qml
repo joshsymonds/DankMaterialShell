@@ -1,49 +1,37 @@
 import QtQuick
-import QtQuick.Controls
 import Quickshell
 import Quickshell.Wayland
+import Quickshell.Widgets
 import Quickshell.Services.Notifications
 import qs.Common
+import qs.Modules.Notifications
 import qs.Services
+import qs.DCommon.Widgets
 import qs.Widgets
+import qs.DCommon.Common as DCommon
 
 PanelWindow {
     id: win
 
-    readonly property bool connectedFrameMode: SettingsData.frameEnabled && Theme.isConnectedEffect && SettingsData.isScreenInPreferences(win.screen, SettingsData.frameScreenPreferences)
-    readonly property string notifBarSide: {
-        const pos = SettingsData.notificationPopupPosition;
-        if (pos === -1)
-            return "top";
-        switch (pos) {
-        case SettingsData.Position.Top:
-            return "right";
-        case SettingsData.Position.Left:
-            return "left";
-        case SettingsData.Position.BottomCenter:
-            return "bottom";
-        case SettingsData.Position.Right:
-            return "right";
-        case SettingsData.Position.Bottom:
-            return "left";
-        default:
-            return "top";
-        }
-    }
-    readonly property int inlineExpandDuration: Theme.notificationInlineExpandDuration
-    readonly property int inlineCollapseDuration: Theme.notificationInlineCollapseDuration
-    property bool inlineHeightAnimating: false
+    readonly property bool connectedFrameMode: CompositorService.usesConnectedFrameChromeForScreen(win.screen)
+    readonly property bool inlineHeightAnimating: heightMotion.running
 
     WindowBlur {
         targetWindow: win
+        surfaceColor: Theme.notificationFloatingSurface
         readonly property real s: Math.min(1, content.scale) * Math.max(0, content.opacity)
         readonly property real innerW: Math.max(0, content.width - content.cardInset * 2)
         readonly property real innerH: Math.max(0, content.height - content.cardInset * 2)
         blurX: content.x + content.cardInset + swipeTx.x + tx.x + innerW * (1 - s) * 0.5
-        blurY: content.y + content.cardInset + swipeTx.y + tx.y + innerH * (1 - s) * 0.5
-        blurWidth: !win._finalized && !win.connectedFrameMode ? innerW * s : 0
-        blurHeight: !win._finalized && !win.connectedFrameMode ? innerH * s : 0
-        blurRadius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : Theme.cornerRadius
+        blurY: win.contentTop + content.cardInset + swipeTx.y + tx.y + innerH * (1 - s) * 0.5
+        blurWidth: win.cardShown && !win.connectedFrameMode ? innerW * s : 0
+        blurHeight: win.cardShown && !win.connectedFrameMode ? innerH * s : 0
+        blurRadius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : NotificationMetrics.popupRadius
+        clipEnabled: true
+        clipX: content.x + content.cardInset
+        clipY: win.contentTop + content.cardInset
+        clipWidth: innerW
+        clipHeight: innerH
     }
 
     WlrLayershell.namespace: "dms:notification-popup"
@@ -61,81 +49,106 @@ PanelWindow {
             return content.swipeOffset * _frameEdgeSwipeDirection() > 0;
         return false;
     }
-    property int screenY: 0
+    readonly property real screenY: stackMotion.value
+    readonly property real stackTarget: stackMotion.target
+    readonly property bool stackMoving: stackMotion.running
+    property real presentationProgress: 0
+    property real chromeRelease: 0
+    property real layoutHeight: targetAlignedHeight
+    property bool _entryStarted: false
+    property bool _positioned: false
+    readonly property bool presenting: _entryStarted && !_finalized
+    readonly property bool cardShown: presenting && (presentationProgress > 0 || !exiting)
+    readonly property bool layoutPinned: !exiting && (hovered || contextMenuActive || swipeActive)
     property bool exiting: false
+    property bool exitStarted: false
+    property bool collapseChromeOnExit: false
     property bool _isDestroying: false
     property bool _finalized: false
-    property real _lastReportedAlignedHeight: -1
-    property real _storedTopMargin: 0
-    property real _storedBottomMargin: 0
     property bool _inlineGeometryReady: false
+    readonly property bool contextMenuActive: transientSurfaces.active
+    property bool surfaceReady: false
+    property int unmappedSweeps: 0
+    onSurfaceReadyChanged: {
+        if (surfaceReady && !_isDestroying)
+            surfaceMapped();
+    }
+
+    TransientSurfaceTracker {
+        id: transientSurfaces
+    }
     readonly property bool directionalEffect: Theme.isDirectionalEffect
-    readonly property bool depthEffect: Theme.isDepthEffect
-    readonly property real entryTravel: {
-        const base = Math.abs(Theme.effectAnimOffset);
-        if (directionalEffect) {
-            if (isCenterPosition)
-                return Math.max(base, Math.round(content.height * 1.1));
-            return Math.max(base, Math.round(content.width * 0.95));
-        }
-        if (depthEffect)
-            return Math.max(base, 44);
-        return base;
-    }
-    readonly property real exitTravel: {
-        if (directionalEffect) {
-            if (isCenterPosition)
-                return Math.max(1, content.height);
-            return Math.max(1, content.width);
-        }
-        if (depthEffect)
-            return Math.round(entryTravel * 1.35);
-        return Anims.slidePx;
-    }
-    readonly property string clearText: I18n.tr("Dismiss")
+    readonly property bool slideVertical: isCenterPosition
+    readonly property real slideTravel: Math.ceil(slideVertical ? content.height : content.width)
+    readonly property int slideSideDirection: (SettingsData.notificationPopupPosition === SettingsData.Position.Left || SettingsData.notificationPopupPosition === SettingsData.Position.Bottom) ? -1 : 1
+    readonly property int slideEdgeDirection: contentAnchorsTop ? -1 : 1
     property bool descriptionExpanded: false
-    readonly property bool hasExpandableBody: (notificationData?.htmlBody || "").replace(/<[^>]*>/g, "").trim().length > 0
+    readonly property bool bodyClickInvokesAction: SettingsData.notificationPopupBodyInvokesAction && (notificationData?.actions?.length ?? 0) > 0
     onDescriptionExpandedChanged: {
         if (connectedFrameMode)
             popupChromeGeometryChanged();
     }
 
-    readonly property bool compactMode: SettingsData.notificationCompactMode
-    readonly property real cardPadding: compactMode ? Theme.notificationCardPaddingCompact : Theme.notificationCardPadding
-    readonly property real popupIconSize: compactMode ? Theme.notificationIconSizeCompact : Theme.notificationIconSizeNormal
-    readonly property real contentSpacing: compactMode ? Theme.spacingXS : Theme.spacingS
-    readonly property real contentBottomClearance: 8
-    readonly property real actionButtonHeight: compactMode ? 20 : 24
-    readonly property real collapsedContentHeight: Math.max(popupIconSize, Theme.fontSizeSmall * 1.2 + Theme.fontSizeMedium * 1.2 + Theme.fontSizeSmall * 1.2 * (compactMode ? 1 : 2)) + contentBottomClearance
-    readonly property real privacyCollapsedContentHeight: Math.max(popupIconSize, Theme.fontSizeSmall * 1.2 + Theme.fontSizeMedium * 1.2) + contentBottomClearance
-    readonly property real basePopupHeight: cardPadding * 2 + collapsedContentHeight + actionButtonHeight + contentSpacing
-    readonly property real basePopupHeightPrivacy: cardPadding * 2 + privacyCollapsedContentHeight + actionButtonHeight + contentSpacing
-
     signal entered
-    signal exitStarted
+    signal surfaceMapped
+    signal exitRequested
     signal exitFinished
     signal popupHeightChanged
     signal popupChromeGeometryChanged
 
-    function startExit() {
-        if (exiting || _isDestroying) {
+    function beginEntry() {
+        if (_entryStarted || exiting || _isDestroying)
+            return;
+        _entryStarted = true;
+        enterAnimation.restart();
+    }
+
+    function setStackPosition(position) {
+        if (_isDestroying)
+            return;
+        if (!_positioned) {
+            stackMotion.snapTo(position);
+            _positioned = _entryStarted;
             return;
         }
+        stackMotion.retarget(position);
+    }
+
+    function startExit() {
+        if (exiting || _isDestroying)
+            return;
+        closeTransientUi();
+        if (!_entryStarted) {
+            forceExit();
+            return;
+        }
+        enterAnimation.stop();
+        enterDelay.stop();
         exiting = true;
-        exitStarted();
-        popupChromeGeometryChanged();
-        exitAnim.restart();
-        exitWatchdog.restart();
         if (NotificationService.removeFromVisibleNotifications)
             NotificationService.removeFromVisibleNotifications(win.notificationData);
+        exitRequested();
+    }
+
+    function beginExit(collapseChrome) {
+        if (exitStarted || _isDestroying)
+            return;
+        exiting = true;
+        exitStarted = true;
+        collapseChromeOnExit = collapseChrome;
+        exitWatchdog.restart();
+        exitAnim.restart();
+        popupChromeGeometryChanged();
     }
 
     function forceExit() {
         if (_isDestroying) {
             return;
         }
+        closeTransientUi();
         _isDestroying = true;
         exiting = true;
+        exitStarted = true;
         visible = false;
         exitWatchdog.stop();
         finalizeExit("forced");
@@ -146,127 +159,132 @@ PanelWindow {
             return;
         }
 
+        closeTransientUi();
         _finalized = true;
         _isDestroying = true;
+        enterAnimation.stop();
+        exitAnim.stop();
+        swipeDismissAnim.stop();
+        enterDelay.stop();
         exitWatchdog.stop();
         wrapperConn.enabled = false;
         wrapperConn.target = null;
         win.exitFinished();
     }
 
+    function closeTransientUi() {
+        transientSurfaces.closeAll();
+        popupContextMenuLoader.active = false;
+    }
+
+    NotificationActions {
+        id: popupActions
+    }
+
+    function invokeDefaultAction() {
+        const action = popupActions.defaultAction(notificationData);
+        if (!action?.invoke)
+            return;
+        action.invoke();
+        NotificationService.dismissNotification(notificationData);
+    }
+
+    function dismissPopupReliably() {
+        if (!notificationData || win.exiting || win._isDestroying)
+            return;
+        if (notificationData.timer)
+            notificationData.timer.stop();
+        notificationData.popup = false;
+        startExit();
+    }
+
     visible: !_finalized
     WlrLayershell.layer: {
-        const envLayer = Quickshell.env("DMS_NOTIFICATION_LAYER");
-        if (envLayer) {
-            switch (envLayer) {
-            case "bottom":
-                return WlrLayershell.Bottom;
-            case "overlay":
-                return WlrLayershell.Overlay;
-            case "background":
-                return WlrLayershell.Background;
-            case "top":
-                return WlrLayershell.Top;
-            }
-        }
-
-        if (!notificationData)
-            return WlrLayershell.Top;
-
-        SettingsData.notificationOverlayEnabled;
-
-        const shouldUseOverlay = (SettingsData.notificationOverlayEnabled) || (notificationData.urgency === NotificationUrgency.Critical);
-
-        return shouldUseOverlay ? WlrLayershell.Overlay : WlrLayershell.Top;
+        const shouldUseOverlay = CompositorService.framePeerSurfacesUseOverlayForScreen(win.screen) || (notificationData && (SettingsData.notificationOverlayEnabled || notificationData.urgency === NotificationUrgency.Critical));
+        const fallback = shouldUseOverlay ? WlrLayer.Overlay : WlrLayer.Top;
+        return LayerShell.fromEnv("DMS_NOTIFICATION_LAYER", fallback);
     }
     WlrLayershell.exclusiveZone: -1
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
     color: "transparent"
-    readonly property real contentImplicitWidth: screen ? Math.min(400, Math.max(320, screen.width * 0.23)) : 380
-    readonly property real contentImplicitHeight: {
-        if (SettingsData.notificationPopupPrivacyMode && !descriptionExpanded)
-            return basePopupHeightPrivacy;
-        if (!descriptionExpanded)
-            return basePopupHeight;
-        const bodyTextHeight = expandedBodyMeasure.contentHeight || bodyText.contentHeight || 0;
-        const collapsedBodyHeight = Theme.fontSizeSmall * 1.2 * (compactMode ? 1 : 2);
-        if (bodyTextHeight > collapsedBodyHeight + 2)
-            return basePopupHeight + bodyTextHeight - collapsedBodyHeight;
-        return basePopupHeight;
-    }
+    readonly property real contentImplicitWidth: screen ? Math.min(NotificationMetrics.popupWidth, Math.max(NotificationMetrics.popupMinWidth, screen.width * NotificationMetrics.popupScreenRatio)) : NotificationMetrics.popupWidth
+    readonly property real timeoutRailClearance: SettingsData.notificationShowTimeoutBar && notificationData?.timer?.interval > 0 ? Theme.spacingS : 0
+    readonly property real contentImplicitHeight: Math.min(notificationCard.targetHeight + content.cardInset * 2 + timeoutRailClearance, (screen?.height ?? NotificationMetrics.centerMaxHeight) * NotificationMetrics.screenHeightRatio)
     readonly property real targetAlignedHeight: Theme.px(Math.max(0, contentImplicitHeight), dpr)
-    property real renderedAlignedHeight: targetAlignedHeight
+    readonly property real renderedAlignedHeight: heightMotion.value
     property real allocatedAlignedHeight: targetAlignedHeight
-    readonly property bool inlineGeometryGrowing: targetAlignedHeight >= renderedAlignedHeight
     readonly property bool contentAnchorsTop: isTopCenter || SettingsData.notificationPopupPosition === SettingsData.Position.Top || SettingsData.notificationPopupPosition === SettingsData.Position.Left
     readonly property real renderedContentOffsetY: contentAnchorsTop ? 0 : Math.max(0, allocatedAlignedHeight - renderedAlignedHeight)
-    implicitWidth: contentImplicitWidth + (windowShadowPad * 2)
+    readonly property real contentTop: Theme.snap(windowShadowPad + renderedContentOffsetY, dpr)
+    implicitWidth: contentImplicitWidth + (windowShadowPad * 2) + edgeBleed
     implicitHeight: allocatedAlignedHeight + (windowShadowPad * 2)
 
-    function inlineMotionDuration(growing) {
-        return growing ? inlineExpandDuration : inlineCollapseDuration;
-    }
-
     function syncInlineTargetHeight() {
+        if (_isDestroying)
+            return;
         const target = Math.max(0, Number(targetAlignedHeight));
         if (isNaN(target))
             return;
 
         if (!_inlineGeometryReady) {
-            renderedHeightAnim.stop();
-            renderedAlignedHeight = target;
+            heightMotion.snapTo(target);
             allocatedAlignedHeight = target;
-            _lastReportedAlignedHeight = target;
+            layoutHeight = target;
             return;
         }
 
-        const currentRendered = Math.max(0, Number(renderedAlignedHeight));
-        const nextAllocation = Math.max(target, currentRendered, allocatedAlignedHeight);
-        if (Math.abs(nextAllocation - allocatedAlignedHeight) >= 0.5)
-            allocatedAlignedHeight = nextAllocation;
-
-        if (Math.abs(target - renderedAlignedHeight) < 0.5) {
+        if (target > allocatedAlignedHeight)
+            allocatedAlignedHeight = target;
+        layoutHeight = target;
+        heightMotion.retarget(target);
+        if (!heightMotion.running)
             finishInlineHeightAnimation();
-            return;
-        }
-
-        renderedAlignedHeight = target;
-        if (connectedFrameMode)
-            popupChromeGeometryChanged();
-        if (inlineMotionDuration(target >= currentRendered) <= 0)
-            Qt.callLater(() => finishInlineHeightAnimation());
     }
 
     function finishInlineHeightAnimation() {
         const target = Math.max(0, Number(targetAlignedHeight));
         if (isNaN(target))
             return;
-        if (Math.abs(renderedAlignedHeight - target) >= 0.5)
-            renderedAlignedHeight = target;
+        heightMotion.snapTo(target);
         if (Math.abs(allocatedAlignedHeight - target) >= 0.5)
             allocatedAlignedHeight = target;
-        _lastReportedAlignedHeight = renderedAlignedHeight;
-        popupHeightChanged();
+        layoutHeight = target;
         if (connectedFrameMode)
             popupChromeGeometryChanged();
     }
 
     onTargetAlignedHeightChanged: syncInlineTargetHeight()
+    onRenderedAlignedHeightChanged: {
+        if (renderedAlignedHeight > allocatedAlignedHeight + 0.5)
+            allocatedAlignedHeight = Math.ceil(renderedAlignedHeight);
+        if (connectedFrameMode)
+            popupChromeGeometryChanged();
+    }
     onAllocatedAlignedHeightChanged: {
         if (connectedFrameMode)
             popupChromeGeometryChanged();
     }
 
-    Behavior on renderedAlignedHeight {
-        enabled: !win.exiting && !win._isDestroying
-        NumberAnimation {
-            id: renderedHeightAnim
-            duration: win.inlineMotionDuration(win.inlineGeometryGrowing)
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: win.inlineGeometryGrowing ? Theme.variantPopoutEnterCurve : Theme.variantPopoutExitCurve
-            onRunningChanged: win.inlineHeightAnimating = running
-            onFinished: win.finishInlineHeightAnimation()
+    SpringMotion {
+        id: heightMotion
+        reducedMotion: !NotificationMetrics.animationsEnabled
+        stiffness: NotificationMetrics.stackSpring.stiffness
+        damping: NotificationMetrics.stackSpring.damping
+        positionEpsilon: 0.05
+        velocityEpsilon: 0.05
+        onRunningChanged: {
+            if (!running && win._inlineGeometryReady)
+                win.finishInlineHeightAnimation();
         }
+    }
+
+    SpringMotion {
+        id: stackMotion
+        reducedMotion: !NotificationMetrics.animationsEnabled
+        stiffness: NotificationMetrics.stackSpring.stiffness
+        damping: NotificationMetrics.stackSpring.damping
+        positionEpsilon: 0.05
+        velocityEpsilon: 0.05
     }
 
     onHasValidDataChanged: {
@@ -275,23 +293,18 @@ PanelWindow {
         }
     }
     Component.onCompleted: {
-        renderedHeightAnim.stop();
-        renderedAlignedHeight = targetAlignedHeight;
+        heightMotion.snapTo(targetAlignedHeight);
         allocatedAlignedHeight = targetAlignedHeight;
+        layoutHeight = targetAlignedHeight;
         _inlineGeometryReady = true;
-        _lastReportedAlignedHeight = renderedAlignedHeight;
-        _storedTopMargin = getTopMargin();
-        _storedBottomMargin = getBottomMargin();
         if (SettingsData.notificationPopupPrivacyMode)
             descriptionExpanded = false;
-        if (hasValidData) {
-            Qt.callLater(() => enterX.restart());
-        } else {
+        if (!hasValidData)
             forceExit();
-        }
     }
     onNotificationDataChanged: {
         if (!_isDestroying) {
+            closeTransientUi();
             if (SettingsData.notificationPopupPrivacyMode)
                 descriptionExpanded = false;
             wrapperConn.target = win.notificationData || null;
@@ -304,6 +317,7 @@ PanelWindow {
         }
     }
     Component.onDestruction: {
+        closeTransientUi();
         _isDestroying = true;
         exitWatchdog.stop();
         if (notificationData && notificationData.timer) {
@@ -319,6 +333,14 @@ PanelWindow {
     readonly property real maxPopupShadowOffsetYPx: Math.max(Math.abs(Theme.elevationOffsetY(Theme.elevationLevel3, 6)), Math.abs(Theme.elevationOffsetY(Theme.elevationLevel4, 8)))
     readonly property bool popupWindowShadowActive: Theme.elevationEnabled && SettingsData.notificationPopupShadowEnabled && !connectedFrameMode
     readonly property real windowShadowPad: popupWindowShadowActive ? Theme.snap(Math.max(16, maxPopupShadowBlurPx + Math.max(maxPopupShadowOffsetXPx, maxPopupShadowOffsetYPx) + 8), dpr) : 0
+    readonly property bool bleedsLeft: _frameEdgeSwipeDirection() < 0
+    readonly property real edgeBleed: {
+        if (isCenterPosition || !CompositorService.frameWindowVisibleForScreen(screen))
+            return 0;
+        const sideMargin = bleedsLeft ? getLeftMargin() : getRightMargin();
+        return Math.max(0, Theme.snap(sideMargin, dpr) - windowShadowPad);
+    }
+    readonly property real contentWindowX: Theme.snap(windowShadowPad + (bleedsLeft ? edgeBleed : 0), dpr)
 
     anchors.top: true
     anchors.left: true
@@ -336,9 +358,9 @@ PanelWindow {
         id: contentMaskRect
         visible: false
         x: content.x
-        y: content.y
+        y: win.contentTop
         width: alignedWidth
-        height: alignedHeight
+        height: win.cardShown && !win.exiting && !content.chromeOnlyExit ? alignedHeight : 0
     }
 
     margins {
@@ -360,7 +382,7 @@ PanelWindow {
             id: "notification-popup",
             screenPreferences: [screen.name],
             autoHide: false
-        });
+        }, true);
     }
 
     function _frameEdgeInset(side) {
@@ -370,11 +392,16 @@ PanelWindow {
         return Math.max(0, Math.round(Theme.px(raw, dpr)));
     }
 
-    readonly property bool frameOnlyNoConnected: SettingsData.frameEnabled && !connectedFrameMode && !!screen && SettingsData.isScreenInPreferences(screen, SettingsData.frameScreenPreferences)
+    readonly property bool frameVisibleWithoutConnectedChrome: CompositorService.frameWindowVisibleForScreen(screen) && !connectedFrameMode
 
-    // Frame ON + Connected OFF. frameEdgeInset is the full bar/frame inset
     function _frameGapMargin(side) {
         return _frameEdgeInset(side) + Theme.popupDistance;
+    }
+
+    function _connectedCornerClear() {
+        if (isCenterPosition || SettingsData.frameCloseGaps)
+            return 0;
+        return Theme.px(SettingsData.frameRounding, dpr) + Theme.px(Theme.connectedCornerRadius, dpr);
     }
 
     function getTopMargin() {
@@ -383,11 +410,9 @@ PanelWindow {
         if (!isTop)
             return 0;
 
-        if (connectedFrameMode) {
-            const cornerClear = (isCenterPosition || SettingsData.frameCloseGaps) ? 0 : (Theme.px(SettingsData.frameRounding, dpr) + Theme.px(Theme.connectedCornerRadius, dpr));
-            return _frameEdgeInset("top") + cornerClear + screenY;
-        }
-        if (frameOnlyNoConnected)
+        if (connectedFrameMode)
+            return _frameEdgeInset("top") + _connectedCornerClear() + screenY;
+        if (frameVisibleWithoutConnectedChrome)
             return _frameGapMargin("top") + screenY;
         const barInfo = getBarInfo();
         const base = barInfo.topBar > 0 ? barInfo.topBar : Theme.popupDistance;
@@ -400,11 +425,9 @@ PanelWindow {
         if (!isBottom)
             return 0;
 
-        if (connectedFrameMode) {
-            const cornerClear = (isCenterPosition || SettingsData.frameCloseGaps) ? 0 : (Theme.px(SettingsData.frameRounding, dpr) + Theme.px(Theme.connectedCornerRadius, dpr));
-            return _frameEdgeInset("bottom") + cornerClear + screenY;
-        }
-        if (frameOnlyNoConnected)
+        if (connectedFrameMode)
+            return _frameEdgeInset("bottom") + _connectedCornerClear() + screenY;
+        if (frameVisibleWithoutConnectedChrome)
             return _frameGapMargin("bottom") + screenY;
         const barInfo = getBarInfo();
         const base = barInfo.bottomBar > 0 ? barInfo.bottomBar : Theme.popupDistance;
@@ -422,7 +445,7 @@ PanelWindow {
 
         if (connectedFrameMode)
             return _frameEdgeInset("left");
-        if (frameOnlyNoConnected)
+        if (frameVisibleWithoutConnectedChrome)
             return _frameGapMargin("left");
         const barInfo = getBarInfo();
         return barInfo.leftBar > 0 ? barInfo.leftBar : Theme.popupDistance;
@@ -439,7 +462,7 @@ PanelWindow {
 
         if (connectedFrameMode)
             return _frameEdgeInset("right");
-        if (frameOnlyNoConnected)
+        if (frameVisibleWithoutConnectedChrome)
             return _frameGapMargin("right");
         const barInfo = getBarInfo();
         return barInfo.rightBar > 0 ? barInfo.rightBar : Theme.popupDistance;
@@ -480,7 +503,7 @@ PanelWindow {
     function getWindowLeftMargin() {
         if (!screen)
             return 0;
-        return Theme.snap(getContentX() - windowShadowPad, dpr);
+        return Theme.snap(getContentX() - contentWindowX, dpr);
     }
 
     function getWindowTopMargin() {
@@ -503,108 +526,72 @@ PanelWindow {
     }
 
     function popupChromeMotionActive() {
-        return popupChromeOpenProgress() < 1 || exiting || content.swipeActive || content.swipeDismissing || Math.abs(content.swipeOffset) > 0.5;
+        return presentationProgress < 1 || exiting || content.swipeActive || content.swipeDismissing || Math.abs(content.swipeOffset) > 0.5;
     }
 
-    function popupLayoutReservesSlot() {
-        return !content.swipeDismissing;
-    }
-
-    function popupChromeReservesSlot() {
-        return !content.swipeDismissing;
-    }
-
-    function _chromeMotionOffset() {
-        return isCenterPosition ? tx.y : tx.x;
-    }
-
-    function _chromeCardTravel() {
-        return Math.max(1, isCenterPosition ? alignedHeight : alignedWidth);
-    }
-
-    function popupChromeOpenProgress() {
-        if (exiting || content.swipeDismissing)
-            return 1;
-        return Math.max(0, Math.min(1, 1 - Math.abs(_chromeMotionOffset()) / _chromeCardTravel()));
-    }
-
-    function popupChromeReleaseProgress() {
-        if (exiting) {
-            const exitRel = Math.max(0, Math.min(1, Math.abs(_chromeMotionOffset()) / _chromeCardTravel()));
-            if (content.swipeDismissing) {
-                const swipeRel = Math.max(0, Math.min(1, Math.abs(content.swipeOffset) / Math.max(1, content.swipeTravelDistance)));
-                return Math.max(exitRel, swipeRel);
-            }
-            return exitRel;
-        }
-        if (content.swipeDismissing)
-            return Math.max(0, Math.min(1, Math.abs(content.swipeOffset) / Math.max(1, content.swipeTravelDistance)));
-        if (content.swipeActive && content.swipeOffset * _frameEdgeSwipeDirection() > 0)
+    function swipeReleaseProgress() {
+        if (content.swipeDismissing || (content.swipeActive && content.swipeOffset * _frameEdgeSwipeDirection() > 0))
             return Math.max(0, Math.min(1, Math.abs(content.swipeOffset) / Math.max(1, content.swipeTravelDistance)));
         return 0;
     }
 
-    function popupChromeFollowsCardMotion() {
-        return false;
-    }
-
-    function popupChromeMotionX() {
-        if (!popupChromeMotionActive() || isCenterPosition)
-            return 0;
-        const motion = content.swipeOffset + tx.x;
-        if (content.swipeDismissing && !_swipeDismissesTowardFrameEdge())
-            return exiting ? Theme.snap(tx.x, dpr) : 0;
-        if (content.swipeActive && motion * _frameEdgeSwipeDirection() < 0)
-            return 0;
-        return Theme.snap(motion, dpr);
-    }
-
-    function popupChromeMotionY() {
-        return popupChromeMotionActive() ? Theme.snap(tx.y, dpr) : 0;
-    }
-
     readonly property bool screenValid: win.screen && !_isDestroying
     readonly property real dpr: screenValid ? CompositorService.getScreenScale(win.screen) : 1
-    readonly property real alignedWidth: Theme.px(Math.max(0, implicitWidth - (windowShadowPad * 2)), dpr)
+    readonly property real alignedWidth: Theme.px(Math.max(0, implicitWidth - (windowShadowPad * 2) - edgeBleed), dpr)
     readonly property real alignedHeight: renderedAlignedHeight
     onScreenYChanged: if (connectedFrameMode)
         popupChromeGeometryChanged()
     onScreenChanged: if (connectedFrameMode)
         popupChromeGeometryChanged()
-    // Intentionally unconditional: Manager needs the signal when frame mode toggles off
     onConnectedFrameModeChanged: popupChromeGeometryChanged()
     onAlignedWidthChanged: if (connectedFrameMode)
         popupChromeGeometryChanged()
-    onAlignedHeightChanged: if (connectedFrameMode)
+    onChromeReleaseChanged: if (connectedFrameMode)
         popupChromeGeometryChanged()
+    onLayoutHeightChanged: {
+        if (_inlineGeometryReady)
+            popupHeightChanged();
+    }
+    onLayoutPinnedChanged: popupHeightChanged()
+
+    Item {
+        id: slideClip
+        y: win.contentAnchorsTop ? win.contentTop : 0
+        width: win.width
+        height: win.contentAnchorsTop ? win.height - win.contentTop : win.contentTop + alignedHeight
+        clip: win.slideVertical && win.presentationProgress < 1
+
+        Connections {
+            target: slideClip.Window.window
+            enabled: !win.surfaceReady
+
+            function onFrameSwapped() {
+                win.surfaceReady = true;
+            }
+        }
+    }
 
     Item {
         id: content
+        parent: slideClip
 
-        x: Theme.snap(windowShadowPad, dpr)
-        y: Theme.snap(windowShadowPad + renderedContentOffsetY, dpr)
+        x: win.contentWindowX
+        y: win.contentTop - slideClip.y
         width: alignedWidth
         height: alignedHeight
-        visible: !win._finalized && !chromeOnlyExit
-        scale: (!win.inlineHeightAnimating && cardHoverHandler.hovered) ? 1.01 : 1.0
+        visible: win.cardShown && !chromeOnlyExit
         transformOrigin: Item.Center
-
-        Behavior on scale {
-            NumberAnimation {
-                duration: Theme.shortDuration
-                easing.type: Theme.standardEasing
-            }
-        }
 
         property real swipeOffset: 0
         property real swipeDismissDirection: 1
         property bool chromeOnlyExit: false
-        readonly property real dismissThreshold: width * 0.35
-        readonly property real swipeFadeStartRatio: 0.75
+        readonly property real dismissThreshold: width * NotificationMetrics.swipeThreshold
+        readonly property real swipeFadeStartRatio: NotificationMetrics.swipeFadeStart
         readonly property real swipeTravelDistance: width
         readonly property real swipeFadeStartOffset: swipeTravelDistance * swipeFadeStartRatio
         readonly property real swipeFadeDistance: Math.max(1, swipeTravelDistance - swipeFadeStartOffset)
-        readonly property bool swipeActive: swipeDragHandler.active
+        property bool swipeWheelActive: false
+        readonly property bool swipeActive: swipeDragHandler.active || swipeWheelActive
         property bool swipeDismissing: false
         onSwipeDismissingChanged: {
             if (!win.connectedFrameMode)
@@ -617,31 +604,45 @@ PanelWindow {
                 win.popupChromeGeometryChanged();
         }
 
+        function releaseSwipe(velocity = 0) {
+            if (win.exiting || swipeDismissing)
+                return;
+            const projected = swipeOffset + velocity * NotificationMetrics.swipeFlingProjectionMs / 1000;
+            if (Math.abs(projected) <= dismissThreshold) {
+                swipeOffset = 0;
+                return;
+            }
+            swipeDismissDirection = projected < 0 ? -1 : 1;
+            swipeDismissing = true;
+            swipeDismissAnim.start();
+        }
+
         readonly property bool shadowsAllowed: win.popupWindowShadowActive
-        readonly property var elevLevel: cardHoverHandler.hovered ? Theme.elevationLevel4 : Theme.elevationLevel3
-        readonly property real cardInset: Theme.snap(4, win.dpr)
-        readonly property real shadowRenderPadding: shadowsAllowed ? Theme.snap(Math.max(16, shadowBlurPx + Math.max(Math.abs(shadowOffsetX), Math.abs(shadowOffsetY)) + 8), win.dpr) : 0
-        property real shadowBlurPx: shadowsAllowed ? (elevLevel && elevLevel.blurPx !== undefined ? elevLevel.blurPx : 12) : 0
+        readonly property var elevLevel: Theme.elevationLevel2
+        readonly property real cardInset: Theme.snap(Theme.spacingXS, win.dpr)
+        readonly property real shadowRenderPadding: shadowsAllowed ? Theme.snap(Math.max(Theme.spacingL, shadowBlurPx + Math.max(Math.abs(shadowOffsetX), Math.abs(shadowOffsetY)) + Theme.spacingS), win.dpr) : 0
+        property real shadowBlurPx: shadowsAllowed ? elevLevel.blurPx : 0
         property real shadowOffsetX: shadowsAllowed ? Theme.elevationOffsetX(elevLevel) : 0
-        property real shadowOffsetY: shadowsAllowed ? Theme.elevationOffsetY(elevLevel, 6) : 0
+        property real shadowOffsetY: shadowsAllowed ? Theme.elevationOffsetY(elevLevel) : 0
+        readonly property int shadowMotionDuration: win.inlineHeightAnimating ? Theme.notificationStackShiftDuration : Theme.shortDuration
 
         Behavior on shadowBlurPx {
             NumberAnimation {
-                duration: win.inlineHeightAnimating ? win.inlineExpandDuration : Theme.shortDuration
+                duration: content.shadowMotionDuration
                 easing.type: Theme.standardEasing
             }
         }
 
         Behavior on shadowOffsetX {
             NumberAnimation {
-                duration: win.inlineHeightAnimating ? win.inlineExpandDuration : Theme.shortDuration
+                duration: content.shadowMotionDuration
                 easing.type: Theme.standardEasing
             }
         }
 
         Behavior on shadowOffsetY {
             NumberAnimation {
-                duration: win.inlineHeightAnimating ? win.inlineExpandDuration : Theme.shortDuration
+                duration: content.shadowMotionDuration
                 easing.type: Theme.standardEasing
             }
         }
@@ -651,475 +652,181 @@ PanelWindow {
             anchors.fill: parent
             anchors.margins: -content.shadowRenderPadding
             level: content.elevLevel
-            fallbackOffset: 6
+            fallbackOffset: Theme.elevationOffsetY(content.elevLevel)
             shadowBlurPx: content.shadowBlurPx
             shadowOffsetX: content.shadowOffsetX
             shadowOffsetY: content.shadowOffsetY
-            shadowColor: content.shadowsAllowed && content.elevLevel ? Theme.elevationShadowColor(content.elevLevel) : "transparent"
+            shadowColor: content.shadowsAllowed && content.elevLevel ? Theme.elevationShadowColor(content.elevLevel) : Theme.withAlpha(Theme.elevationShadowColor(content.elevLevel), 0)
             shadowEnabled: !win._isDestroying && win.screenValid && content.shadowsAllowed && !win.connectedFrameMode
-            layer.textureSize: Qt.size(Math.round(width * win.dpr), Math.round(height * win.dpr))
-            layer.textureMirroring: ShaderEffectSource.MirrorVertically
 
-            sourceRect.anchors.fill: undefined
-            sourceRect.x: content.shadowRenderPadding + content.cardInset
-            sourceRect.y: content.shadowRenderPadding + content.cardInset
-            sourceRect.width: Math.max(0, content.width - (content.cardInset * 2))
-            sourceRect.height: Math.max(0, content.height - (content.cardInset * 2))
-            sourceRect.radius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : Theme.cornerRadius
-            sourceRect.color: win.connectedFrameMode ? Theme.floatingSurface : Theme.readableSurface
-            sourceRect.antialiasing: true
-            sourceRect.layer.enabled: false
-            sourceRect.layer.textureSize: Qt.size(0, 0)
-            sourceRect.border.color: notificationData && notificationData.urgency === NotificationUrgency.Critical ? Theme.withAlpha(Theme.primary, 0.3) : Theme.withAlpha(Theme.outline, 0.08)
-            sourceRect.border.width: notificationData && notificationData.urgency === NotificationUrgency.Critical ? 2 : 0
-        }
-
-        // Keep critical accent outside shadow rendering so connected mode still shows it.
-        Rectangle {
-            x: content.cardInset
-            y: content.cardInset
-            width: Math.max(0, content.width - content.cardInset * 2)
-            height: Math.max(0, content.height - content.cardInset * 2)
-            radius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : Theme.cornerRadius
-            visible: win.notificationData && win.notificationData.urgency === NotificationUrgency.Critical
-            opacity: 1
-            clip: true
-
-            gradient: Gradient {
-                orientation: Gradient.Horizontal
-
-                GradientStop {
-                    position: 0
-                    color: Theme.primary
-                }
-
-                GradientStop {
-                    position: 0.02
-                    color: Theme.primary
-                }
-
-                GradientStop {
-                    position: 0.021
-                    color: "transparent"
-                }
-            }
+            sourceX: content.shadowRenderPadding + content.cardInset
+            sourceY: content.shadowRenderPadding + content.cardInset
+            sourceWidth: Math.max(0, content.width - (content.cardInset * 2))
+            sourceHeight: Math.max(0, content.height - (content.cardInset * 2))
+            targetRadius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : NotificationMetrics.popupRadius
+            targetColor: Theme.notificationFloatingSurface
+            borderColor: win.notificationData && win.notificationData.urgency === NotificationUrgency.Critical ? Theme.withAlpha(Theme.primary, Theme.stateLayerPressed) : Theme.outlineVariant
+            borderWidth: win.notificationData && win.notificationData.urgency === NotificationUrgency.Critical ? Theme.outlineWidthFocused : 0
         }
 
         Rectangle {
             anchors.fill: parent
             anchors.margins: content.cardInset
-            radius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : Theme.cornerRadius
+            radius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : NotificationMetrics.popupRadius
             color: "transparent"
-            border.color: win.connectedFrameMode ? "transparent" : BlurService.borderColor
+            border.color: win.connectedFrameMode ? Theme.withAlpha(BlurService.borderColor, 0) : BlurService.borderColor
             border.width: win.connectedFrameMode ? 0 : BlurService.borderWidth
             z: 100
         }
 
-        Item {
-            id: backgroundContainer
+        Rectangle {
+            id: cardSurface
             anchors.fill: parent
             anchors.margins: content.cardInset
-            clip: true
+            radius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : NotificationMetrics.popupRadius
+            color: "transparent"
 
             HoverHandler {
                 id: cardHoverHandler
-            }
 
-            Connections {
-                target: cardHoverHandler
-                function onHoveredChanged() {
+                onHoveredChanged: {
                     if (!notificationData || win.exiting || win._isDestroying)
                         return;
-                    if (cardHoverHandler.hovered) {
+                    if (hovered) {
                         if (notificationData.timer)
                             notificationData.timer.stop();
-                    } else if (notificationData.popup && notificationData.timer) {
+                    } else if (!win.contextMenuActive && notificationData.popup && notificationData.timer) {
                         notificationData.timer.restart();
                     }
                 }
             }
 
-            LayoutMirroring.enabled: I18n.isRtl
-            LayoutMirroring.childrenInherit: true
+            ClippingRectangle {
+                width: parent.width
+                height: Math.max(0, win.targetAlignedHeight - content.cardInset * 2)
+                radius: cardSurface.radius
+                color: "transparent"
 
-            StyledText {
-                id: expandedBodyMeasure
+                DFlickable {
+                    anchors.fill: parent
+                    anchors.bottomMargin: win.timeoutRailClearance
+                    contentHeight: notificationCard.targetHeight
+                    clip: true
 
-                visible: false
-                width: Math.max(0, backgroundContainer.width - Theme.spacingL - (Theme.spacingL + Theme.notificationHoverRevealMargin) - popupIconSize - Theme.spacingM)
-                text: notificationData ? (notificationData.htmlBody || "") : ""
-                font.pixelSize: Theme.fontSizeSmall
-                elide: Text.ElideNone
-                horizontalAlignment: Text.AlignLeft
-                maximumLineCount: -1
-                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-            }
-
-            Item {
-                id: notificationContent
-
-                readonly property real expandedTextHeight: expandedBodyMeasure.contentHeight || bodyText.contentHeight || 0
-                readonly property real collapsedBodyHeight: Theme.fontSizeSmall * 1.2 * (compactMode ? 1 : 2)
-                readonly property real effectiveCollapsedHeight: (SettingsData.notificationPopupPrivacyMode && !descriptionExpanded) ? win.privacyCollapsedContentHeight : win.collapsedContentHeight
-                readonly property real extraHeight: (descriptionExpanded && expandedTextHeight > collapsedBodyHeight + 2) ? (expandedTextHeight - collapsedBodyHeight) : 0
-
-                anchors.top: parent.top
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.topMargin: cardPadding
-                anchors.leftMargin: Theme.spacingL
-                anchors.rightMargin: Theme.spacingL + Theme.notificationHoverRevealMargin
-                height: effectiveCollapsedHeight + extraHeight
-                clip: SettingsData.notificationPopupPrivacyMode && !descriptionExpanded
-
-                DankCircularImage {
-                    id: iconContainer
-
-                    readonly property string rawImage: notificationData?.image || ""
-                    readonly property string iconFromImage: {
-                        if (rawImage.startsWith("image://icon/"))
-                            return rawImage.substring(13);
-                        return "";
-                    }
-                    readonly property bool imageHasSpecialPrefix: {
-                        const icon = iconFromImage;
-                        return icon.startsWith("material:") || icon.startsWith("svg:") || icon.startsWith("unicode:") || icon.startsWith("image:");
-                    }
-                    readonly property bool hasNotificationImage: rawImage !== "" && !rawImage.startsWith("image://icon/")
-                    readonly property bool needsImagePersist: hasNotificationImage && rawImage.startsWith("image://qsimage/") && !notificationData.persistedImagePath
-
-                    width: popupIconSize
-                    height: popupIconSize
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.topMargin: {
-                        if (SettingsData.notificationPopupPrivacyMode && !descriptionExpanded) {
-                            const headerSummary = Theme.fontSizeSmall * 1.2 + Theme.fontSizeMedium * 1.2;
-                            return Math.max(0, headerSummary / 2 - popupIconSize / 2);
-                        }
-                        if (descriptionExpanded)
-                            return Math.max(0, Theme.fontSizeSmall * 1.2 + (Theme.fontSizeMedium * 1.2 + Theme.fontSizeSmall * 1.2 * (compactMode ? 1 : 2)) / 2 - popupIconSize / 2);
-                        return Math.max(0, Theme.fontSizeSmall * 1.2 + (textContainer.height - Theme.fontSizeSmall * 1.2) / 2 - popupIconSize / 2);
-                    }
-
-                    imageSource: {
-                        if (!notificationData)
-                            return "";
-                        if (hasNotificationImage)
-                            return notificationData.cleanImage || "";
-                        if (imageHasSpecialPrefix)
-                            return "";
-                        const appIcon = notificationData.appIcon;
-                        if (!appIcon)
-                            return "";
-                        if (appIcon.startsWith("file://") || appIcon.startsWith("http://") || appIcon.startsWith("https://") || appIcon.includes("/"))
-                            return appIcon;
-                        return "";
-                    }
-
-                    hasImage: hasNotificationImage
-                    fallbackIcon: {
-                        if (imageHasSpecialPrefix)
-                            return iconFromImage;
-                        return notificationData?.appIcon || iconFromImage || "";
-                    }
-                    fallbackText: {
-                        const appName = notificationData?.appName || "?";
-                        return appName.charAt(0).toUpperCase();
-                    }
-
-                    onImageStatusChanged: {
-                        if (imageStatus === Image.Ready && needsImagePersist) {
-                            const cachePath = NotificationService.getImageCachePath(notificationData);
-                            saveImageToFile(cachePath);
-                        }
-                    }
-
-                    onImageSaved: filePath => {
-                        if (!notificationData)
-                            return;
-                        notificationData.persistedImagePath = filePath;
-                        const wrapperId = notificationData.notification?.id?.toString() || "";
-                        if (wrapperId)
-                            NotificationService.updateHistoryImage(wrapperId, filePath);
-                    }
-                }
-
-                Column {
-                    id: textContainer
-
-                    anchors.left: iconContainer.right
-                    anchors.leftMargin: Theme.spacingM
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    spacing: Theme.notificationContentSpacing
-
-                    Row {
-                        id: headerRow
+                    NotificationCard {
+                        id: notificationCard
+                        surfaceColor: Theme.notificationFloatingSurface
+                        chipColor: Theme.notificationChipSurface
                         width: parent.width
-                        spacing: Theme.spacingXS
-                        visible: headerAppNameText.text.length > 0 || headerTimeText.text.length > 0
-
-                        StyledText {
-                            id: headerAppNameText
-                            text: notificationData ? (notificationData.appName || "") : ""
-                            color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.7)
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Normal
-                            elide: Text.ElideRight
-                            maximumLineCount: 1
-                            width: Math.min(implicitWidth, parent.width - headerSeparator.implicitWidth - headerTimeText.implicitWidth - parent.spacing * 2)
+                        height: win.inlineHeightAnimating ? Math.min(targetHeight, cardSurface.height - win.timeoutRailClearance) : targetHeight
+                        notificationData: win.notificationData
+                        descriptionExpanded: win.descriptionExpanded
+                        privacyMode: SettingsData.notificationPopupPrivacyMode
+                        bodyInvokesAction: win.bodyClickInvokesAction
+                        persistImage: true
+                        showClose: true
+                        revealControls: win.hovered || win.contextMenuActive
+                        dismissText: I18n.tr("Clear")
+                        animateHeight: false
+                        outerRadius: win.connectedFrameMode ? Theme.connectedSurfaceRadius : NotificationMetrics.popupRadius
+                        color: "transparent"
+                        onExpandRequested: win.descriptionExpanded = !win.descriptionExpanded
+                        onCloseRequested: win.dismissPopupReliably()
+                        onDismissRequested: {
+                            if (win.notificationData && !win.exiting)
+                                NotificationService.permanentlyDismissNotification(win.notificationData);
                         }
-
-                        StyledText {
-                            id: headerSeparator
-                            text: (headerAppNameText.text.length > 0 && headerTimeText.text.length > 0) ? " • " : ""
-                            color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.7)
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Normal
+                        onActionRequested: action => {
+                            NiriService.focusSourceForNotification(win.notificationData);
+                            if (!action?.invoke || win.exiting)
+                                return;
+                            action.invoke();
+                            win.dismissPopupReliably();
                         }
-
-                        StyledText {
-                            id: headerTimeText
-                            text: notificationData ? (notificationData.timeStr || "") : ""
-                            color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.7)
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Normal
-                        }
-                    }
-
-                    StyledText {
-                        text: notificationData ? (notificationData.summary || "") : ""
-                        color: Theme.surfaceText
-                        font.pixelSize: Theme.fontSizeMedium
-                        font.weight: Font.Medium
-                        width: parent.width
-                        elide: Text.ElideRight
-                        horizontalAlignment: Text.AlignLeft
-                        maximumLineCount: 1
-                        visible: text.length > 0
-                    }
-
-                    StyledText {
-                        id: bodyText
-                        property bool hasMoreText: truncated
-
-                        text: notificationData ? (notificationData.htmlBody || "") : ""
-                        color: Theme.surfaceVariantText
-                        font.pixelSize: Theme.fontSizeSmall
-                        width: parent.width
-                        elide: descriptionExpanded ? Text.ElideNone : Text.ElideRight
-                        horizontalAlignment: Text.AlignLeft
-                        maximumLineCount: descriptionExpanded ? -1 : (compactMode ? 1 : 2)
-                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-                        visible: text.length > 0
-                        opacity: (SettingsData.notificationPopupPrivacyMode && !descriptionExpanded) ? 0 : 1
-                        linkColor: Theme.primary
-                        onLinkActivated: link => Qt.openUrlExternally(link)
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : (bodyText.hasMoreText || descriptionExpanded) ? Qt.PointingHandCursor : Qt.ArrowCursor
-
-                            onClicked: mouse => {
-                                if (!parent.hoveredLink && (bodyText.hasMoreText || descriptionExpanded))
-                                    win.descriptionExpanded = !win.descriptionExpanded;
+                        onBodyClicked: {
+                            if (!win.notificationData || win.exiting)
+                                return;
+                            if (win.bodyClickInvokesAction) {
+                                NiriService.focusSourceForNotification(win.notificationData);
+                                win.invokeDefaultAction();
+                                return;
                             }
-
-                            propagateComposedEvents: false
-                            onPressed: mouse => {
-                                if (parent.hoveredLink)
-                                    mouse.accepted = false;
+                            if (canExpand) {
+                                win.descriptionExpanded = !win.descriptionExpanded;
+                                return;
                             }
-                            onReleased: mouse => {
-                                if (parent.hoveredLink)
-                                    mouse.accepted = false;
+                            const focused = NiriService.focusSourceForNotification(win.notificationData);
+                            if (win.notificationData.actions?.length > 0) {
+                                win.notificationData.actions[0].invoke();
+                                NotificationService.dismissNotification(win.notificationData);
+                                return;
                             }
+                            if (focused) {
+                                NotificationService.dismissNotification(win.notificationData);
+                                return;
+                            }
+                            win.dismissPopupReliably();
                         }
-                    }
-
-                    StyledText {
-                        text: I18n.tr("Message Content", "notification privacy mode placeholder")
-                        color: Theme.surfaceVariantText
-                        font.pixelSize: Theme.fontSizeSmall
-                        width: parent.width
-                        visible: SettingsData.notificationPopupPrivacyMode && !descriptionExpanded && win.hasExpandableBody
-                    }
-                }
-            }
-
-            DankActionButton {
-                id: closeButton
-
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.topMargin: cardPadding
-                anchors.rightMargin: Theme.spacingL
-                iconName: "close"
-                iconSize: compactMode ? 14 : 16
-                buttonSize: compactMode ? 20 : 24
-                z: 15
-
-                onClicked: {
-                    if (notificationData && !win.exiting)
-                        notificationData.popup = false;
-                }
-            }
-
-            DankActionButton {
-                id: expandButton
-
-                anchors.right: closeButton.left
-                anchors.rightMargin: Theme.spacingXS
-                anchors.top: parent.top
-                anchors.topMargin: cardPadding
-                iconName: descriptionExpanded ? "expand_less" : "expand_more"
-                iconSize: compactMode ? 14 : 16
-                buttonSize: compactMode ? 20 : 24
-                z: 15
-                visible: SettingsData.notificationPopupPrivacyMode && win.hasExpandableBody
-
-                onClicked: {
-                    if (win.hasExpandableBody)
-                        win.descriptionExpanded = !win.descriptionExpanded;
-                }
-            }
-
-            Row {
-                visible: cardHoverHandler.hovered
-                opacity: visible ? 1 : 0
-                anchors.right: clearButton.visible ? clearButton.left : parent.right
-                anchors.rightMargin: clearButton.visible ? contentSpacing : Theme.spacingL
-                anchors.top: notificationContent.bottom
-                anchors.topMargin: contentSpacing
-                spacing: contentSpacing
-                z: 20
-
-                Behavior on opacity {
-                    NumberAnimation {
-                        duration: Theme.shortDuration
-                        easing.type: Theme.standardEasing
-                    }
-                }
-
-                Repeater {
-                    model: notificationData ? (notificationData.actions || []) : []
-
-                    Rectangle {
-                        property bool isHovered: false
-
-                        width: Math.max(actionText.implicitWidth + Theme.spacingM, Theme.notificationActionMinWidth)
-                        height: actionButtonHeight
-                        radius: Theme.notificationButtonCornerRadius
-                        color: isHovered ? Theme.withAlpha(Theme.primary, Theme.stateLayerHover) : "transparent"
-
-                        StyledText {
-                            id: actionText
-
-                            text: modelData.text || "Open"
-                            color: parent.isHovered ? Theme.primary : Theme.surfaceVariantText
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Medium
-                            anchors.centerIn: parent
-                            elide: Text.ElideRight
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            acceptedButtons: Qt.LeftButton
-                            onEntered: parent.isHovered = true
-                            onExited: parent.isHovered = false
-                            onClicked: {
-                                NiriService.focusSourceForNotification(notificationData);
-                                if (modelData && modelData.invoke)
-                                    modelData.invoke();
-                                if (notificationData && !win.exiting)
-                                    notificationData.popup = false;
-                            }
+                        onContextMenuRequested: (x, y) => {
+                            popupContextMenuLoader.active = true;
+                            const menu = popupContextMenuLoader.item;
+                            if (!menu)
+                                return;
+                            const point = mapToItem(null, x, y);
+                            menu.showAt(win.margins.left + point.x, win.margins.top + point.y, win.screen);
                         }
                     }
                 }
             }
 
             Rectangle {
-                id: clearButton
-
-                property bool isHovered: false
-                readonly property int actionCount: notificationData ? (notificationData.actions || []).length : 0
-
-                visible: actionCount < 3 && cardHoverHandler.hovered
-                opacity: visible ? 1 : 0
-                Behavior on opacity {
-                    NumberAnimation {
-                        duration: Theme.shortDuration
-                        easing.type: Theme.standardEasing
-                    }
-                }
+                id: timeoutBar
+                readonly property bool active: SettingsData.notificationShowTimeoutBar && win.notificationData?.timer?.interval > 0
+                property real progress: 1
+                anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.rightMargin: Theme.spacingL
-                anchors.top: notificationContent.bottom
-                anchors.topMargin: contentSpacing
-                width: Math.max(clearTextLabel.implicitWidth + Theme.spacingM, Theme.notificationActionMinWidth)
-                height: actionButtonHeight
-                radius: Theme.notificationButtonCornerRadius
-                color: isHovered ? Theme.withAlpha(Theme.primary, Theme.stateLayerHover) : "transparent"
-                z: 20
+                anchors.bottom: parent.bottom
+                anchors.margins: NotificationMetrics.popupRadius
+                anchors.bottomMargin: Theme.spacingXS
+                height: NotificationMetrics.railHeight
+                radius: Theme.fullRadius(width, height)
+                visible: active && progress > 0
+                color: Theme.secondaryContainer
 
-                StyledText {
-                    id: clearTextLabel
-
-                    text: win.clearText
-                    color: clearButton.isHovered ? Theme.primary : Theme.surfaceVariantText
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.weight: Font.Medium
-                    anchors.centerIn: parent
+                Rectangle {
+                    width: parent.width * timeoutBar.progress
+                    height: parent.height
+                    radius: Theme.fullRadius(width, height)
+                    color: Theme.primary
                 }
 
-                MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    acceptedButtons: Qt.LeftButton
-                    onEntered: clearButton.isHovered = true
-                    onExited: clearButton.isHovered = false
-                    onClicked: {
-                        if (notificationData && !win.exiting)
-                            NotificationService.dismissNotification(notificationData);
-                    }
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: NotificationMetrics.railStopSize
+                    height: width
+                    radius: Theme.fullRadius(width, height)
+                    color: Theme.primary
                 }
-            }
 
-            MouseArea {
-                id: cardHoverArea
+                NumberAnimation {
+                    id: progressAnim
+                    target: timeoutBar
+                    property: "progress"
+                    from: 1
+                    to: 0
+                    duration: win.notificationData?.timer?.interval ?? 0
+                    running: timeoutBar.active && win.notificationData?.timer?.running && !win.exiting
+                    easing.type: Easing.Linear
+                }
 
-                anchors.fill: parent
-                hoverEnabled: true
-                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                cursorShape: Qt.PointingHandCursor
-                propagateComposedEvents: true
-                z: -1
-                onClicked: mouse => {
-                    if (!notificationData || win.exiting)
-                        return;
-                    if (mouse.button === Qt.RightButton) {
-                        popupContextMenu.popup();
-                    } else if (mouse.button === Qt.LeftButton) {
-                        const canExpand = bodyText.hasMoreText || win.descriptionExpanded || (SettingsData.notificationPopupPrivacyMode && win.hasExpandableBody);
-                        if (canExpand) {
-                            win.descriptionExpanded = !win.descriptionExpanded;
-                        } else {
-                            const focused = NiriService.focusSourceForNotification(notificationData);
-                            if (notificationData.actions && notificationData.actions.length > 0) {
-                                notificationData.actions[0].invoke();
-                                NotificationService.dismissNotification(notificationData);
-                            } else if (focused) {
-                                NotificationService.dismissNotification(notificationData);
-                            } else {
-                                notificationData.popup = false;
-                            }
-                        }
+                Connections {
+                    target: timeoutBar.active ? win.notificationData?.timer : null
+                    function onRunningChanged() {
+                        if (!win.notificationData?.timer?.running || win.exiting)
+                            return;
+                        timeoutBar.progress = 1;
+                        progressAnim.restart();
                     }
                 }
             }
@@ -1132,16 +839,9 @@ PanelWindow {
             yAxis.enabled: false
 
             onActiveChanged: {
-                if (active || win.exiting || content.swipeDismissing)
+                if (active)
                     return;
-
-                if (Math.abs(content.swipeOffset) > content.dismissThreshold) {
-                    content.swipeDismissDirection = content.swipeOffset < 0 ? -1 : 1;
-                    content.swipeDismissing = true;
-                    swipeDismissAnim.start();
-                } else {
-                    content.swipeOffset = 0;
-                }
+                content.releaseSwipe();
             }
 
             onTranslationChanged: {
@@ -1154,23 +854,19 @@ PanelWindow {
 
         opacity: {
             const swipeAmount = Math.abs(content.swipeOffset);
+            const revealOpacity = win.directionalEffect ? 1 : win.presentationProgress;
             if (swipeAmount <= content.swipeFadeStartOffset)
-                return 1;
+                return revealOpacity;
             const fadeProgress = (swipeAmount - content.swipeFadeStartOffset) / content.swipeFadeDistance;
-            return Math.max(0, 1 - fadeProgress);
+            return Math.max(0, 1 - fadeProgress) * revealOpacity;
         }
 
-        Behavior on opacity {
-            enabled: !content.swipeActive && !content.swipeDismissing
-            NumberAnimation {
-                duration: Theme.shortDuration
-            }
-        }
+        scale: win.directionalEffect ? 1 : Theme.effectScaleCollapsed + (1 - Theme.effectScaleCollapsed) * win.presentationProgress
 
         Behavior on swipeOffset {
             enabled: !content.swipeActive && !content.swipeDismissing
             NumberAnimation {
-                duration: Theme.notificationExitDuration
+                duration: NotificationMetrics.animationsEnabled ? Theme.notificationExitDuration : 0
                 easing.type: Theme.standardEasing
             }
         }
@@ -1180,19 +876,13 @@ PanelWindow {
             target: content
             property: "swipeOffset"
             to: win._swipeDismissTarget()
-            duration: Theme.notificationExitDuration
-            easing.type: Easing.OutCubic
-            onStopped: {
-                const inwardConnectedExit = win.connectedFrameMode && !win.isCenterPosition && !win._swipeDismissesTowardFrameEdge();
-                if (inwardConnectedExit)
-                    content.chromeOnlyExit = true;
-                if (win.connectedFrameMode) {
-                    win.startExit();
-                    NotificationService.dismissNotification(notificationData);
-                } else {
-                    NotificationService.dismissNotification(notificationData);
-                    win.forceExit();
-                }
+            duration: NotificationMetrics.animationsEnabled ? Theme.notificationExitDuration : 0
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: NotificationMetrics.dismissCurve
+            onFinished: {
+                content.chromeOnlyExit = true;
+                win.startExit();
+                NotificationService.dismissNotification(notificationData);
             }
         }
 
@@ -1204,13 +894,8 @@ PanelWindow {
             },
             Translate {
                 id: tx
-                x: {
-                    if (isCenterPosition)
-                        return 0;
-                    const isLeft = SettingsData.notificationPopupPosition === SettingsData.Position.Left || SettingsData.notificationPopupPosition === SettingsData.Position.Bottom;
-                    return isLeft ? -entryTravel : entryTravel;
-                }
-                y: isTopCenter ? -entryTravel : isBottomCenter ? entryTravel : 0
+                x: win.slideVertical ? 0 : win.slideSideDirection * win.slideTravel * (1 - win.presentationProgress)
+                y: win.slideVertical ? win.slideEdgeDirection * win.slideTravel * (1 - win.presentationProgress) : 0
                 onXChanged: {
                     if (win.connectedFrameMode)
                         win.popupChromeGeometryChanged();
@@ -1223,75 +908,60 @@ PanelWindow {
         ]
     }
 
-    NumberAnimation {
-        id: enterX
+    // Sits on the untranslated card footprint: inside content the handler would lose the pointer once the card slides past it,
+    // and above content so it sees the gesture before DFlickable's blocking vertical handler
+    Item {
+        parent: slideClip
+        x: content.x
+        y: content.y
+        width: content.width
+        height: content.height
+        visible: content.visible
 
-        target: tx
-        property: isCenterPosition ? "y" : "x"
-        from: {
-            if (isTopCenter)
-                return -entryTravel;
-            if (isBottomCenter)
-                return entryTravel;
-            const isLeft = SettingsData.notificationPopupPosition === SettingsData.Position.Left || SettingsData.notificationPopupPosition === SettingsData.Position.Bottom;
-            return isLeft ? -entryTravel : entryTravel;
-        }
-        to: 0
-        duration: Theme.notificationEnterDuration
-        easing.type: Easing.BezierSpline
-        easing.bezierCurve: Theme.variantPopoutEnterCurve
-        onStopped: {
-            if (!win.exiting && !win._isDestroying) {
-                if (isCenterPosition) {
-                    if (Math.abs(tx.y) < 0.5)
-                        win.entered();
-                } else {
-                    if (Math.abs(tx.x) < 0.5)
-                        win.entered();
-                }
+        NotificationSwipeWheel {
+            enabled: !win.exiting && !content.swipeDismissing
+            onBegan: content.swipeWheelActive = true
+            onMoved: travel => content.swipeOffset = travel
+            onEnded: velocity => {
+                content.swipeWheelActive = false;
+                content.releaseSwipe(velocity);
             }
         }
     }
 
-    ParallelAnimation {
+    DCommon.DAnim {
+        id: enterAnimation
+        target: win
+        property: "presentationProgress"
+        to: 1
+        duration: NotificationMetrics.animationsEnabled ? Theme.notificationEnterDuration : 0
+        easing.bezierCurve: NotificationMetrics.enterCurve
+        onFinished: {
+            if (!win.exiting && !win._isDestroying)
+                win.entered();
+        }
+    }
+
+    SequentialAnimation {
         id: exitAnim
 
-        onStopped: finalizeExit("animStopped")
-
-        PropertyAnimation {
-            target: tx
-            property: isCenterPosition ? "y" : "x"
-            from: 0
-            to: {
-                if (isTopCenter)
-                    return -exitTravel;
-                if (isBottomCenter)
-                    return exitTravel;
-                const isLeft = SettingsData.notificationPopupPosition === SettingsData.Position.Left || SettingsData.notificationPopupPosition === SettingsData.Position.Bottom;
-                return isLeft ? -exitTravel : exitTravel;
-            }
-            duration: Theme.notificationExitDuration
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: Theme.variantPopoutExitCurve
+        DCommon.DAnim {
+            target: win
+            property: "presentationProgress"
+            to: 0
+            duration: NotificationMetrics.animationsEnabled && !content.chromeOnlyExit ? Theme.notificationExitDuration : 0
+            easing.bezierCurve: NotificationMetrics.exitCurve
         }
 
-        NumberAnimation {
-            target: content
-            property: "opacity"
-            to: Theme.isDirectionalEffect ? 1 : 0
-            duration: Theme.notificationExitDuration
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: Theme.variantPopoutExitCurve
+        DCommon.DAnim {
+            target: win
+            property: "chromeRelease"
+            to: 1
+            duration: NotificationMetrics.animationsEnabled && win.collapseChromeOnExit ? Theme.notificationStackShiftDuration : 0
+            easing.bezierCurve: NotificationMetrics.heightCurve
         }
 
-        NumberAnimation {
-            target: content
-            property: "scale"
-            to: Theme.isDirectionalEffect ? 1 : Theme.effectScaleCollapsed
-            duration: Theme.notificationExitDuration
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: Theme.variantPopoutExitCurve
-        }
+        onFinished: win.finalizeExit("animation")
     }
 
     Connections {
@@ -1325,124 +995,54 @@ PanelWindow {
     Timer {
         id: enterDelay
 
-        interval: 160
+        interval: Theme.shortDuration
         repeat: false
         onTriggered: {
-            if (notificationData && notificationData.timer && !exiting && !_isDestroying)
+            if (notificationData && notificationData.timer && !contextMenuActive && !hovered && !exiting && !_isDestroying)
                 notificationData.timer.start();
+        }
+    }
+
+    Connections {
+        target: popupContextMenuLoader.item
+        ignoreUnknownSignals: true
+
+        function onVisibleChanged() {
+            if (!notificationData?.timer || exiting || _isDestroying)
+                return;
+            if (win.contextMenuActive) {
+                notificationData.timer.stop();
+            } else if (!cardHoverHandler.hovered && notificationData.popup) {
+                notificationData.timer.restart();
+            }
         }
     }
 
     Timer {
         id: exitWatchdog
 
-        interval: 600
+        interval: Math.max(600, Theme.notificationExitDuration + Theme.notificationStackShiftDuration + Theme.shortDuration)
         repeat: false
         onTriggered: finalizeExit("watchdog")
     }
 
-    Behavior on screenY {
-        id: screenYAnim
+    Loader {
+        id: popupContextMenuLoader
+        active: false
 
-        enabled: !exiting && !_isDestroying
-
-        NumberAnimation {
-            duration: Theme.shortDuration
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: Theme.expressiveCurves.standardDecel
-        }
-    }
-
-    Menu {
-        id: popupContextMenu
-        width: 220
-        contentHeight: 130
-        margins: -1
-        popupType: Popup.Window
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-
-        background: Rectangle {
-            color: Theme.withAlpha(Theme.surfaceContainer, Theme.popupTransparency)
-            radius: Theme.cornerRadius
-            border.width: 0
-            border.color: Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.12)
-        }
-
-        MenuItem {
-            id: setNotificationRulesItem
-            text: I18n.tr("Set notification rules")
-
-            contentItem: StyledText {
-                text: parent.text
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                leftPadding: Theme.spacingS
-                verticalAlignment: Text.AlignVCenter
-            }
-
-            background: Rectangle {
-                color: parent.hovered ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08) : "transparent"
-                radius: Theme.cornerRadius / 2
-            }
-
-            onTriggered: {
-                const appName = notificationData?.appName || "";
-                const desktopEntry = notificationData?.desktopEntry || "";
-                SettingsData.addNotificationRuleForNotification(appName, desktopEntry);
-                PopoutService.openSettingsWithTab("notifications");
-            }
-        }
-
-        MenuItem {
-            id: muteUnmuteItem
-            readonly property bool isMuted: SettingsData.isAppMuted(notificationData?.appName || "", notificationData?.desktopEntry || "")
-            text: isMuted ? I18n.tr("Unmute popups for %1").arg(notificationData?.appName || I18n.tr("this app")) : I18n.tr("Mute popups for %1").arg(notificationData?.appName || I18n.tr("this app"))
-
-            contentItem: StyledText {
-                text: parent.text
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                leftPadding: Theme.spacingS
-                verticalAlignment: Text.AlignVCenter
-            }
-
-            background: Rectangle {
-                color: parent.hovered ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08) : "transparent"
-                radius: Theme.cornerRadius / 2
-            }
-
-            onTriggered: {
-                const appName = notificationData?.appName || "";
-                const desktopEntry = notificationData?.desktopEntry || "";
-                if (isMuted) {
-                    SettingsData.removeMuteRuleForApp(appName, desktopEntry);
-                } else {
-                    SettingsData.addMuteRuleForApp(appName, desktopEntry);
-                    if (notificationData && !exiting)
-                        NotificationService.dismissNotification(notificationData);
-                }
-            }
-        }
-
-        MenuItem {
-            text: I18n.tr("Dismiss")
-
-            contentItem: StyledText {
-                text: parent.text
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                leftPadding: Theme.spacingS
-                verticalAlignment: Text.AlignVCenter
-            }
-
-            background: Rectangle {
-                color: parent.hovered ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.08) : "transparent"
-                radius: Theme.cornerRadius / 2
-            }
-
-            onTriggered: {
-                if (notificationData && !exiting)
+        sourceComponent: NotificationContextMenu {
+            transientSurfaceTracker: transientSurfaces
+            appName: notificationData?.appName ?? ""
+            desktopEntry: notificationData?.desktopEntry ?? ""
+            dismissText: notificationCard.dismissText
+            notification: notificationData
+            onAppMuted: {
+                if (notificationData && !win.exiting)
                     NotificationService.dismissNotification(notificationData);
+            }
+            onDismissRequested: {
+                if (notificationData && !win.exiting)
+                    NotificationService.permanentlyDismissNotification(notificationData);
             }
         }
     }

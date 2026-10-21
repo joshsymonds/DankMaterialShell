@@ -3,7 +3,7 @@ package distros
 import (
 	"context"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/deps"
+	"github.com/duxlabs-dev/dux-shell/core/internal/deps"
 )
 
 // DistroFamily represents a family of related distributions
@@ -17,6 +17,7 @@ const (
 	FamilyDebian DistroFamily = "debian"
 	FamilyNix    DistroFamily = "nix"
 	FamilyGentoo DistroFamily = "gentoo"
+	FamilyVoid   DistroFamily = "void"
 )
 
 // PackageManagerType defines the package manager a distro uses
@@ -29,6 +30,7 @@ const (
 	PackageManagerZypper  PackageManagerType = "zypper"
 	PackageManagerNix     PackageManagerType = "nix"
 	PackageManagerPortage PackageManagerType = "portage"
+	PackageManagerXBPS    PackageManagerType = "xbps"
 )
 
 // RepositoryType defines the type of repository for a package
@@ -42,6 +44,7 @@ const (
 	RepoTypeOBS    RepositoryType = "obs"    // OpenBuild Service (Debian/OpenSUSE)
 	RepoTypeFlake  RepositoryType = "flake"  // Nix flake
 	RepoTypeGURU   RepositoryType = "guru"   // Gentoo GURU
+	RepoTypeXBPS   RepositoryType = "xbps"   // Custom XBPS repository
 	RepoTypeManual RepositoryType = "manual" // Manual build from source
 )
 
@@ -98,6 +101,7 @@ type Distribution interface {
 
 	// Package Mapping
 	GetPackageMapping(wm deps.WindowManager) map[string]PackageMapping
+	GetPackageMappingWithVariants(wm deps.WindowManager, variants map[string]deps.PackageVariant) map[string]PackageMapping
 
 	// Prerequisites
 	InstallPrerequisites(ctx context.Context, sudoPassword string, progressChan chan<- InstallProgressMsg) error

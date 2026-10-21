@@ -1,17 +1,29 @@
 import QtQuick
 import qs.Common
+import qs.Modules.Notifications
 import qs.Services
 import qs.Widgets
 
-DankPopout {
+DPopout {
     id: root
 
     layerNamespace: "dms:notification-center-popout"
     fullHeightSurface: true
+    contentHandlesKeys: true
+    onOpened: contentFocusTimer.restart()
+
+    Timer {
+        id: contentFocusTimer
+        interval: 0
+        onTriggered: {
+            if (root.shouldBeVisible)
+                root.contentLoader.item?.forceActiveFocus();
+        }
+    }
 
     property bool notificationHistoryVisible: false
     property var triggerScreen: null
-    property real stablePopupHeight: 400
+    property real stablePopupHeight: NotificationMetrics.popupWidth
     property real _lastAlignedContentHeight: -1
     property bool _pendingSizedOpen: false
     property bool _heightUpdatePending: false
@@ -24,7 +36,7 @@ DankPopout {
                 notificationList.forceLayout();
             }
         }
-        const target = item ? Theme.px(item.implicitHeight, dpr) : 400;
+        const target = item ? Theme.px(item.implicitHeight, dpr) : NotificationMetrics.popupWidth;
         if (Math.abs(target - _lastAlignedContentHeight) < 0.5)
             return;
         _lastAlignedContentHeight = target;
@@ -50,7 +62,7 @@ DankPopout {
         }
     }
 
-    popupWidth: 400
+    popupWidth: NotificationMetrics.popupWidth + Theme.spacingL
     popupHeight: stablePopupHeight
     positioning: ""
     suspendShadowWhileResizing: false
@@ -59,6 +71,10 @@ DankPopout {
 
     function toggle() {
         notificationHistoryVisible = !notificationHistoryVisible;
+    }
+
+    function present() {
+        openSized();
     }
 
     function openSized() {
@@ -102,14 +118,9 @@ DankPopout {
         contentLoader.item.externalKeyboardController = keyboardController;
 
         const notificationList = findChild(contentLoader.item, "notificationList");
-        const notificationHeader = findChild(contentLoader.item, "notificationHeader");
-
         if (notificationList) {
             keyboardController.listView = notificationList;
             notificationList.keyboardController = keyboardController;
-        }
-        if (notificationHeader) {
-            notificationHeader.keyboardController = keyboardController;
         }
 
         keyboardController.reset();
@@ -136,12 +147,9 @@ DankPopout {
         }
     }
 
-    Connections {
-        target: contentLoader.item
-        function onImplicitHeightChanged() {
-            root.queueStablePopupHeightUpdate();
-        }
-    }
+    readonly property real contentImplicitHeight: contentLoader.item?.implicitHeight ?? 0
+
+    onContentImplicitHeightChanged: queueStablePopupHeightUpdate()
 
     onDprChanged: updateStablePopupHeight()
 
@@ -176,156 +184,61 @@ DankPopout {
     }
 
     content: Component {
-        Rectangle {
+        Item {
             id: notificationContent
 
-            LayoutMirroring.enabled: I18n.isRtl
-            LayoutMirroring.childrenInherit: true
+            property alias externalKeyboardController: body.externalKeyboardController
 
-            property var externalKeyboardController: null
-            property real cachedHeaderHeight: 32
-            readonly property real settingsMaxHeight: {
-                const screenH = root.screen ? root.screen.height : 1080;
-                const maxPopupH = screenH * 0.8;
-                const overhead = cachedHeaderHeight + Theme.spacingL * 2 + Theme.spacingM * 2;
-                return Math.max(200, maxPopupH - overhead - 150);
-            }
-            implicitHeight: {
-                let baseHeight = Theme.spacingL * 2;
-                baseHeight += cachedHeaderHeight;
-                baseHeight += Theme.spacingM * 2;
-
-                const settingsHeight = notificationSettings.expanded ? Math.min(notificationSettings.naturalContentHeight, settingsMaxHeight) : 0;
-                const currentListHeight = root.shouldBeVisible ? notificationList.stableContentHeight : notificationList.listContentHeight;
-                let listHeight = notificationHeader.currentTab === 0 ? currentListHeight : Math.max(200, NotificationService.historyList.length * 80);
-                if (notificationHeader.currentTab === 0 && NotificationService.groupedNotifications.length === 0) {
-                    listHeight = 200;
-                }
-                if (notificationHeader.currentTab === 1 && NotificationService.historyList.length === 0) {
-                    listHeight = 200;
-                }
-
-                const maxContentArea = 600;
-                const availableListSpace = Math.max(200, maxContentArea - settingsHeight);
-
-                baseHeight += settingsHeight;
-                baseHeight += Math.min(listHeight, availableListSpace);
-
-                const maxHeight = root.screen ? root.screen.height * 0.8 : Screen.height * 0.8;
-                return Math.max(300, Math.min(baseHeight, maxHeight));
-            }
-
-            color: "transparent"
+            implicitHeight: body.implicitHeight
             focus: true
 
             Component.onCompleted: {
-                if (root.shouldBeVisible) {
+                if (root.shouldBeVisible)
                     forceActiveFocus();
+            }
+
+            Keys.onPressed: event => body.handleKey(event)
+
+            readonly property bool rootShouldBeVisible: root.shouldBeVisible
+
+            onRootShouldBeVisibleChanged: {
+                if (rootShouldBeVisible) {
+                    Qt.callLater(() => notificationContent.forceActiveFocus());
+                    return;
+                }
+                focus = false;
+            }
+
+            QtObject {
+                id: popoutHost
+
+                readonly property bool shouldBeVisible: root.shouldBeVisible
+                readonly property var screen: root.screen
+                readonly property var transientSurfaceTracker: root.transientSurfaceTracker
+                readonly property real maxContentHeight: (root.screen?.height ?? 1080) * NotificationMetrics.screenHeightRatio
+
+                function close() {
+                    root.notificationHistoryVisible = false;
+                }
+
+                function requestSettings() {
+                    root.notificationHistoryVisible = false;
+                    PopoutService.openSettingsWithTab("notifications", root, () => root.open());
                 }
             }
 
-            Keys.onPressed: event => {
-                if (event.key === Qt.Key_Escape) {
-                    notificationHistoryVisible = false;
-                    event.accepted = true;
-                    return;
-                }
-
-                if (event.key === Qt.Key_Left) {
-                    if (notificationHeader.currentTab > 0) {
-                        notificationHeader.currentTab = 0;
-                        event.accepted = true;
-                    }
-                    return;
-                }
-
-                if (event.key === Qt.Key_Right) {
-                    if (notificationHeader.currentTab === 0 && SettingsData.notificationHistoryEnabled) {
-                        notificationHeader.currentTab = 1;
-                        event.accepted = true;
-                    }
-                    return;
-                }
-                if (notificationHeader.currentTab === 1) {
-                    historyList.handleKey(event);
-                    return;
-                }
-                if (externalKeyboardController) {
-                    externalKeyboardController.handleKey(event);
-                }
-            }
-
-            Connections {
-                function onShouldBeVisibleChanged() {
-                    if (root.shouldBeVisible) {
-                        Qt.callLater(() => {
-                            notificationContent.forceActiveFocus();
-                        });
-                    } else {
-                        notificationContent.focus = false;
-                    }
-                }
-                target: root
-            }
-
-            FocusScope {
-                id: contentColumn
-
+            Item {
                 anchors.fill: parent
-                anchors.margins: Theme.spacingL
-                focus: true
+                anchors.bottomMargin: PopoutMetrics.contentPadding
+                clip: notificationContent.height < body.height
 
-                Column {
-                    id: contentColumnInner
-                    anchors.fill: parent
-                    spacing: Theme.spacingM
+                NotificationCenterContent {
+                    id: body
 
-                    NotificationHeader {
-                        id: notificationHeader
-                        objectName: "notificationHeader"
-                        onHeightChanged: notificationContent.cachedHeaderHeight = height
-                    }
-
-                    NotificationSettings {
-                        id: notificationSettings
-                        expanded: notificationHeader.showSettings
-                        maxAllowedHeight: notificationContent.settingsMaxHeight
-                    }
-
-                    Item {
-                        visible: notificationHeader.currentTab === 0
-                        width: parent.width
-                        height: parent.height - notificationContent.cachedHeaderHeight - notificationSettings.height - contentColumnInner.spacing * 2
-
-                        KeyboardNavigatedNotificationList {
-                            id: notificationList
-                            objectName: "notificationList"
-                            anchors.fill: parent
-                            anchors.leftMargin: -shadowHorizontalGutter
-                            anchors.rightMargin: -shadowHorizontalGutter
-                            anchors.topMargin: -(shadowVerticalGutter + delegateShadowGutter / 2)
-                            anchors.bottomMargin: -(shadowVerticalGutter + delegateShadowGutter / 2)
-                            cardAnimateExpansion: true
-                        }
-                    }
-
-                    HistoryNotificationList {
-                        id: historyList
-                        visible: notificationHeader.currentTab === 1
-                        width: parent.width
-                        height: parent.height - notificationContent.cachedHeaderHeight - notificationSettings.height - contentColumnInner.spacing * 2
-                    }
+                    width: parent.width
+                    height: Math.max(notificationContent.height, root.alignedHeight)
+                    host: popoutHost
                 }
-            }
-
-            NotificationKeyboardHints {
-                id: keyboardHints
-                anchors.bottom: parent.bottom
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.margins: Theme.spacingL
-                showHints: notificationHeader.currentTab === 0 ? (externalKeyboardController && externalKeyboardController.showKeyboardHints) || false : historyList.showKeyboardHints
-                z: 200
             }
         }
     }

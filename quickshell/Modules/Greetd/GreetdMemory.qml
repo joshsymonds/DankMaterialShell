@@ -18,6 +18,8 @@ Singleton {
     readonly property bool rememberLastUser: GreetdEnv.readBoolOverride(Quickshell.env, ["DMS_GREET_REMEMBER_LAST_USER", "DMS_SAVE_USERNAME"], true)
 
     property string lastSessionId: ""
+    property string lastSessionDesktopId: ""
+    property string lastSessionExec: ""
     property string lastSuccessfulUser: ""
     property bool memoryReady: false
     property bool isLightMode: false
@@ -54,6 +56,8 @@ Singleton {
                 return;
             const memory = JSON.parse(content);
             lastSessionId = rememberLastSession ? (memory.lastSessionId || "") : "";
+            lastSessionDesktopId = rememberLastSession ? (memory.lastSessionDesktopId || "") : "";
+            lastSessionExec = rememberLastSession ? (memory.lastSessionExec || "") : "";
             lastSuccessfulUser = rememberLastUser ? (memory.lastSuccessfulUser || "") : "";
             if (!rememberLastSession || !rememberLastUser)
                 saveMemory();
@@ -66,21 +70,51 @@ Singleton {
         let memory = {};
         if (rememberLastSession && lastSessionId)
             memory.lastSessionId = lastSessionId;
+        if (rememberLastSession && lastSessionDesktopId)
+            memory.lastSessionDesktopId = lastSessionDesktopId;
         if (rememberLastUser && lastSuccessfulUser)
             memory.lastSuccessfulUser = lastSuccessfulUser;
         memoryFileView.setText(JSON.stringify(memory, null, 2));
     }
 
-    function setLastSessionId(id) {
+    function setLastSession(id, desktopId) {
         if (!rememberLastSession) {
-            if (lastSessionId !== "") {
+            if (lastSessionId !== "" || lastSessionDesktopId !== "" || lastSessionExec !== "") {
                 lastSessionId = "";
+                lastSessionDesktopId = "";
+                lastSessionExec = "";
                 saveMemory();
             }
             return;
         }
         lastSessionId = id || "";
+        lastSessionDesktopId = desktopId || "";
+        lastSessionExec = "";
+        if (!lastSessionId)
+            lastSessionDesktopId = "";
         saveMemory();
+    }
+
+    function setLastSessionId(id) {
+        setLastSession(id, lastSessionDesktopId);
+    }
+
+    function setLastSessionDesktopId(id) {
+        setLastSession(lastSessionId, id);
+    }
+
+    function setLastSessionExec(exec) {
+        if (!rememberLastSession) {
+            if (lastSessionExec !== "") {
+                lastSessionExec = "";
+                saveMemory();
+            }
+            return;
+        }
+        if (lastSessionExec !== "") {
+            lastSessionExec = "";
+            saveMemory();
+        }
     }
 
     function setLastSuccessfulUser(username) {
@@ -119,12 +153,10 @@ Singleton {
         blockWrites: true
         atomicWrites: false
         watchChanges: false
-        printErrors: true
+        printErrors: false
         onLoaded: {
             parseSessionConfig(sessionConfigFileView.text());
         }
-        onLoadFailed: error => {
-            log.warn("Could not load greeter session config from", root.sessionConfigPath, "error:", error);
-        }
+        onLoadFailed: {}
     }
 }

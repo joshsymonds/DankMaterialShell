@@ -5,24 +5,17 @@ package main
 import (
 	"os"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/clipboard"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/clipboard"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/utils"
 )
 
 var Version = "dev"
 
 func init() {
-	runCmd.Flags().BoolP("daemon", "d", false, "Run in daemon mode")
-	runCmd.Flags().Bool("daemon-child", false, "Internal flag for daemon child process")
-	runCmd.Flags().Bool("session", false, "Session managed (like as a systemd unit)")
-	runCmd.Flags().String("log-level", "", "Log level: debug, info, warn, error, fatal (overrides DMS_LOG_LEVEL)")
-	runCmd.Flags().String("log-file", "", "Append logs to this file in addition to stderr (overrides DMS_LOG_FILE)")
-	runCmd.Flags().MarkHidden("daemon-child")
-
-	greeterCmd.AddCommand(greeterInstallCmd, greeterSyncCmd, greeterEnableCmd, greeterStatusCmd, greeterUninstallCmd)
-	authCmd.AddCommand(authSyncCmd)
-	setupCmd.AddCommand(setupBindsCmd, setupLayoutCmd, setupColorsCmd, setupAlttabCmd, setupOutputsCmd, setupCursorCmd, setupWindowrulesCmd)
-	pluginsCmd.AddCommand(pluginsBrowseCmd, pluginsListCmd, pluginsInstallCmd, pluginsUninstallCmd, pluginsUpdateCmd)
+	authCmd.AddCommand(authSyncCmd, authResolveLockCmd, authListServicesCmd, authValidateCmd)
+	setupCmd.AddCommand(setupHeadlessCmd, setupBindsCmd, setupLayoutCmd, setupColorsCmd, setupAlttabCmd, setupOutputsCmd, setupCursorCmd, setupWindowrulesCmd)
+	pluginsCmd.AddCommand(pluginsBrowseCmd, pluginsListCmd, pluginsInstallCmd, pluginsUninstallCmd, pluginsUpdateCmd, pluginsLockCmd, pluginsRestoreCmd)
 	rootCmd.AddCommand(getCommonCommands()...)
 	rootCmd.AddCommand(authCmd)
 
@@ -30,12 +23,20 @@ func init() {
 }
 
 func main() {
+	disableMemProfilingUnlessRequested()
 	clipboard.MaybeServeAndExit()
 
 	if os.Geteuid() == 0 && !isReadOnlyCommand(os.Args) {
 		log.Fatal("This program should not be run as root. Exiting.")
 	}
 
+	if os.Geteuid() != 0 {
+		for _, err := range utils.MigrateLegacyDirs() {
+			log.Warnf("dms dir migration: %v", err)
+		}
+	}
+
+	os.Args = normalizeDmenuArgv(os.Args)
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal(err)
 	}

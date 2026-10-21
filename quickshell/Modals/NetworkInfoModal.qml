@@ -2,31 +2,36 @@ import QtQuick
 import qs.Common
 import qs.Modals.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
-DankModal {
+DModal {
     id: root
 
-    layerNamespace: "dms:network-info"
+    property bool wired: false
+    property bool networkInfoModalVisible: false
+    property string networkName: ""
+    property var networkData: null
+    readonly property string details: wired ? NetworkService.networkWiredInfoDetails : NetworkService.networkInfoDetails
 
+    layerNamespace: wired ? "dms:network-info-wired" : "dms:network-info"
     keepPopoutsOpen: true
 
-    property bool networkInfoModalVisible: false
-    property string networkSSID: ""
-    property var networkData: null
-
-    function showNetworkInfo(ssid, data) {
-        networkSSID = ssid;
+    function showNetworkInfo(name, data) {
+        networkName = name;
         networkData = data;
         networkInfoModalVisible = true;
         open();
-        NetworkService.fetchNetworkInfo(ssid);
+        if (wired) {
+            NetworkService.fetchWiredNetworkInfo(data.uuid);
+            return;
+        }
+        NetworkService.fetchNetworkInfo(name);
     }
 
     function hideDialog() {
         networkInfoModalVisible = false;
         close();
-        networkSSID = "";
+        networkName = "";
         networkData = null;
     }
 
@@ -37,7 +42,7 @@ DankModal {
     onBackgroundClicked: hideDialog()
     onVisibleChanged: {
         if (!visible) {
-            networkSSID = "";
+            networkName = "";
             networkData = null;
         }
     }
@@ -62,11 +67,11 @@ DankModal {
                             text: I18n.tr("Network Information")
                             font.pixelSize: Theme.fontSizeLarge
                             color: Theme.surfaceText
-                            font.weight: Font.Medium
+                            font.weight: Theme.fontWeightMedium
                         }
 
                         StyledText {
-                            text: I18n.tr("Details for \"%1\"").arg(networkSSID)
+                            text: I18n.tr("Details for \"%1\"", "network info dialog heading, %1 is the network name").arg(root.networkName)
                             font.pixelSize: Theme.fontSizeMedium
                             color: Theme.surfaceTextMedium
                             width: parent.width
@@ -74,8 +79,9 @@ DankModal {
                         }
                     }
 
-                    DankActionButton {
+                    DActionButton {
                         iconName: "close"
+                        Accessible.name: I18n.tr("Close")
                         iconSize: Theme.iconSize - 4
                         iconColor: Theme.surfaceText
                         onClicked: root.hideDialog()
@@ -88,12 +94,12 @@ DankModal {
                     width: parent.width
                     height: parent.height - 140
                     radius: Theme.cornerRadius
-                    color: Theme.surfaceHover
-                    border.color: Theme.outlineStrong
-                    border.width: 1
+                    color: Theme.floatingWindowNestedSurface
+                    border.color: Theme.outlineMedium
+                    border.width: Theme.layerOutlineWidth
                     clip: true
 
-                    DankFlickable {
+                    DFlickable {
                         anchors.fill: parent
                         anchors.margins: Theme.spacingM
                         contentHeight: detailsText.contentHeight
@@ -102,7 +108,7 @@ DankModal {
                             id: detailsText
 
                             width: parent.width
-                            text: NetworkService.networkInfoDetails && NetworkService.networkInfoDetails.replace(/\\n/g, '\n') || I18n.tr("No information available")
+                            text: root.details && root.details.replace(/\\n/g, '\n') || I18n.tr("No information available")
                             font.pixelSize: Theme.fontSizeMedium
                             color: Theme.surfaceText
                             wrapMode: Text.WordWrap
@@ -129,7 +135,7 @@ DankModal {
                             text: I18n.tr("Close")
                             font.pixelSize: Theme.fontSizeMedium
                             color: Theme.background
-                            font.weight: Font.Medium
+                            font.weight: Theme.fontWeightMedium
                         }
 
                         MouseArea {

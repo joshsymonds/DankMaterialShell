@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/tui"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/duxlabs-dev/dux-shell/core/internal/tui"
 )
 
 func printASCII() {
@@ -15,12 +15,12 @@ func getThemedASCII() string {
 	theme := tui.TerminalTheme()
 
 	logo := `
-██████╗  █████╗ ███╗   ██╗██╗  ██╗
-██╔══██╗██╔══██╗████╗  ██║██║ ██╔╝
-██║  ██║███████║██╔██╗ ██║█████╔╝
-██║  ██║██╔══██║██║╚██╗██║██╔═██╗
-██████╔╝██║  ██║██║ ╚████║██║  ██╗
-╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝`
+██████╗ ███╗   ███╗███████╗
+██╔══██╗████╗ ████║██╔════╝
+██║  ██║██╔████╔██║███████╗
+██║  ██║██║╚██╔╝██║╚════██║
+██████╔╝██║ ╚═╝ ██║███████║
+╚═════╝ ╚═╝     ╚═╝╚══════╝`
 
 	style := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(theme.Primary)).

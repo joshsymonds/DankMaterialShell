@@ -3,7 +3,11 @@ package dank16
 import (
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 
+	"github.com/duxlabs-dev/dux-go/material/color"
+	"github.com/duxlabs-dev/dux-go/material/num"
 	"github.com/lucasb-eyer/go-colorful"
 )
 
@@ -11,27 +15,38 @@ type RGB struct {
 	R, G, B float64
 }
 
+type HSL struct {
+	H, S, L float64
+}
+
 type HSV struct {
 	H, S, V float64
 }
 
 type ColorInfo struct {
-	Hex         string `json:"hex"`
-	HexStripped string `json:"hex_stripped"`
-	R           int    `json:"r"`
-	G           int    `json:"g"`
-	B           int    `json:"b"`
-}
-
-type VariantColorValue struct {
-	Hex         string `json:"hex"`
-	HexStripped string `json:"hex_stripped"`
+	Hex              string `json:"hex"`
+	HexStripped      string `json:"hex_stripped"`
+	HexAlpha         string `json:"hex_alpha"`
+	HexAlphaStripped string `json:"hex_alpha_stripped"`
+	AlphaHex         string `json:"alpha_hex"`
+	AlphaHexStripped string `json:"alpha_hex_stripped"`
+	RGB              string `json:"rgb"`
+	RGBA             string `json:"rgba"`
+	HSL              string `json:"hsl"`
+	HSLA             string `json:"hsla"`
+	R                string `json:"red"`
+	G                string `json:"green"`
+	B                string `json:"blue"`
+	A                string `json:"alpha"`
+	H                string `json:"hue"`
+	S                string `json:"saturation"`
+	L                string `json:"lightness"`
 }
 
 type VariantColorInfo struct {
-	Dark    VariantColorValue `json:"dark"`
-	Light   VariantColorValue `json:"light"`
-	Default VariantColorValue `json:"default"`
+	Dark    ColorInfo `json:"dark"`
+	Light   ColorInfo `json:"light"`
+	Default ColorInfo `json:"default"`
 }
 
 type Palette struct {
@@ -74,16 +89,41 @@ type VariantPalette struct {
 
 func NewColorInfo(hex string) ColorInfo {
 	rgb := HexToRGB(hex)
+	hsl := RGBToHSL(rgb)
+
+	var r, g, b, a, h, s, l string
+
+	r = strconv.FormatInt(int64(math.Round(rgb.R*255)), 10)
+	g = strconv.FormatInt(int64(math.Round(rgb.G*255)), 10)
+	b = strconv.FormatInt(int64(math.Round(rgb.B*255)), 10)
+	a = "1.0"
+
+	h = strconv.FormatFloat(math.Round(hsl.H*3600)/10, 'f', 1, 64)
+	s = fmt.Sprintf("%.1f%%", math.Round(hsl.S*1000.0)/10.0)
+	l = fmt.Sprintf("%.1f%%", math.Round(hsl.L*1000.0)/10.0)
+
 	stripped := hex
 	if len(hex) > 0 && hex[0] == '#' {
 		stripped = hex[1:]
 	}
 	return ColorInfo{
-		Hex:         hex,
-		HexStripped: stripped,
-		R:           int(math.Round(rgb.R * 255)),
-		G:           int(math.Round(rgb.G * 255)),
-		B:           int(math.Round(rgb.B * 255)),
+		Hex:              hex,
+		HexStripped:      stripped,
+		HexAlpha:         hex + "ff",
+		HexAlphaStripped: stripped + "ff",
+		AlphaHex:         "#ff" + stripped,
+		AlphaHexStripped: "ff" + stripped,
+		RGB:              fmt.Sprintf("rgb(%s, %s, %s)", r, g, b),
+		RGBA:             fmt.Sprintf("rgba(%s, %s, %s, %s)", r, g, b, a),
+		HSL:              fmt.Sprintf("hsl(%s, %s, %s)", h, s, l),
+		HSLA:             fmt.Sprintf("hsla(%s, %s, %s, %s)", h, s, l, a),
+		R:                r,
+		G:                g,
+		B:                b,
+		A:                a,
+		H:                h,
+		S:                s,
+		L:                l,
 	}
 }
 
@@ -136,6 +176,35 @@ func RGBToHSV(rgb RGB) HSV {
 	}
 
 	return HSV{H: h, S: s, V: max}
+}
+
+func RGBToHSL(rgb RGB) HSL {
+	max := math.Max(math.Max(rgb.R, rgb.G), rgb.B)
+	min := math.Min(math.Min(rgb.R, rgb.G), rgb.B)
+	delta := max - min
+	var h, s, l float64
+
+	l = (max + min) / 2
+	if delta == 0 {
+		return HSL{H: 0, S: 0, L: l}
+	}
+
+	switch max {
+	case rgb.R:
+		h = math.Mod((rgb.G-rgb.B)/delta, 6.0) / 6.0
+	case rgb.G:
+		h = ((rgb.B-rgb.R)/delta + 2.0) / 6.0
+	default:
+		h = ((rgb.R-rgb.G)/delta + 4.0) / 6.0
+	}
+
+	if h < 0 {
+		h += 1.0
+	}
+
+	s = delta / (1 - math.Abs((2*l)-1))
+
+	return HSL{H: h, S: s, L: l}
 }
 
 func HSVToRGB(hsv HSV) RGB {
@@ -313,6 +382,7 @@ func EnsureContrastDPSLstar(hexColor, hexBg string, minLc float64, isLightMode b
 	fg := HexToRGB(hexColor)
 	cf := colorful.Color{R: fg.R, G: fg.G, B: fg.B}
 	Lf, af, bf := cf.Lab()
+	Lf *= 100.0
 
 	dir := 1.0
 	if isLightMode {
@@ -341,6 +411,7 @@ func EnsureContrastDPSBidirectional(hexColor, hexBg string, minLc float64, isLig
 	fg := HexToRGB(hexColor)
 	cf := colorful.Color{R: fg.R, G: fg.G, B: fg.B}
 	origL, af, bf := cf.Lab()
+	origL *= 100.0
 
 	var darkerResult, lighterResult string
 	darkerL, lighterL := origL, origL
@@ -384,10 +455,64 @@ func EnsureContrastDPSBidirectional(hexColor, hexBg string, minLc float64, isLig
 	return hexColor
 }
 
+const (
+	ProfileLow    = "low"
+	ProfileMedium = "medium"
+	ProfileHigh   = "high"
+)
+
+var profileStrength = map[string]float64{ProfileLow: 0.25, ProfileMedium: 0.5, ProfileHigh: 0.85}
+
 type PaletteOptions struct {
 	IsLight    bool
 	Background string
+	Container  string
 	UseDPS     bool
+	Profile    string
+}
+
+func rotateTowardPrimary(hex string, primary color.Hct, strength float64) string {
+	argb, err := color.ARGBFromHex(hex)
+	if err != nil {
+		return hex
+	}
+	c := argb.ToHct()
+	rot := math.Min(num.DifferenceDegrees(c.Hue, primary.Hue)*0.8, 100) * strength
+	hue := num.NormalizeDegree(c.Hue + rot*num.RotationDirection(c.Hue, primary.Hue))
+	return strings.ToLower(color.NewHct(hue, c.Chroma, c.Tone).ToARGB().HexRGB())
+}
+
+func applyProfile(p *Palette, primaryColor, bg string, normalTarget, accentTarget float64, opts PaletteOptions) {
+	strength := profileStrength[opts.Profile]
+	if strength == 0 {
+		return
+	}
+	argb, err := color.ARGBFromHex(primaryColor)
+	if err != nil {
+		return
+	}
+	primary := argb.ToHct()
+	// A near-grey primary has no usable hue to rotate toward.
+	if primary.Chroma < 5 {
+		return
+	}
+	normal := func(h string) string { return ensureContrastAuto(h, bg, normalTarget, opts) }
+	accent := func(h string) string { return ensureContrastBidirectional(h, bg, accentTarget, opts) }
+	none := func(h string) string { return h }
+	// Same per-slot contrast guards GeneratePalette applies.
+	slots := []struct {
+		c     *ColorInfo
+		guard func(string) string
+	}{
+		{&p.Color1, normal}, {&p.Color2, normal}, {&p.Color3, normal}, {&p.Color4, normal},
+		{&p.Color9, accent}, {&p.Color10, accent}, {&p.Color11, accent}, {&p.Color12, accent}, {&p.Color13, none}, {&p.Color14, none},
+	}
+	if opts.IsLight {
+		slots[8].guard = accent
+	}
+	for _, s := range slots {
+		*s.c = NewColorInfo(s.guard(rotateTowardPrimary(s.c.Hex, primary, strength)))
+	}
 }
 
 func ensureContrastAuto(hexColor, hexBg string, target float64, opts PaletteOptions) string {
@@ -420,6 +545,24 @@ func blendHue(base, target, factor float64) float64 {
 	return result
 }
 
+// color8 sits a fixed L* offset from the background so it keeps its dim role
+// regardless of primary brightness (conventional palettes put ANSI bright
+// black ~2-2.5:1 from the background, e.g. catppuccin-mocha #585b70 on #1e1e2e)
+func DeriveDim(bgHex string, hue, sat float64, isLight bool) string {
+	offset := 22.0
+	if isLight {
+		offset = -offset
+	}
+
+	bgL := getLstar(bgHex)
+	targetL := math.Max(0, math.Min(100, bgL+offset))
+
+	tint := HSVToRGB(HSV{H: hue, S: sat, V: 0.5})
+	c := colorful.Color{R: tint.R, G: tint.G, B: tint.B}
+	_, af, bf := c.Lab()
+	return labToHex(targetL, af, bf)
+}
+
 func DeriveContainer(primary string, isLight bool) string {
 	rgb := HexToRGB(primary)
 	hsv := RGBToHSV(rgb)
@@ -434,8 +577,18 @@ func DeriveContainer(primary string, isLight bool) string {
 	return RGBToHex(HSVToRGB(HSV{H: hsv.H, S: containerS, V: containerV}))
 }
 
+// DeriveContainer only approximates the Material tone pairing, so a caller that
+// has the real primary_container should pass it: color5 and color6 are the
+// primary/container pair and their contrast with each other is the invariant.
+func resolveContainer(primaryColor string, opts PaletteOptions) string {
+	if opts.Container != "" {
+		return opts.Container
+	}
+	return DeriveContainer(primaryColor, opts.IsLight)
+}
+
 func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
-	baseColor := DeriveContainer(primaryColor, opts.IsLight)
+	baseColor := resolveContainer(primaryColor, opts)
 
 	rgb := HexToRGB(baseColor)
 	hsv := RGBToHSV(rgb)
@@ -445,13 +598,20 @@ func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
 
 	var palette Palette
 
-	var normalTextTarget, secondaryTarget float64
-	if opts.UseDPS {
+	// Delta Phi Star is not symmetric across polarity: on a light background the
+	// same Lc buys far less real contrast, so the light targets are the numbers
+	// that land on the same measured WCAG ratios the dark ones already deliver.
+	var normalTextTarget, accentTarget float64
+	switch {
+	case opts.UseDPS && opts.IsLight:
+		normalTextTarget = 70.0
+		accentTarget = 58.0
+	case opts.UseDPS:
 		normalTextTarget = 40.0
-		secondaryTarget = 35.0
-	} else {
+		accentTarget = 24.5
+	default:
 		normalTextTarget = 4.5
-		secondaryTarget = 3.0
+		accentTarget = 2.1
 	}
 
 	var bgColor string
@@ -471,8 +631,6 @@ func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
 	greenH := blendHue(0.33, ph.H, 0.10)
 	yellowH := blendHue(0.14, ph.H, 0.04)
 
-	accentTarget := secondaryTarget * 0.7
-
 	if opts.IsLight {
 		redS := math.Min(baseSat*1.2, 1.0)
 		redV := baseVal * 0.95
@@ -484,15 +642,13 @@ func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
 
 		yellowS := math.Min(baseSat*1.5, 1.0)
 		yellowV := math.Min(baseVal*1.2, 1.0)
-		palette.Color3 = NewColorInfo(ensureContrastBidirectional(RGBToHex(HSVToRGB(HSV{H: yellowH, S: yellowS, V: yellowV})), bgColor, accentTarget, opts))
+		palette.Color3 = NewColorInfo(ensureContrastAuto(RGBToHex(HSVToRGB(HSV{H: yellowH, S: yellowS, V: yellowV})), bgColor, normalTextTarget, opts))
 
 		blueS := math.Min(ph.S*1.05, 1.0)
 		blueV := math.Min(ph.V*1.05, 1.0)
 		palette.Color4 = NewColorInfo(ensureContrastAuto(RGBToHex(HSVToRGB(HSV{H: ph.H, S: blueS, V: blueV})), bgColor, normalTextTarget, opts))
 
-		// Color5 matches primary_container exactly (light container in light mode)
-		container5 := DeriveContainer(primaryColor, true)
-		palette.Color5 = NewColorInfo(container5)
+		palette.Color5 = NewColorInfo(baseColor)
 
 		palette.Color6 = NewColorInfo(primaryColor)
 
@@ -500,10 +656,7 @@ func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
 		gray7V := baseVal * 0.28
 		palette.Color7 = NewColorInfo(ensureContrastAuto(RGBToHex(HSVToRGB(HSV{H: hsv.H, S: gray7S, V: gray7V})), bgColor, normalTextTarget, opts))
 
-		gray8S := baseSat * 0.05
-		gray8V := baseVal * 0.85
-		dimTarget := secondaryTarget * 0.5
-		palette.Color8 = NewColorInfo(ensureContrastBidirectional(RGBToHex(HSVToRGB(HSV{H: hsv.H, S: gray8S, V: gray8V})), bgColor, dimTarget, opts))
+		palette.Color8 = NewColorInfo(DeriveDim(bgColor, hsv.H, baseSat*0.05, true))
 
 		brightRedS := math.Min(baseSat*1.0, 1.0)
 		brightRedV := math.Min(baseVal*1.2, 1.0)
@@ -521,8 +674,9 @@ func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
 		brightBlueV := math.Min(ph.V*1.15, 1.0)
 		palette.Color12 = NewColorInfo(ensureContrastBidirectional(RGBToHex(HSVToRGB(HSV{H: ph.H, S: brightBlueS, V: brightBlueV})), bgColor, accentTarget, opts))
 
-		lightContainer := DeriveContainer(primaryColor, true)
-		palette.Color13 = NewColorInfo(lightContainer)
+		color13S := ph.S * 0.7
+		color13V := math.Min(ph.V*1.3, 1.0)
+		palette.Color13 = NewColorInfo(ensureContrastBidirectional(RGBToHex(HSVToRGB(HSV{H: ph.H, S: color13S, V: color13V})), bgColor, accentTarget, opts))
 
 		brightCyanS := ph.S * 0.5
 		brightCyanV := math.Min(ph.V*1.3, 1.0)
@@ -549,9 +703,7 @@ func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
 		blueV := ph.V * 0.95
 		palette.Color4 = NewColorInfo(ensureContrastAuto(RGBToHex(HSVToRGB(HSV{H: ph.H, S: blueS, V: blueV})), bgColor, normalTextTarget, opts))
 
-		// Color5 matches primary_container exactly (dark container in dark mode)
-		darkContainer := DeriveContainer(primaryColor, false)
-		palette.Color5 = NewColorInfo(darkContainer)
+		palette.Color5 = NewColorInfo(baseColor)
 
 		palette.Color6 = NewColorInfo(primaryColor)
 
@@ -559,9 +711,7 @@ func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
 		gray7V := math.Min(baseVal*1.05, 1.0)
 		palette.Color7 = NewColorInfo(ensureContrastAuto(RGBToHex(HSVToRGB(HSV{H: hsv.H, S: gray7S, V: gray7V})), bgColor, normalTextTarget, opts))
 
-		gray8S := baseSat * 0.15
-		gray8V := baseVal * 0.65
-		palette.Color8 = NewColorInfo(ensureContrastAuto(RGBToHex(HSVToRGB(HSV{H: hsv.H, S: gray8S, V: gray8V})), bgColor, secondaryTarget, opts))
+		palette.Color8 = NewColorInfo(DeriveDim(bgColor, hsv.H, baseSat*0.15, false))
 
 		brightRedS := math.Min(baseSat*0.75, 1.0)
 		brightRedV := math.Min(baseVal*1.35, 1.0)
@@ -596,36 +746,39 @@ func GeneratePalette(primaryColor string, opts PaletteOptions) Palette {
 		palette.Color15 = NewColorInfo(ensureContrastAuto(RGBToHex(HSVToRGB(HSV{H: hsv.H, S: white15S, V: white15V})), bgColor, normalTextTarget, opts))
 	}
 
+	applyProfile(&palette, primaryColor, bgColor, normalTextTarget, accentTarget, opts)
+
 	return palette
 }
 
 type VariantOptions struct {
-	PrimaryDark  string
-	PrimaryLight string
-	Background   string
-	UseDPS       bool
-	IsLightMode  bool
+	PrimaryDark     string
+	PrimaryLight    string
+	BackgroundDark  string
+	BackgroundLight string
+	ContainerDark   string
+	ContainerLight  string
+	UseDPS          bool
+	IsLightMode     bool
+	Profile         string
 }
 
 func mergeColorInfo(dark, light ColorInfo, isLightMode bool) VariantColorInfo {
-	darkVal := VariantColorValue{Hex: dark.Hex, HexStripped: dark.HexStripped}
-	lightVal := VariantColorValue{Hex: light.Hex, HexStripped: light.HexStripped}
-
-	defaultVal := darkVal
+	defaultVal := dark
 	if isLightMode {
-		defaultVal = lightVal
+		defaultVal = light
 	}
 
 	return VariantColorInfo{
-		Dark:    darkVal,
-		Light:   lightVal,
+		Dark:    dark,
+		Light:   light,
 		Default: defaultVal,
 	}
 }
 
 func GenerateVariantPalette(opts VariantOptions) VariantPalette {
-	darkOpts := PaletteOptions{IsLight: false, Background: opts.Background, UseDPS: opts.UseDPS}
-	lightOpts := PaletteOptions{IsLight: true, Background: opts.Background, UseDPS: opts.UseDPS}
+	darkOpts := PaletteOptions{IsLight: false, Background: opts.BackgroundDark, Container: opts.ContainerDark, UseDPS: opts.UseDPS, Profile: opts.Profile}
+	lightOpts := PaletteOptions{IsLight: true, Background: opts.BackgroundLight, Container: opts.ContainerLight, UseDPS: opts.UseDPS, Profile: opts.Profile}
 
 	dark := GeneratePalette(opts.PrimaryDark, darkOpts)
 	light := GeneratePalette(opts.PrimaryLight, lightOpts)

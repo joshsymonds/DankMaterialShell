@@ -1,10 +1,12 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/errdefs"
+	"github.com/duxlabs-dev/dux-shell/core/internal/errdefs"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -164,22 +166,18 @@ func (b *IWDBackend) updateWiFiNetworks() ([]WiFiNetwork, error) {
 		return nil, fmt.Errorf("failed to get networks: %w", err)
 	}
 
-	knownNetworks, err := b.getKnownNetworks()
+	savedProfiles, err := b.getIWDSavedWiFiProfiles()
 	if err != nil {
-		knownNetworks = make(map[string]bool)
-	}
-
-	autoconnectMap, err := b.getAutoconnectSettings()
-	if err != nil {
-		autoconnectMap = make(map[string]bool)
+		savedProfiles = make(map[string]savedWiFiProfile)
 	}
 
 	b.stateMutex.RLock()
 	currentSSID := b.state.WiFiSSID
 	wifiConnected := b.state.WiFiConnected
+	wifiSignal := b.state.WiFiSignal
 	b.stateMutex.RUnlock()
 
-	networks := make([]WiFiNetwork, 0, len(orderedNetworks))
+	visibleNetworks := make([]WiFiNetwork, 0, len(orderedNetworks))
 	for _, netData := range orderedNetworks {
 		if len(netData) < 2 {
 			continue
@@ -225,23 +223,26 @@ func (b *IWDBackend) updateWiFiNetworks() ([]WiFiNetwork, error) {
 
 		secured := netType != "open"
 
-		network := WiFiNetwork{
-			SSID:        name,
-			Signal:      signal,
-			Secured:     secured,
-			Connected:   wifiConnected && name == currentSSID,
-			Saved:       knownNetworks[name],
-			Autoconnect: autoconnectMap[name],
-			Enterprise:  netType == "8021x",
-		}
-
-		networks = append(networks, network)
+		visibleNetworks = append(visibleNetworks, WiFiNetwork{
+			SSID:       name,
+			Signal:     signal,
+			Secured:    secured,
+			Enterprise: netType == "8021x",
+		})
 	}
+
+	networks := iwdWiFiNetworksFromVisible(visibleNetworks, savedProfiles, currentSSID, wifiConnected, wifiSignal)
+	visibleNetworkMap := make(map[string]WiFiNetwork, len(networks))
+	for _, network := range networks {
+		visibleNetworkMap[network.SSID] = network
+	}
+	savedNetworks := savedWiFiNetworksFromProfiles(savedProfiles, visibleNetworkMap, currentSSID, wifiConnected)
 
 	sortWiFiNetworks(networks)
 
 	b.stateMutex.Lock()
 	b.state.WiFiNetworks = networks
+	b.state.SavedWiFiNetworks = savedNetworks
 	b.stateMutex.Unlock()
 
 	now := time.Now()
@@ -254,30 +255,129 @@ func (b *IWDBackend) updateWiFiNetworks() ([]WiFiNetwork, error) {
 	return networks, nil
 }
 
-func (b *IWDBackend) getKnownNetworks() (map[string]bool, error) {
-	obj := b.conn.Object(iwdBusName, iwdObjectPath)
-
-	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
-	err := obj.Call(dbusObjectManager+".GetManagedObjects", 0).Store(&objects)
+func (b *IWDBackend) updateSavedWiFiNetworks() error {
+	savedProfiles, err := b.getIWDSavedWiFiProfiles()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	known := make(map[string]bool)
-	for _, interfaces := range objects {
-		if knownProps, ok := interfaces[iwdKnownNetworkInterface]; ok {
-			if nameVar, ok := knownProps["Name"]; ok {
-				if name, ok := nameVar.Value().(string); ok {
-					known[name] = true
-				}
-			}
-		}
-	}
+	b.stateMutex.RLock()
+	currentSSID := b.state.WiFiSSID
+	wifiConnected := b.state.WiFiConnected
+	wifiNetworks := append([]WiFiNetwork(nil), b.state.WiFiNetworks...)
+	b.stateMutex.RUnlock()
 
-	return known, nil
+	wifiNetworks, savedNetworks := refreshSavedWiFiState(wifiNetworks, savedProfiles, currentSSID, wifiConnected)
+
+	b.stateMutex.Lock()
+	b.state.WiFiNetworks = wifiNetworks
+	b.state.SavedWiFiNetworks = savedNetworks
+	b.stateMutex.Unlock()
+
+	return nil
 }
 
-func (b *IWDBackend) getAutoconnectSettings() (map[string]bool, error) {
+func iwdWiFiNetworksFromVisible(visibleNetworks []WiFiNetwork, savedProfiles map[string]savedWiFiProfile, currentSSID string, wifiConnected bool, wifiSignal uint8) []WiFiNetwork {
+	networks := make([]WiFiNetwork, 0, len(visibleNetworks)+1)
+	seenSSIDs := make(map[string]struct{}, len(visibleNetworks)+1)
+
+	for _, network := range visibleNetworks {
+		profile, saved := savedProfiles[network.SSID]
+		network.Connected = wifiConnected && network.SSID == currentSSID
+		network.Saved = saved
+		network.Autoconnect = profile.Autoconnect
+		network.Hidden = network.Hidden || profile.Hidden
+		network.Secured = network.Secured || profile.Secured
+		network.Enterprise = network.Enterprise || profile.Enterprise
+		if network.Mode == "" {
+			network.Mode = profile.Mode
+		}
+		networks = append(networks, network)
+		seenSSIDs[network.SSID] = struct{}{}
+	}
+
+	if wifiConnected && currentSSID != "" {
+		if _, exists := seenSSIDs[currentSSID]; !exists {
+			profile, saved := savedProfiles[currentSSID]
+			secured := profile.Secured
+			if !saved {
+				secured = true
+			}
+			mode := profile.Mode
+			if mode == "" {
+				mode = "infrastructure"
+			}
+
+			networks = append(networks, WiFiNetwork{
+				SSID:        currentSSID,
+				Signal:      wifiSignal,
+				Secured:     secured,
+				Enterprise:  profile.Enterprise,
+				Connected:   true,
+				Saved:       saved,
+				Autoconnect: profile.Autoconnect,
+				Hidden:      true,
+				Mode:        mode,
+			})
+		}
+	}
+
+	return networks
+}
+
+func iwdSavedWiFiProfilesFromManagedObjects(objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant) map[string]savedWiFiProfile {
+	profiles := make(map[string]savedWiFiProfile)
+
+	for _, interfaces := range objects {
+		knownProps, ok := interfaces[iwdKnownNetworkInterface]
+		if !ok {
+			continue
+		}
+
+		nameVar, ok := knownProps["Name"]
+		if !ok {
+			continue
+		}
+		name, ok := nameVar.Value().(string)
+		if !ok || name == "" {
+			continue
+		}
+
+		profile := savedWiFiProfile{
+			Autoconnect: true,
+			Mode:        "infrastructure",
+		}
+		if acVar, ok := knownProps["AutoConnect"]; ok {
+			if autoconnect, ok := acVar.Value().(bool); ok {
+				profile.Autoconnect = autoconnect
+			}
+		}
+		if hiddenVar, ok := knownProps["Hidden"]; ok {
+			if hidden, ok := hiddenVar.Value().(bool); ok {
+				profile.Hidden = hidden
+			}
+		}
+		if typeVar, ok := knownProps["Type"]; ok {
+			if networkType, ok := typeVar.Value().(string); ok {
+				profile.Secured = networkType != "" && networkType != "open"
+				profile.Enterprise = networkType == "8021x"
+			}
+		}
+
+		if existing, ok := profiles[name]; ok {
+			profile.Autoconnect = profile.Autoconnect || existing.Autoconnect
+			profile.Hidden = profile.Hidden || existing.Hidden
+			profile.Secured = profile.Secured || existing.Secured
+			profile.Enterprise = profile.Enterprise || existing.Enterprise
+		}
+
+		profiles[name] = profile
+	}
+
+	return profiles
+}
+
+func (b *IWDBackend) getIWDSavedWiFiProfiles() (map[string]savedWiFiProfile, error) {
 	obj := b.conn.Object(iwdBusName, iwdObjectPath)
 
 	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
@@ -286,24 +386,7 @@ func (b *IWDBackend) getAutoconnectSettings() (map[string]bool, error) {
 		return nil, err
 	}
 
-	autoconnectMap := make(map[string]bool)
-	for _, interfaces := range objects {
-		if knownProps, ok := interfaces[iwdKnownNetworkInterface]; ok {
-			if nameVar, ok := knownProps["Name"]; ok {
-				if name, ok := nameVar.Value().(string); ok {
-					autoconnect := true
-					if acVar, ok := knownProps["AutoConnect"]; ok {
-						if ac, ok := acVar.Value().(bool); ok {
-							autoconnect = ac
-						}
-					}
-					autoconnectMap[name] = autoconnect
-				}
-			}
-		}
-	}
-
-	return autoconnectMap, nil
+	return iwdSavedWiFiProfilesFromManagedObjects(objects), nil
 }
 
 func (b *IWDBackend) GetWiFiNetworkDetails(ssid string) (*NetworkInfoResponse, error) {
@@ -395,12 +478,75 @@ func (b *IWDBackend) finalizeAttempt(att *connectAttempt, code string) {
 	if b.onStateChange != nil {
 		b.onStateChange()
 	}
+
+	if code == errdefs.ErrBadCredentials {
+		b.maybeReplaceSavedPSK(att)
+	}
+}
+
+func (b *IWDBackend) maybeReplaceSavedPSK(att *connectAttempt) {
+	if b.promptBroker == nil || !att.saved {
+		return
+	}
+
+	att.mu.Lock()
+	prompted := att.sawPromptRetry
+	att.mu.Unlock()
+	if prompted {
+		return
+	}
+
+	b.sigWG.Go(func() {
+		b.requestReplacementPSK(att.ssid)
+	})
+}
+
+func (b *IWDBackend) requestReplacementPSK(ssid string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	go func() {
+		select {
+		case <-b.stopChan:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	token, err := b.promptBroker.Ask(ctx, PromptRequest{
+		SSID:        ssid,
+		SettingName: "802-11-wireless-security",
+		Fields:      []string{"psk"},
+		Reason:      "wrong-password",
+	})
+	if err != nil {
+		log.Warnf("failed to request replacement credentials for %s: %v", ssid, err)
+		return
+	}
+
+	reply, err := b.promptBroker.Wait(ctx, token)
+	if err != nil || reply.Cancel {
+		return
+	}
+
+	psk, ok := reply.Secrets["psk"]
+	if !ok || psk == "" {
+		return
+	}
+
+	if err := b.ForgetWiFiNetwork(ssid); err != nil {
+		log.Warnf("failed to forget %s before credential replacement: %v", ssid, err)
+	}
+
+	b.storePendingPSK(ssid, psk)
+
+	if err := b.ConnectWiFi(ConnectionRequest{SSID: ssid}); err != nil {
+		log.Warnf("failed to reconnect %s with replacement credentials: %v", ssid, err)
+	}
 }
 
 func (b *IWDBackend) startAttemptWatchdog(att *connectAttempt) {
-	b.sigWG.Add(1)
-	go func() {
-		defer b.sigWG.Done()
+	b.sigWG.Go(func() {
 
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
@@ -448,7 +594,7 @@ func (b *IWDBackend) startAttemptWatchdog(att *connectAttempt) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 func (b *IWDBackend) mapIwdDBusError(name string) string {
@@ -479,7 +625,7 @@ func (b *IWDBackend) ConnectWiFi(req ConnectionRequest) error {
 		return fmt.Errorf("no WiFi device available")
 	}
 
-	networkPath, err := b.findNetworkPath(req.SSID)
+	networkPath, saved, err := b.findNetworkPath(req.SSID)
 	if err != nil {
 		b.setConnectError(errdefs.ErrNoSuchSSID)
 		if b.onStateChange != nil {
@@ -488,9 +634,14 @@ func (b *IWDBackend) ConnectWiFi(req ConnectionRequest) error {
 		return fmt.Errorf("network not found: %w", err)
 	}
 
+	if req.Password != "" {
+		b.storePendingPSK(req.SSID, req.Password)
+	}
+
 	att := &connectAttempt{
 		ssid:     req.SSID,
 		netPath:  networkPath,
+		saved:    saved,
 		start:    time.Now(),
 		deadline: time.Now().Add(15 * time.Second),
 	}
@@ -538,26 +689,39 @@ func (b *IWDBackend) ConnectWiFi(req ConnectionRequest) error {
 	return nil
 }
 
-func (b *IWDBackend) findNetworkPath(ssid string) (dbus.ObjectPath, error) {
+func (b *IWDBackend) findNetworkPath(ssid string) (dbus.ObjectPath, bool, error) {
 	obj := b.conn.Object(iwdBusName, iwdObjectPath)
 
 	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 	err := obj.Call(dbusObjectManager+".GetManagedObjects", 0).Store(&objects)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
+	var netPath dbus.ObjectPath
+	saved := false
 	for path, interfaces := range objects {
 		if netProps, ok := interfaces[iwdNetworkInterface]; ok {
 			if nameVar, ok := netProps["Name"]; ok {
 				if name, ok := nameVar.Value().(string); ok && name == ssid {
-					return path, nil
+					netPath = path
+				}
+			}
+		}
+		if knownProps, ok := interfaces[iwdKnownNetworkInterface]; ok {
+			if nameVar, ok := knownProps["Name"]; ok {
+				if name, ok := nameVar.Value().(string); ok && name == ssid {
+					saved = true
 				}
 			}
 		}
 	}
 
-	return "", fmt.Errorf("network not found")
+	if netPath == "" {
+		return "", false, fmt.Errorf("network not found")
+	}
+
+	return netPath, saved, nil
 }
 
 func (b *IWDBackend) DisconnectWiFi() error {
@@ -578,6 +742,32 @@ func (b *IWDBackend) DisconnectWiFi() error {
 	}
 
 	return nil
+}
+
+func (b *IWDBackend) abortInFlightConnection(ssid string) {
+	b.stateMutex.Lock()
+	if !b.state.IsConnecting || b.state.ConnectingSSID != ssid {
+		b.stateMutex.Unlock()
+		return
+	}
+	b.state.IsConnecting = false
+	b.state.ConnectingSSID = ""
+	b.state.LastError = ""
+	b.stateMutex.Unlock()
+
+	b.attemptMutex.RLock()
+	att := b.curAttempt
+	b.attemptMutex.RUnlock()
+
+	if att != nil && att.ssid == ssid {
+		att.mu.Lock()
+		att.finalized = true
+		att.mu.Unlock()
+	}
+
+	if err := b.DisconnectWiFi(); err != nil {
+		log.Warnf("[abortInFlightConnection] failed to abort connection to %s: %v", ssid, err)
+	}
 }
 
 func (b *IWDBackend) ForgetWiFiNetwork(ssid string) error {
@@ -614,6 +804,8 @@ func (b *IWDBackend) ForgetWiFiNetwork(ssid string) error {
 						b.stateMutex.Unlock()
 					}
 
+					_, _ = b.updateWiFiNetworks()
+
 					if b.onStateChange != nil {
 						b.onStateChange()
 					}
@@ -644,6 +836,10 @@ func (b *IWDBackend) SetWiFiAutoconnect(ssid string, autoconnect bool) error {
 					call := knownObj.Call(dbusPropertiesInterface+".Set", 0, iwdKnownNetworkInterface, "AutoConnect", dbus.MakeVariant(autoconnect))
 					if call.Err != nil {
 						return fmt.Errorf("failed to set autoconnect: %w", call.Err)
+					}
+
+					if !autoconnect {
+						b.abortInFlightConnection(ssid)
 					}
 
 					b.updateState()

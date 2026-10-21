@@ -1,18 +1,17 @@
 package wayland
 
 import (
-	"encoding/json"
 	"fmt"
-	"net"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/params"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-go/ipc/params"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/models"
 )
 
-func HandleRequest(conn net.Conn, req models.Request, manager *Manager) {
+func HandleRequest(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	if manager == nil {
-		models.RespondError(conn, req.ID, "wayland manager not initialized")
+		conn.RespondError(req.ID, "wayland manager not initialized")
 		return
 	}
 
@@ -33,30 +32,42 @@ func HandleRequest(conn net.Conn, req models.Request, manager *Manager) {
 		handleSetEnabled(conn, req, manager)
 	case "wayland.gamma.subscribe":
 		handleSubscribe(conn, req, manager)
+	case "wayland.icc.getStatus":
+		handleICCGetStatus(conn, req, manager)
+	case "wayland.icc.apply":
+		handleICCApply(conn, req, manager)
+	case "wayland.icc.remove":
+		handleICCRemove(conn, req, manager)
+	case "wayland.icc.listOutputs":
+		handleICCListOutputs(conn, req, manager)
+	case "wayland.icc.setTemp":
+		handleICCSetTemp(conn, req, manager)
+	case "wayland.icc.getTemps":
+		handleICCGetTemps(conn, req, manager)
 	default:
-		models.RespondError(conn, req.ID, fmt.Sprintf("unknown method: %s", req.Method))
+		conn.RespondError(req.ID, fmt.Sprintf("unknown method: %s", req.Method))
 	}
 }
 
-func handleGetState(conn net.Conn, req models.Request, manager *Manager) {
-	models.Respond(conn, req.ID, manager.GetState())
+func handleGetState(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	conn.Respond(req.ID, manager.GetState())
 }
 
-func handleSetTemperature(conn net.Conn, req models.Request, manager *Manager) {
+func handleSetTemperature(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	var lowTemp, highTemp int
 
-	if temp, ok := models.Get[float64](req, "temp"); ok {
+	if temp, ok := req.Get[float64]("temp"); ok {
 		lowTemp = int(temp)
 		highTemp = int(temp)
 	} else {
 		low, err := params.Float(req.Params, "low")
 		if err != nil {
-			models.RespondError(conn, req.ID, "missing temperature parameters (provide 'temp' or both 'low' and 'high')")
+			conn.RespondError(req.ID, "missing temperature parameters (provide 'temp' or both 'low' and 'high')")
 			return
 		}
 		high, err := params.Float(req.Params, "high")
 		if err != nil {
-			models.RespondError(conn, req.ID, "missing temperature parameters (provide 'temp' or both 'low' and 'high')")
+			conn.RespondError(req.ID, "missing temperature parameters (provide 'temp' or both 'low' and 'high')")
 			return
 		}
 		lowTemp = int(low)
@@ -64,108 +75,119 @@ func handleSetTemperature(conn net.Conn, req models.Request, manager *Manager) {
 	}
 
 	if err := manager.SetTemperature(lowTemp, highTemp); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "temperature set"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "temperature set"})
 }
 
-func handleSetLocation(conn net.Conn, req models.Request, manager *Manager) {
+func handleSetLocation(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	lat, err := params.Float(req.Params, "latitude")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	lon, err := params.Float(req.Params, "longitude")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	if err := manager.SetLocation(lat, lon); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "location set"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "location set"})
 }
 
-func handleSetManualTimes(conn net.Conn, req models.Request, manager *Manager) {
-	sunriseStr, sunriseOK := models.Get[string](req, "sunrise")
-	sunsetStr, sunsetOK := models.Get[string](req, "sunset")
+func handleSetManualTimes(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	sunriseStr, sunriseOK := req.Get[string]("sunrise")
+	sunsetStr, sunsetOK := req.Get[string]("sunset")
 
 	if !sunriseOK || !sunsetOK || sunriseStr == "" || sunsetStr == "" {
 		manager.ClearManualTimes()
-		models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "manual times cleared"})
+		conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "manual times cleared"})
 		return
 	}
 
 	sunrise, err := time.Parse("15:04", sunriseStr)
 	if err != nil {
-		models.RespondError(conn, req.ID, "invalid sunrise format (use HH:MM)")
+		conn.RespondError(req.ID, "invalid sunrise format (use HH:MM)")
 		return
 	}
 
 	sunset, err := time.Parse("15:04", sunsetStr)
 	if err != nil {
-		models.RespondError(conn, req.ID, "invalid sunset format (use HH:MM)")
+		conn.RespondError(req.ID, "invalid sunset format (use HH:MM)")
 		return
 	}
 
-	if err := manager.SetManualTimes(sunrise, sunset); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+	var duration *time.Duration
+	if minutes, ok := req.Get[float64]("durationMinutes"); ok {
+		d := time.Duration(minutes) * time.Minute
+		duration = &d
+	}
+
+	if err := manager.SetManualTimes(sunrise, sunset, duration); err != nil {
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "manual times set"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "manual times set"})
 }
 
-func handleSetUseIPLocation(conn net.Conn, req models.Request, manager *Manager) {
+func handleSetUseIPLocation(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	use, err := params.Bool(req.Params, "use")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	manager.SetUseIPLocation(use)
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "IP location preference set"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "IP location preference set"})
 }
 
-func handleSetGamma(conn net.Conn, req models.Request, manager *Manager) {
+func handleSetGamma(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	gamma, err := params.Float(req.Params, "gamma")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	if err := manager.SetGamma(gamma); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+	_, contrast := manager.Adjustments()
+	if v, ok := req.Get[float64]("contrast"); ok {
+		contrast = v
+	}
+
+	if err := manager.SetAdjustments(gamma, contrast); err != nil {
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "gamma set"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "gamma set"})
 }
 
-func handleSetEnabled(conn net.Conn, req models.Request, manager *Manager) {
+func handleSetEnabled(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	enabled, err := params.Bool(req.Params, "enabled")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	manager.SetEnabled(enabled)
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "enabled state set"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "enabled state set"})
 }
 
-func handleSubscribe(conn net.Conn, req models.Request, manager *Manager) {
+func handleSubscribe(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	clientID := fmt.Sprintf("client-%p", conn)
 	stateChan := manager.Subscribe(clientID)
 	defer manager.Unsubscribe(clientID)
 
 	initialState := manager.GetState()
-	if err := json.NewEncoder(conn).Encode(models.Response[State]{
+	if err := conn.WriteResponse(ipc.Response[State]{
 		ID:     req.ID,
 		Result: &initialState,
 	}); err != nil {
@@ -173,10 +195,87 @@ func handleSubscribe(conn net.Conn, req models.Request, manager *Manager) {
 	}
 
 	for state := range stateChan {
-		if err := json.NewEncoder(conn).Encode(models.Response[State]{
+		if err := conn.WriteResponse(ipc.Response[State]{
 			Result: &state,
 		}); err != nil {
 			return
 		}
 	}
+}
+
+func handleICCGetStatus(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	status := manager.GetICCStatus()
+	outputs := manager.ListOutputs()
+	result := map[string]any{
+		"outputs":  outputs,
+		"profiles": status,
+	}
+	conn.Respond(req.ID, result)
+}
+
+func handleICCApply(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	output, err := params.String(req.Params, "output")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	path, err := params.String(req.Params, "path")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	if err := manager.ApplyICC(output, path); err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "ICC profile applied"})
+}
+
+func handleICCRemove(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	output, err := params.String(req.Params, "output")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	if err := manager.RemoveICC(output); err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "ICC profile removed"})
+}
+
+func handleICCListOutputs(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	outputs := manager.ListOutputs()
+	conn.Respond(req.ID, outputs)
+}
+
+func handleICCSetTemp(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	output, err := params.String(req.Params, "output")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	temp, err := params.Int(req.Params, "temp")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	if err := manager.SetOutputTemp(output, temp); err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "Output temperature set"})
+}
+
+func handleICCGetTemps(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	temps := manager.GetOutputTemps()
+	conn.Respond(req.ID, temps)
 }

@@ -35,8 +35,9 @@ if [[ -z "${INSIDE_PREVIEW_NIX_SHELL:-}" ]]; then
     exec nix-shell -p qt6.qtshadertools inotify-tools --run "$0 $*"
 fi
 
-readonly FRAG_DIR="$(dirname "$FRAG")"
-readonly FRAG_NAME="$(basename "$FRAG")"
+FRAG_DIR="$(dirname "$FRAG")"
+FRAG_NAME="$(basename "$FRAG")"
+readonly FRAG_DIR FRAG_NAME
 
 compile() {
     if qsb --qt6 -o "$QSB" "$FRAG" 2>&1; then

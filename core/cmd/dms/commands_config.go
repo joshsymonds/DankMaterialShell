@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/utils"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/luaconfig"
+	"github.com/duxlabs-dev/dux-shell/core/internal/mangoconf"
+	"github.com/duxlabs-dev/dux-shell/core/internal/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -27,20 +29,65 @@ var resolveIncludeCmd = &cobra.Command{
 		case 0:
 			return []string{"hyprland", "niri", "mangowc"}, cobra.ShellCompDirectiveNoFileComp
 		case 1:
-			return []string{"cursor.kdl", "cursor.conf", "outputs.kdl", "outputs.conf", "binds.kdl", "binds.conf"}, cobra.ShellCompDirectiveNoFileComp
+			return []string{
+				"binds.lua",
+				"binds-user.lua",
+				"colors.lua",
+				"layout.lua",
+				"outputs.lua",
+				"cursor.lua",
+				"input.lua",
+				"windowrules.lua",
+				"cursor.kdl",
+				"layout.kdl",
+				"outputs.kdl",
+				"binds.kdl",
+				"input.kdl",
+				"cursor.conf",
+				"input.conf",
+				"layout.conf",
+				"outputs.conf",
+				"binds.conf",
+			}, cobra.ShellCompDirectiveNoFileComp
 		}
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	},
 	Run: runResolveInclude,
 }
 
+var mangoMigrateMain bool
+
+var mangoMigrateCmd = &cobra.Command{
+	Use:   "mango-migrate",
+	Short: "Respell Mango config keys for the installed Mango",
+	Long:  "Detects whether the installed Mango uses legacy or snake_case config keys, rewrites the DMS fragments in mango/dms to match, and prints the dialect on the last line. --main also rewrites config.conf after a backup.",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		dialect := mangoconf.Detect()
+		changed, err := dialect.Migrate(mangoconf.Dir(), mangoMigrateMain)
+		for _, path := range changed {
+			fmt.Fprintf(os.Stderr, "migrated %s\n", path)
+		}
+		// Printed before any error: the shell needs the dialect even when a fragment failed.
+		fmt.Println(dialect)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	configCmd.AddCommand(resolveIncludeCmd)
+	mangoMigrateCmd.Flags().BoolVar(&mangoMigrateMain, "main", false, "also rewrite config.conf (a backup is kept)")
+	configCmd.AddCommand(mangoMigrateCmd)
 }
 
 type IncludeResult struct {
-	Exists   bool `json:"exists"`
-	Included bool `json:"included"`
+	Exists       bool   `json:"exists"`
+	Included     bool   `json:"included"`
+	ConfigFormat string `json:"configFormat,omitempty"`
+	ReadOnly     bool   `json:"readOnly,omitempty"`
 }
 
 func runResolveInclude(cmd *cobra.Command, args []string) {
@@ -55,7 +102,7 @@ func runResolveInclude(cmd *cobra.Command, args []string) {
 		result, err = checkHyprlandInclude(filename)
 	case "niri":
 		result, err = checkNiriInclude(filename)
-	case "mangowc", "dwl", "mango":
+	case "mangowc", "mango":
 		result, err = checkMangoWCInclude(filename)
 	default:
 		log.Fatalf("Unknown compositor: %s", compositor)
@@ -70,10 +117,7 @@ func runResolveInclude(cmd *cobra.Command, args []string) {
 }
 
 func checkHyprlandInclude(filename string) (IncludeResult, error) {
-	configDir, err := utils.ExpandPath("$HOME/.config/hypr")
-	if err != nil {
-		return IncludeResult{}, err
-	}
+	configDir := filepath.Join(utils.XDGConfigHome(), "hypr")
 
 	targetPath := filepath.Join(configDir, "dms", filename)
 	result := IncludeResult{}
@@ -82,17 +126,30 @@ func checkHyprlandInclude(filename string) (IncludeResult, error) {
 		result.Exists = true
 	}
 
-	mainConfig := filepath.Join(configDir, "hyprland.conf")
-	if _, err := os.Stat(mainConfig); os.IsNotExist(err) {
+	targetAbs, err := filepath.Abs(targetPath)
+	if err != nil {
+		return result, err
+	}
+
+	mainLua := filepath.Join(configDir, "hyprland.lua")
+	if _, err := os.Stat(mainLua); err == nil {
+		result.ConfigFormat = "lua"
+		result.Included = luaconfig.RequiresTarget(mainLua, targetAbs, make(map[string]bool))
 		return result, nil
 	}
 
-	processed := make(map[string]bool)
-	result.Included = hyprlandFindInclude(mainConfig, "dms/"+filename, processed)
+	// 0.55/0.56 installs still on hyprland.conf: read-only until migrated.
+	mainConf := filepath.Join(configDir, "hyprland.conf")
+	if _, err := os.Stat(mainConf); err != nil {
+		return result, nil
+	}
+	result.ConfigFormat = "hyprlang"
+	result.ReadOnly = true
+	result.Included = hyprlandFindIncludeHyprlang(mainConf, targetAbs, make(map[string]bool))
 	return result, nil
 }
 
-func hyprlandFindInclude(filePath, target string, processed map[string]bool) bool {
+func hyprlandFindIncludeHyprlang(filePath, target string, processed map[string]bool) bool {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return false
@@ -109,14 +166,8 @@ func hyprlandFindInclude(filePath, target string, processed map[string]bool) boo
 	}
 
 	baseDir := filepath.Dir(absPath)
-	lines := strings.Split(string(data), "\n")
-
-	for _, line := range lines {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
-			continue
-		}
-
 		if !strings.HasPrefix(trimmed, "source") {
 			continue
 		}
@@ -126,22 +177,12 @@ func hyprlandFindInclude(filePath, target string, processed map[string]bool) boo
 			continue
 		}
 
-		sourcePath := strings.TrimSpace(parts[1])
-		if matchesTarget(sourcePath, target) {
-			return true
-		}
-
-		fullPath := sourcePath
-		if !filepath.IsAbs(sourcePath) {
-			fullPath = filepath.Join(baseDir, sourcePath)
-		}
-
-		expanded, err := utils.ExpandPath(fullPath)
+		fullPath, err := resolveSourcePath(baseDir, strings.TrimSpace(parts[1]))
 		if err != nil {
 			continue
 		}
 
-		if hyprlandFindInclude(expanded, target, processed) {
+		if fullPath == target || hyprlandFindIncludeHyprlang(fullPath, target, processed) {
 			return true
 		}
 	}
@@ -150,10 +191,7 @@ func hyprlandFindInclude(filePath, target string, processed map[string]bool) boo
 }
 
 func checkNiriInclude(filename string) (IncludeResult, error) {
-	configDir, err := utils.ExpandPath("$HOME/.config/niri")
-	if err != nil {
-		return IncludeResult{}, err
-	}
+	configDir := filepath.Join(utils.XDGConfigHome(), "niri")
 
 	targetPath := filepath.Join(configDir, "dms", filename)
 	result := IncludeResult{}
@@ -167,8 +205,13 @@ func checkNiriInclude(filename string) (IncludeResult, error) {
 		return result, nil
 	}
 
+	targetAbs, err := filepath.Abs(targetPath)
+	if err != nil {
+		return result, err
+	}
+
 	processed := make(map[string]bool)
-	result.Included = niriFindInclude(mainConfig, "dms/"+filename, processed)
+	result.Included = niriFindInclude(mainConfig, targetAbs, processed)
 	return result, nil
 }
 
@@ -191,7 +234,7 @@ func niriFindInclude(filePath, target string, processed map[string]bool) bool {
 	baseDir := filepath.Dir(absPath)
 	content := string(data)
 
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "//") || trimmed == "" {
 			continue
@@ -210,17 +253,12 @@ func niriFindInclude(filePath, target string, processed map[string]bool) bool {
 			continue
 		}
 
-		includePath := trimmed[startQuote+1 : endQuote]
-		if matchesTarget(includePath, target) {
-			return true
+		fullPath, err := resolveSourcePath(baseDir, trimmed[startQuote+1:endQuote])
+		if err != nil {
+			continue
 		}
 
-		fullPath := includePath
-		if !filepath.IsAbs(includePath) {
-			fullPath = filepath.Join(baseDir, includePath)
-		}
-
-		if niriFindInclude(fullPath, target, processed) {
+		if fullPath == target || niriFindInclude(fullPath, target, processed) {
 			return true
 		}
 	}
@@ -229,10 +267,7 @@ func niriFindInclude(filePath, target string, processed map[string]bool) bool {
 }
 
 func checkMangoWCInclude(filename string) (IncludeResult, error) {
-	configDir, err := utils.ExpandPath("$HOME/.config/mango")
-	if err != nil {
-		return IncludeResult{}, err
-	}
+	configDir := mangoconf.Dir()
 
 	targetPath := filepath.Join(configDir, "dms", filename)
 	result := IncludeResult{}
@@ -249,8 +284,13 @@ func checkMangoWCInclude(filename string) (IncludeResult, error) {
 		return result, nil
 	}
 
+	targetAbs, err := filepath.Abs(targetPath)
+	if err != nil {
+		return result, err
+	}
+
 	processed := make(map[string]bool)
-	result.Included = mangowcFindInclude(mainConfig, "dms/"+filename, processed)
+	result.Included = mangowcFindInclude(mainConfig, targetAbs, processed)
 	return result, nil
 }
 
@@ -271,9 +311,9 @@ func mangowcFindInclude(filePath, target string, processed map[string]bool) bool
 	}
 
 	baseDir := filepath.Dir(absPath)
-	lines := strings.Split(string(data), "\n")
+	lines := strings.SplitSeq(string(data), "\n")
 
-	for _, line := range lines {
+	for line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
 			continue
@@ -288,22 +328,12 @@ func mangowcFindInclude(filePath, target string, processed map[string]bool) bool
 			continue
 		}
 
-		sourcePath := strings.TrimSpace(parts[1])
-		if matchesTarget(sourcePath, target) {
-			return true
-		}
-
-		fullPath := sourcePath
-		if !filepath.IsAbs(sourcePath) {
-			fullPath = filepath.Join(baseDir, sourcePath)
-		}
-
-		expanded, err := utils.ExpandPath(fullPath)
+		fullPath, err := resolveSourcePath(baseDir, strings.TrimSpace(parts[1]))
 		if err != nil {
 			continue
 		}
 
-		if mangowcFindInclude(expanded, target, processed) {
+		if fullPath == target || mangowcFindInclude(fullPath, target, processed) {
 			return true
 		}
 	}
@@ -311,8 +341,13 @@ func mangowcFindInclude(filePath, target string, processed map[string]bool) bool
 	return false
 }
 
-func matchesTarget(path, target string) bool {
-	path = strings.TrimPrefix(path, "./")
-	target = strings.TrimPrefix(target, "./")
-	return path == target || strings.HasSuffix(path, "/"+target)
+func resolveSourcePath(baseDir, raw string) (string, error) {
+	expanded, err := utils.ExpandPath(raw)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(expanded) {
+		expanded = filepath.Join(baseDir, expanded)
+	}
+	return filepath.Abs(expanded)
 }

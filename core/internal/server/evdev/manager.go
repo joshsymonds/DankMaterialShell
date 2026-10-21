@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/syncmap"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/fsnotify/fsnotify"
 	evdev "github.com/holoplot/go-evdev"
 )
@@ -48,7 +48,7 @@ func NewManager() (*Manager, error) {
 		return nil, fmt.Errorf("failed to find keyboards: %w", err)
 	}
 
-	initialCapsLock := readInitialCapsLockState(devices[0])
+	initialCapsLock, _ := capsLockFromDevices(devices)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -85,14 +85,32 @@ func NewManager() (*Manager, error) {
 	return m, nil
 }
 
-func readInitialCapsLockState(device EvdevDevice) bool {
-	ledStates, err := device.State(evLedType)
-	if err != nil {
-		log.Debugf("Could not read LED state: %v", err)
-		return false
+func armNonBlocking(device EvdevDevice) {
+	nb, ok := device.(interface{ NonBlock() error })
+	if !ok {
+		return
+	}
+	if err := nb.NonBlock(); err != nil {
+		log.Debugf("evdev: non-blocking mode for %s: %v", device.Path(), err)
+	}
+}
+
+func capsLockFromDevices(devices []EvdevDevice) (bool, bool) {
+	for _, device := range devices {
+		if device == nil {
+			continue
+		}
+
+		ledStates, err := device.State(evLedType)
+		armNonBlocking(device)
+		if err != nil || len(ledStates) == 0 {
+			continue
+		}
+
+		return ledStates[ledCapslockKey], true
 	}
 
-	return ledStates[ledCapslockKey]
+	return false, false
 }
 
 func findKeyboards() ([]EvdevDevice, error) {
@@ -108,7 +126,7 @@ func findKeyboards() ([]EvdevDevice, error) {
 
 	var keyboards []EvdevDevice
 	for _, path := range matches {
-		device, err := evdev.Open(path)
+		device, err := evdev.OpenWithFlags(path, os.O_RDONLY)
 		if err != nil {
 			continue
 		}
@@ -119,6 +137,7 @@ func findKeyboards() ([]EvdevDevice, error) {
 		}
 
 		deviceName, _ := device.Name()
+		armNonBlocking(device)
 		log.Debugf("Found keyboard: %s at %s", deviceName, path)
 		keyboards = append(keyboards, device)
 	}
@@ -188,7 +207,7 @@ func (m *Manager) watchForNewKeyboards() {
 					continue
 				}
 
-				device, err := evdev.Open(event.Name)
+				device, err := evdev.OpenWithFlags(event.Name, os.O_RDONLY)
 				if err != nil {
 					m.devicesMutex.Unlock()
 					continue
@@ -201,6 +220,7 @@ func (m *Manager) watchForNewKeyboards() {
 				}
 
 				deviceName, _ := device.Name()
+				armNonBlocking(device)
 				log.Debugf("Hotplugged keyboard: %s at %s", deviceName, event.Name)
 
 				m.devices = append(m.devices, device)
@@ -297,25 +317,22 @@ func (m *Manager) readAndUpdateCapsLockState(deviceIndex int) {
 		m.devicesMutex.RUnlock()
 		return
 	}
-	device := m.devices[deviceIndex]
+	ordered := make([]EvdevDevice, 0, len(m.devices))
+	ordered = append(ordered, m.devices[deviceIndex])
+	for i, device := range m.devices {
+		if i == deviceIndex {
+			continue
+		}
+		ordered = append(ordered, device)
+	}
 	m.devicesMutex.RUnlock()
 
-	ledStates, err := device.State(evLedType)
-	if err != nil {
-		log.Warnf("Failed to read LED state: %v", err)
+	capsLockState, ok := capsLockFromDevices(ordered)
+	if !ok {
+		log.Debug("No LED-capable device available for caps lock state")
 		return
 	}
 
-	if len(ledStates) == 0 {
-		log.Debug("No LED state available (empty map)")
-
-		// This means the device either:
-		// - doesn't support LED reporting at all, or
-		// - the kernel returned an empty state
-		return
-	}
-
-	capsLockState := ledStates[ledCapslockKey]
 	m.updateCapsLockStateDirect(capsLockState)
 }
 

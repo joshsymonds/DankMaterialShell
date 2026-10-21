@@ -1,15 +1,20 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Item {
     id: root
+    required property var options
 
+    property color iconColor: Theme.surfaceText
     property real actualIconSize: 40
     property int overflowCount: 0
     property bool overflowExpanded: false
     property bool isVertical: false
 
+    function activate() {
+        clicked();
+    }
     signal clicked
 
     Rectangle {
@@ -18,7 +23,7 @@ Item {
         width: actualIconSize
         height: actualIconSize
         radius: Theme.cornerRadius
-        color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, mouseArea.containsMouse ? 0.2 : 0.1)
+        color: Theme.withAlpha(Theme.primary, mouseArea.containsMouse ? 0.2 : 0.1)
 
         Behavior on color {
             ColorAnimation {
@@ -26,12 +31,12 @@ Item {
             }
         }
 
-        DankIcon {
+        DIcon {
             id: arrowIcon
             anchors.centerIn: parent
             size: actualIconSize * 0.6
             name: "expand_more"
-            color: Theme.surfaceText
+            color: root.iconColor
             rotation: isVertical ? (overflowExpanded ? 180 : 0) : (overflowExpanded ? 90 : -90)
 
             Behavior on rotation {
@@ -44,7 +49,7 @@ Item {
     }
 
     Rectangle {
-        visible: overflowCount > 0 && !overflowExpanded && SettingsData.dockShowOverflowBadge
+        visible: overflowCount > 0 && !overflowExpanded && root.options.showOverflowBadge
         anchors.right: buttonBackground.right
         anchors.top: buttonBackground.top
         anchors.rightMargin: -4
@@ -60,7 +65,7 @@ Item {
             anchors.centerIn: parent
             text: `+${overflowCount}`
             font.pixelSize: Theme.fontSizeSmall
-            font.weight: Font.Bold
+            font.weight: Theme.fontWeightMedium
             color: Theme.onPrimary
         }
     }

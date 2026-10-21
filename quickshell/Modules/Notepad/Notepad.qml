@@ -1,12 +1,14 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Common
 import qs.Modals.Common
 import qs.Modals.FileBrowser
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
+import "../../Common/Format.js" as Format
 
 Item {
     id: root
@@ -21,40 +23,95 @@ Item {
     property var currentTab: NotepadStorageService.tabs.length > NotepadStorageService.currentTabIndex ? NotepadStorageService.tabs[NotepadStorageService.currentTabIndex] : null
     property bool showSettingsMenu: false
     property string pendingSaveContent: ""
+    readonly property bool conflictBannerVisible: currentTab !== null && NotepadStorageService.conflictTabId === currentTab.id
+    readonly property bool anyModalOpen: fileDialogOpen || confirmationDialogOpen
     property var slideout: null
+    property bool inPopout: false
+    property bool surfaceVisible: slideout ? slideout.isVisible : true
 
     signal hideRequested
+    signal popoutRequested
+    signal dockRequested
     signal previewRequested(string content)
+
+    function externalSync() {
+        textEditor.syncFromDisk();
+    }
+
+    function flushAutoSave() {
+        textEditor.autoSaveToSession();
+    }
 
     Ref {
         service: NotepadStorageService
+    }
+
+    // In connected frame mode the slideout sits on the Overlay layer
+    onFileDialogOpenChanged: {
+        if (slideout)
+            slideout.suppressOverlayLayer = fileDialogOpen;
+    }
+
+    Binding {
+        target: root.slideout
+        property: "hoverDismissSuspended"
+        value: root.anyModalOpen
+        when: root.slideout !== null
+        restoreMode: Binding.RestoreBindingOrValue
     }
 
     Connections {
         target: slideout
         enabled: slideout !== null
         function onAboutToHide() {
-            textEditor.autoSaveToSession()
+            textEditor.autoSaveToSession();
         }
+        function onRevealed() {
+            textEditor.syncFromDisk();
+        }
+    }
+
+    function showConflictBanner(diskContent) {
+        if (!currentTab)
+            return;
+        NotepadStorageService.flagConflict(currentTab.id, diskContent);
+    }
+
+    function resolveConflictKeepEdits() {
+        if (!root.conflictBannerVisible)
+            return;
+        NotepadStorageService.clearConflict();
+        if (currentTab && currentTab.filePath && !currentTab.isTemporary) {
+            root.saveToFile("file://" + currentTab.filePath);
+        }
+    }
+
+    function resolveConflictReload() {
+        if (!root.conflictBannerVisible)
+            return;
+        const diskContent = NotepadStorageService.conflictDiskContent;
+        NotepadStorageService.clearConflict();
+        textEditor.reloadFromDisk(diskContent);
+    }
+
+    function dismissConflictBanner() {
+        if (root.conflictBannerVisible)
+            NotepadStorageService.clearConflict();
     }
 
     function hasUnsavedChanges() {
         return textEditor.hasUnsavedChanges();
     }
 
-    function hasUnsavedTemporaryContent() {
-        return hasUnsavedChanges();
-    }
-
     function createNewTab() {
-        performCreateNewTab();
-    }
-
-    function performCreateNewTab() {
+        textEditor.commitLiveBuffer();
         NotepadStorageService.createNewTab();
+        textEditor.applyingShared = true;
         textEditor.text = "";
         textEditor.lastSavedContent = "";
+        textEditor.loadedTabId = -1;
         textEditor.contentLoaded = true;
+        textEditor.applyingShared = false;
         textEditor.textArea.forceActiveFocus();
     }
 
@@ -86,7 +143,6 @@ Item {
 
         NotepadStorageService.switchToTab(tabIndex);
         Qt.callLater(() => {
-            textEditor.loadCurrentTabContent();
             if (currentTab) {
                 root.currentFileName = currentTab.fileName || "";
                 root.currentFileUrl = currentTab.fileUrl || "";
@@ -100,17 +156,82 @@ Item {
         var content = textEditor.text;
         var filePath = fileUrl.toString().replace(/^file:\/\//, '');
 
+        textEditor.externalWatchPaused = true;
         saveFileView.path = "";
         pendingSaveContent = content;
         saveFileView.path = filePath;
 
+        saveFileView.setText(content);
+    }
+
+    function saveExternalWithFreshnessCheck() {
+        if (!currentTab || currentTab.isTemporary || !currentTab.filePath)
+            return;
+        const filePath = currentTab.filePath;
+        loadFileView.path = "";
+        loadFileView.path = filePath;
+
+        if (!loadFileView.waitForJob()) {
+            saveToFile("file://" + filePath);
+            return;
+        }
         Qt.callLater(() => {
-            saveFileView.setText(pendingSaveContent);
+            if (!currentTab || currentTab.isTemporary || currentTab.filePath !== filePath)
+                return;
+            const diskContent = loadFileView.text();
+            if (diskContent !== undefined && diskContent !== null && diskContent !== textEditor.text && diskContent !== textEditor.lastSavedContent) {
+                root.showConflictBanner(diskContent);
+                return;
+            }
+            saveToFile("file://" + filePath);
         });
     }
 
+    function autoSaveExternal() {
+        if (!SettingsData.notepadAutoSave)
+            return;
+        if (!currentTab || currentTab.isTemporary || !currentTab.filePath)
+            return;
+        if (!textEditor.hasUnsavedChanges())
+            return;
+        const filePath = currentTab.filePath;
+        loadFileView.path = "";
+        loadFileView.path = filePath;
+        if (!loadFileView.waitForJob())
+            return;
+        Qt.callLater(() => {
+            if (!currentTab || currentTab.isTemporary || currentTab.filePath !== filePath)
+                return;
+            const diskContent = loadFileView.text();
+            if (diskContent === undefined || diskContent === null)
+                return;
+            if (diskContent !== textEditor.lastSavedContent)
+                return;
+            saveToFile("file://" + filePath);
+        });
+    }
+
+    function openExternalFile(path) {
+        if (!path)
+            return;
+
+        for (var i = 0; i < NotepadStorageService.tabs.length; i++) {
+            var tab = NotepadStorageService.tabs[i];
+            if (tab && !tab.isTemporary && tab.filePath === path) {
+                textEditor.autoSaveToSession();
+                switchToTab(i);
+                return;
+            }
+        }
+
+        textEditor.autoSaveToSession();
+        NotepadStorageService.createTabForFile(path);
+        root.currentFileName = path.split('/').pop();
+        root.currentFileUrl = "file://" + path;
+    }
+
     function loadFromFile(fileUrl) {
-        if (hasUnsavedTemporaryContent()) {
+        if (hasUnsavedChanges()) {
             root.pendingFileUrl = fileUrl;
             root.pendingAction = "load_file";
             root.confirmationDialogOpen = true;
@@ -122,14 +243,43 @@ Item {
         }
     }
 
+    function confirmLargeFile(path, size, onOpen, onCancel) {
+        largeFileConfirmLoader.active = true;
+        const confirm = largeFileConfirmLoader.item;
+        if (!confirm)
+            return;
+        root.confirmationDialogOpen = true;
+        confirm.showWithOptions({
+            "title": I18n.tr("Open large file?", "notepad prompt before loading a file over the size limit"),
+            "message": I18n.tr("%1 is %2 and may use a lot of memory.", "notepad large file prompt, file name then size").arg(path.split('/').pop()).arg(Format.formatBytes(size)),
+            "confirmText": I18n.tr("Open"),
+            "onConfirm": () => {
+                root.confirmationDialogOpen = false;
+                NotepadStorageService.approveLargeFile(path);
+                onOpen();
+            },
+            "onCancel": () => {
+                root.confirmationDialogOpen = false;
+                onCancel();
+            }
+        });
+    }
+
     function performLoadFromFile(fileUrl) {
         const filePath = fileUrl.toString().replace(/^file:\/\//, '');
         const fileName = filePath.split('/').pop();
 
-        loadFileView.path = "";
-        loadFileView.path = filePath;
+        NotepadStorageService.readFileSize(filePath, size => {
+            if (NotepadStorageService.needsLargeFileConfirm(filePath, size)) {
+                root.confirmLargeFile(filePath, size, () => root.performLoadFromFile(fileUrl), () => {});
+                return;
+            }
 
-        if (loadFileView.waitForJob()) {
+            loadFileView.path = "";
+            loadFileView.path = filePath;
+
+            if (!loadFileView.waitForJob())
+                return;
             Qt.callLater(() => {
                 var content = loadFileView.text();
                 if (currentTab && content !== undefined && content !== null) {
@@ -146,14 +296,156 @@ Item {
 
                     root.currentFileName = fileName;
                     root.currentFileUrl = fileUrl;
-                    textEditor.saveCurrentTabContent();
+                    textEditor.loadedTabId = currentTab.id;
+                    NotepadStorageService.clearSessionBuffer(currentTab.id);
+                    if (root.conflictBannerVisible)
+                        NotepadStorageService.clearConflict();
                 }
             });
+        });
+    }
+
+    Item {
+        id: conflictBanner
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: root.conflictBannerVisible ? bannerRect.implicitHeight : 0
+        visible: height > 0
+        clip: true
+        z: 5
+
+        Behavior on height {
+            NumberAnimation {
+                duration: Theme.shortDuration
+                easing.type: Theme.standardEasing
+            }
+        }
+
+        StyledRect {
+            id: bannerRect
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            implicitHeight: bannerLayout.implicitHeight + Theme.spacingM * 2
+            radius: Theme.cornerRadius
+            color: Theme.withAlpha(Theme.warning, 0.12)
+            border.color: Theme.withAlpha(Theme.warning, 0.5)
+            border.width: 1
+
+            ColumnLayout {
+                id: bannerLayout
+                anchors.fill: parent
+                anchors.margins: Theme.spacingM
+                spacing: Theme.spacingS
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingM
+
+                    DIcon {
+                        Layout.alignment: Qt.AlignVCenter
+                        name: "sync_problem"
+                        size: Theme.iconSize - 2
+                        color: Theme.warning
+                    }
+
+                    StyledText {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                        text: I18n.tr("File changed on disk")
+                        font.pixelSize: Theme.fontSizeMedium
+                        font.weight: Theme.fontWeightMedium
+                        color: Theme.surfaceText
+                        wrapMode: Text.NoWrap
+                        elide: Text.ElideRight
+                    }
+
+                    DActionButton {
+                        Layout.alignment: Qt.AlignVCenter
+                        iconName: "close"
+                        Accessible.name: I18n.tr("Dismiss")
+                        iconSize: Theme.iconSizeSmall
+                        iconColor: Theme.surfaceText
+                        buttonSize: 28
+                        onClicked: root.dismissConflictBanner()
+                    }
+                }
+
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 32
+
+                    Row {
+                        id: bannerActions
+                        anchors.right: parent.right
+                        spacing: Theme.spacingS
+
+                        readonly property real available: parent.width
+
+                        StyledRect {
+                            width: Math.min(keepText.implicitWidth + Theme.spacingM * 2, Math.max(104, (bannerActions.available - bannerActions.spacing) / 2))
+                            height: 32
+                            radius: Theme.cornerRadius
+                            color: "transparent"
+                            border.color: Theme.outlineMedium
+                            border.width: 1
+
+                            StateLayer {
+                                anchors.fill: parent
+                                cornerRadius: parent.radius
+                                stateColor: Theme.surfaceText
+                                onClicked: root.resolveConflictKeepEdits()
+                            }
+
+                            StyledText {
+                                id: keepText
+                                anchors.centerIn: parent
+                                width: parent.width - Theme.spacingM
+                                text: I18n.tr("Keep My Edits")
+                                font.pixelSize: Theme.fontSizeSmall
+                                color: Theme.surfaceText
+                                horizontalAlignment: Text.AlignHCenter
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        StyledRect {
+                            width: Math.min(reloadText.implicitWidth + Theme.spacingM * 2, Math.max(116, (bannerActions.available - bannerActions.spacing) / 2))
+                            height: 32
+                            radius: Theme.cornerRadius
+                            color: Theme.primary
+
+                            StateLayer {
+                                anchors.fill: parent
+                                cornerRadius: parent.radius
+                                stateColor: Theme.background
+                                onClicked: root.resolveConflictReload()
+                            }
+
+                            StyledText {
+                                id: reloadText
+                                anchors.centerIn: parent
+                                width: parent.width - Theme.spacingM
+                                text: I18n.tr("Reload From Disk")
+                                font.pixelSize: Theme.fontSizeSmall
+                                color: Theme.background
+                                horizontalAlignment: Text.AlignHCenter
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     Column {
-        anchors.fill: parent
+        anchors.top: conflictBanner.bottom
+        anchors.topMargin: root.conflictBannerVisible ? Theme.spacingM : 0
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         spacing: Theme.spacingM
 
         NotepadTabs {
@@ -178,11 +470,12 @@ Item {
             id: textEditor
             width: parent.width
             height: parent.height - tabBar.height - Theme.spacingM * 2
+            inPopout: root.inPopout
+            surfaceVisible: root.surfaceVisible
 
             onSaveRequested: {
                 if (currentTab && !currentTab.isTemporary && currentTab.filePath) {
-                    var fileUrl = "file://" + currentTab.filePath;
-                    saveToFile(fileUrl);
+                    root.saveExternalWithFreshnessCheck();
                 } else {
                     root.fileDialogOpen = true;
                     saveBrowserLoader.active = true;
@@ -213,13 +506,37 @@ Item {
             }
 
             onEscapePressed: {
-                textEditor.autoSaveToSession()
-                root.hideRequested()
+                textEditor.autoSaveToSession();
+                if (showSettingsMenu) {
+                    showSettingsMenu = false;
+                    return;
+                }
+                if (!root.inPopout) {
+                    root.hideRequested();
+                }
             }
 
             onSettingsRequested: {
                 showSettingsMenu = !showSettingsMenu;
             }
+
+            onPopoutRequested: root.popoutRequested()
+
+            onDockRequested: root.dockRequested()
+
+            onConflictDetected: diskContent => {
+                root.showConflictBanner(diskContent);
+            }
+
+            onLargeFileConfirmRequested: (tab, size) => {
+                if (!root.surfaceVisible)
+                    return;
+                root.confirmLargeFile(tab.filePath, size, () => textEditor.loadCurrentTabContent(), () => {
+                    root.performCloseTab(NotepadStorageService.tabs.findIndex(t => t.id === tab.id));
+                });
+            }
+
+            onAutoSaveRequested: root.autoSaveExternal()
         }
     }
 
@@ -227,6 +544,7 @@ Item {
         id: notepadSettings
         anchors.fill: parent
         isVisible: showSettingsMenu
+        frameManagesGap: root.slideout?.frameOwnsConnectedChrome ?? false
         onSettingsRequested: showSettingsMenu = !showSettingsMenu
         onFindRequested: {
             showSettingsMenu = false;
@@ -242,17 +560,24 @@ Item {
         printErrors: true
 
         onSaved: {
-            if (currentTab && saveFileView.path && pendingSaveContent) {
+            if (currentTab && saveFileView.path) {
                 NotepadStorageService.updateTabMetadata(NotepadStorageService.currentTabIndex, {
                     hasUnsavedChanges: false,
                     lastSavedContent: pendingSaveContent
                 });
                 root.lastSavedFileContent = pendingSaveContent;
-                pendingSaveContent = "";
+                textEditor.lastSavedContent = pendingSaveContent;
+                textEditor.ignoreNextExternalChange = true;
+                textEditor.commitLiveBuffer();
+                if (root.conflictBannerVisible)
+                    NotepadStorageService.clearConflict();
             }
+            textEditor.externalWatchPaused = false;
+            pendingSaveContent = "";
         }
 
         onSaveFailed: error => {
+            textEditor.externalWatchPaused = false;
             pendingSaveContent = "";
         }
     }
@@ -275,12 +600,9 @@ Item {
             id: saveBrowser
 
             browserTitle: I18n.tr("Save Notepad File")
-            browserIcon: "save"
-            browserType: "notepad_save"
-            fileExtensions: ["*.txt", "*.md", "*.*"]
-            allowStacking: true
-            saveMode: true
-            defaultFileName: {
+            bucket: "notepad_save"
+            mode: "save"
+            defaultName: {
                 if (currentTab && currentTab.title && currentTab.title !== "Untitled") {
                     return currentTab.title;
                 } else if (currentTab && !currentTab.isTemporary && currentTab.filePath) {
@@ -290,14 +612,15 @@ Item {
                 }
             }
 
-            onFileSelected: path => {
+            onAccepted: paths => {
                 root.fileDialogOpen = false;
-                const cleanPath = decodeURI(path.toString().replace(/^file:\/\//, ''));
+                const cleanPath = paths[0];
                 const fileName = cleanPath.split('/').pop();
                 const fileUrl = "file://" + cleanPath;
 
                 root.currentFileName = fileName;
                 root.currentFileUrl = fileUrl;
+                textEditor.externalWatchPaused = true;
 
                 if (currentTab) {
                     NotepadStorageService.saveTabAs(NotepadStorageService.currentTabIndex, cleanPath);
@@ -323,8 +646,6 @@ Item {
                     });
                 }
                 root.pendingAction = "";
-
-                close();
             }
 
             onDialogClosed: {
@@ -341,22 +662,16 @@ Item {
             id: loadBrowser
 
             browserTitle: I18n.tr("Open Notepad File")
-            browserIcon: "folder_open"
-            browserType: "notepad_load"
-            fileExtensions: ["*.txt", "*.md", "*.*"]
-            allowStacking: true
+            bucket: "notepad_load"
 
-            onFileSelected: path => {
+            onAccepted: paths => {
                 root.fileDialogOpen = false;
-                const cleanPath = path.toString().replace(/^file:\/\//, '');
-                const fileName = cleanPath.split('/').pop();
-                const fileUrl = "file://" + cleanPath;
+                const fileUrl = "file://" + paths[0];
 
-                root.currentFileName = fileName;
+                root.currentFileName = paths[0].split('/').pop();
                 root.currentFileUrl = fileUrl;
 
                 loadFromFile(fileUrl);
-                close();
             }
 
             onDialogClosed: {
@@ -366,16 +681,26 @@ Item {
     }
 
     LazyLoader {
+        id: largeFileConfirmLoader
+        active: false
+
+        ConfirmModal {
+            useOverlayLayer: true
+        }
+    }
+
+    LazyLoader {
         id: confirmationDialogLoader
         active: false
 
-        DankModal {
+        DModal {
             id: confirmationDialog
 
             modalWidth: 400
             modalHeight: contentLoader.item ? contentLoader.item.implicitHeight + Theme.spacingM * 2 : 180
             shouldBeVisible: false
             allowStacking: true
+            useOverlayLayer: true
 
             onBackgroundClicked: {
                 close();
@@ -403,14 +728,14 @@ Item {
                         spacing: Theme.spacingM
 
                         StyledText {
-                            text: I18n.tr("Unsaved Changes")
+                            text: I18n.tr("Unsaved changes")
                             font.pixelSize: Theme.fontSizeLarge
                             color: Theme.surfaceText
-                            font.weight: Font.Medium
+                            font.weight: Theme.fontWeightMedium
                         }
 
                         StyledText {
-                            text: root.pendingAction === "new" ? I18n.tr("You have unsaved changes. Save before creating a new file?") : root.pendingAction.startsWith("close_tab_") ? I18n.tr("You have unsaved changes. Save before closing this tab?") : root.pendingAction === "load_file" || root.pendingAction === "open" ? I18n.tr("You have unsaved changes. Save before opening a file?") : I18n.tr("You have unsaved changes. Save before continuing?")
+                            text: I18n.tr("You have unsaved changes. Save before continuing?")
                             font.pixelSize: Theme.fontSizeMedium
                             color: Theme.surfaceTextMedium
                             width: parent.width
@@ -430,7 +755,7 @@ Item {
                                     width: Math.max(80, discardText.contentWidth + Theme.spacingM * 2)
                                     height: 36
                                     radius: Theme.cornerRadius
-                                    color: discardArea.containsMouse ? Theme.surfaceTextHover : "transparent"
+                                    color: discardArea.containsMouse ? Theme.surfaceTextHover : Theme.withAlpha(Theme.surfaceTextHover, 0)
                                     border.color: Theme.surfaceVariantAlpha
                                     border.width: 1
 
@@ -440,7 +765,7 @@ Item {
                                         text: I18n.tr("Don't Save")
                                         font.pixelSize: Theme.fontSizeMedium
                                         color: Theme.surfaceText
-                                        font.weight: Font.Medium
+                                        font.weight: Theme.fontWeightMedium
                                     }
 
                                     MouseArea {
@@ -482,7 +807,7 @@ Item {
                                         text: I18n.tr("Save")
                                         font.pixelSize: Theme.fontSizeMedium
                                         color: Theme.background
-                                        font.weight: Font.Medium
+                                        font.weight: Theme.fontWeightMedium
                                     }
 
                                     MouseArea {
@@ -511,12 +836,13 @@ Item {
                         }
                     }
 
-                    DankActionButton {
+                    DActionButton {
                         anchors.top: parent.top
                         anchors.right: parent.right
                         anchors.topMargin: Theme.spacingM
                         anchors.rightMargin: Theme.spacingM
                         iconName: "close"
+                        Accessible.name: I18n.tr("Close")
                         iconSize: Theme.iconSize - 4
                         iconColor: Theme.surfaceText
                         onClicked: {

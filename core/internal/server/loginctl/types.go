@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/syncmap"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -62,6 +62,7 @@ type Manager struct {
 	lockBeforeSuspend     atomic.Bool
 	inSleepCycle          atomic.Bool
 	sleepCycleID          atomic.Uint64
+	prelockedReady        atomic.Bool
 	lockerReadyChMu       sync.Mutex
 	lockerReadyCh         chan struct{}
 	lockTimerMu           sync.Mutex

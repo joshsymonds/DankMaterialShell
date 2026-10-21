@@ -1,8 +1,7 @@
 import QtQuick
-import QtQuick.Controls
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginSettings {
@@ -10,9 +9,9 @@ PluginSettings {
     pluginId: "exampleVariants"
 
     onVariantsChanged: {
-        variantsModel.clear()
+        variantsModel.clear();
         for (var i = 0; i < variants.length; i++) {
-            variantsModel.append(variants[i])
+            variantsModel.append(variants[i]);
         }
     }
 
@@ -20,7 +19,7 @@ PluginSettings {
         width: parent.width
         text: "Variant Manager"
         font.pixelSize: Theme.fontSizeLarge
-        font.weight: Font.Bold
+        font.weight: Theme.fontWeightMedium
         color: Theme.surfaceText
     }
 
@@ -36,7 +35,7 @@ PluginSettings {
         width: parent.width
         height: addVariantColumn.implicitHeight + Theme.spacingL * 2
         radius: Theme.cornerRadius
-        color: Theme.surfaceContainerHigh
+        color: Theme.chipSurface
 
         Column {
             id: addVariantColumn
@@ -47,7 +46,7 @@ PluginSettings {
             StyledText {
                 text: "Add New Variant"
                 font.pixelSize: Theme.fontSizeMedium
-                font.weight: Font.Medium
+                font.weight: Theme.fontWeightMedium
                 color: Theme.surfaceText
             }
 
@@ -65,7 +64,7 @@ PluginSettings {
                         color: Theme.surfaceVariantText
                     }
 
-                    DankTextField {
+                    DTextField {
                         id: nameField
                         width: parent.width
                         placeholderText: "Variant Name"
@@ -82,7 +81,7 @@ PluginSettings {
                         color: Theme.surfaceVariantText
                     }
 
-                    DankTextField {
+                    DTextField {
                         id: iconField
                         width: parent.width
                         placeholderText: "star"
@@ -99,7 +98,7 @@ PluginSettings {
                         color: Theme.surfaceVariantText
                     }
 
-                    DankTextField {
+                    DTextField {
                         id: textField
                         width: parent.width
                         placeholderText: "Display Text"
@@ -107,26 +106,26 @@ PluginSettings {
                 }
             }
 
-            DankButton {
+            DButton {
                 text: "Create Variant"
                 iconName: "add"
                 onClicked: {
                     if (!nameField.text) {
-                        ToastService.showError("Please enter a variant name")
-                        return
+                        ToastService.showError("Please enter a variant name");
+                        return;
                     }
 
                     var variantConfig = {
                         text: textField.text || nameField.text,
                         icon: iconField.text || "widgets"
-                    }
+                    };
 
-                    createVariant(nameField.text, variantConfig)
-                    ToastService.showInfo("Variant created: " + nameField.text)
+                    createVariant(nameField.text, variantConfig);
+                    ToastService.showInfo("Variant created: " + nameField.text);
 
-                    nameField.text = ""
-                    iconField.text = ""
-                    textField.text = ""
+                    nameField.text = "";
+                    iconField.text = "";
+                    textField.text = "";
                 }
             }
         }
@@ -136,7 +135,7 @@ PluginSettings {
         width: parent.width
         height: Math.max(200, variantsColumn.implicitHeight + Theme.spacingL * 2)
         radius: Theme.cornerRadius
-        color: Theme.surfaceContainerHigh
+        color: Theme.chipSurface
 
         Column {
             id: variantsColumn
@@ -147,7 +146,7 @@ PluginSettings {
             StyledText {
                 text: "Existing Variants"
                 font.pixelSize: Theme.fontSizeMedium
-                font.weight: Font.Medium
+                font.weight: Theme.fontWeightMedium
                 color: Theme.surfaceText
             }
 
@@ -166,7 +165,7 @@ PluginSettings {
                     width: ListView.view.width
                     height: variantRow.implicitHeight + Theme.spacingM * 2
                     radius: Theme.cornerRadius
-                    color: variantMouseArea.containsMouse ? Theme.surfaceContainerHighest : Theme.surfaceContainer
+                    color: variantMouseArea.containsMouse ? Theme.chipSurfaceNested : Theme.chipSurface
 
                     Row {
                         id: variantRow
@@ -179,7 +178,7 @@ PluginSettings {
                             height: Theme.iconSize
                             anchors.verticalCenter: parent.verticalCenter
 
-                            DankIcon {
+                            DIcon {
                                 anchors.centerIn: parent
                                 name: model.icon || "widgets"
                                 size: Theme.iconSize
@@ -214,13 +213,15 @@ PluginSettings {
 
                         Rectangle {
                             id: deleteButton
+                            Accessible.role: Accessible.Button
+                            Accessible.name: I18n.tr("Delete")
                             width: 32
                             height: 32
                             radius: 16
-                            color: deleteArea.containsMouse ? Theme.error : "transparent"
+                            color: deleteArea.containsMouse ? Theme.error : Theme.withAlpha(Theme.error, 0)
                             anchors.verticalCenter: parent.verticalCenter
 
-                            DankIcon {
+                            DIcon {
                                 anchors.centerIn: parent
                                 name: "delete"
                                 size: 16
@@ -233,8 +234,8 @@ PluginSettings {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
-                                    removeVariant(model.id)
-                                    ToastService.showInfo("Variant removed: " + model.name)
+                                    removeVariant(model.id);
+                                    ToastService.showInfo("Variant removed: " + model.name);
                                 }
                             }
                         }
@@ -263,7 +264,7 @@ PluginSettings {
         width: parent.width
         height: instructionsColumn.implicitHeight + Theme.spacingL * 2
         radius: Theme.cornerRadius
-        color: Theme.surface
+        color: Theme.hostSurface
 
         Column {
             id: instructionsColumn
@@ -274,7 +275,7 @@ PluginSettings {
             Row {
                 spacing: Theme.spacingM
 
-                DankIcon {
+                DIcon {
                     name: "info"
                     size: Theme.iconSize
                     color: Theme.primary
@@ -284,7 +285,7 @@ PluginSettings {
                 StyledText {
                     text: "How to Use Variants"
                     font.pixelSize: Theme.fontSizeMedium
-                    font.weight: Font.Medium
+                    font.weight: Theme.fontWeightMedium
                     color: Theme.surfaceText
                     anchors.verticalCenter: parent.verticalCenter
                 }

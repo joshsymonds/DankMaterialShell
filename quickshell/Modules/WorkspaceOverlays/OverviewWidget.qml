@@ -1,9 +1,9 @@
 import QtQuick
-import QtQuick.Layouts
 import Quickshell
 import Quickshell.Hyprland
 import qs.Common
 import qs.Services
+import qs.DCommon.Widgets
 import qs.Widgets
 
 Item {
@@ -14,6 +14,37 @@ Item {
     readonly property HyprlandMonitor monitor: Hyprland.monitorFor(panelWindow.screen)
     readonly property real dpr: CompositorService.getScreenScale(panelWindow.screen)
     readonly property int workspacesShown: SettingsData.overviewRows * SettingsData.overviewColumns
+    readonly property alias windowMenuWindow: windowMenu.contextWindow
+
+    function openWindowMenu(item, x, y) {
+        const address = item.windowData?.address;
+        if (!address || CompositorService.specialWorkspaceNames.length === 0)
+            return;
+        windowMenu.targetWindow = address;
+        const pos = item.mapToGlobal(x, y);
+        windowMenu.open(panelWindow.screen, pos.x - (panelWindow.screen?.x || 0), pos.y - (panelWindow.screen?.y || 0), false);
+    }
+
+    // scratchpad windows are not in the grid, so the menu only ever offers a move in
+    DContextMenu {
+        id: windowMenu
+
+        property string targetWindow: ""
+
+        layerNamespace: "dms:overview-window-context-menu"
+        menuItems: CompositorService.specialWorkspaceNames.map(name => ({
+                    type: "item",
+                    icon: "inbox",
+                    text: name === "special" ? I18n.tr("Move to scratchpad", "window context menu action, sends the window to the unnamed special workspace") : I18n.tr("Move to scratchpad: %1", "%1 is the named special workspace").arg(name),
+                    action: () => {
+                        CompositorService.moveWindowToSpecial(windowMenu.targetWindow, name);
+                        Qt.callLater(() => {
+                            Hyprland.refreshToplevels();
+                            Hyprland.refreshWorkspaces();
+                        });
+                    }
+                }))
+    }
 
     readonly property var allWorkspaces: Hyprland.workspaces?.values || []
     readonly property var allWorkspaceIds: {
@@ -21,7 +52,7 @@ Item {
         if (!workspaces || workspaces.length === 0)
             return [];
         try {
-            const ids = workspaces.map(ws => ws?.id).filter(id => id !== null && id !== undefined);
+            const ids = workspaces.map(ws => ws?.id).filter(id => id > 0);
             return ids.sort((a, b) => a - b);
         } catch (e) {
             return [];
@@ -35,7 +66,7 @@ Item {
             return [];
         try {
             const filtered = workspaces.filter(ws => ws?.monitor?.name === mon.name);
-            return filtered.map(ws => ws?.id).filter(id => id !== null && id !== undefined).sort((a, b) => a - b);
+            return filtered.map(ws => ws?.id).filter(id => id > 0).sort((a, b) => a - b);
         } catch (e) {
             return [];
         }
@@ -80,7 +111,6 @@ Item {
     readonly property int displayWorkspaceCount: displayedWorkspaceIds.length
 
     readonly property int effectiveColumns: SettingsData.overviewColumns
-    readonly property int effectiveRows: Math.max(SettingsData.overviewRows, Math.ceil(displayWorkspaceCount / effectiveColumns))
 
     function getWorkspaceMonitorName(workspaceId) {
         if (!allWorkspaces || !workspaceId)
@@ -107,6 +137,56 @@ Item {
         }
     }
 
+    function monitorIpcForWorkspace(workspaceId) {
+        const workspace = allWorkspaces?.find(ws => ws?.id === workspaceId);
+        return workspace?.monitor?.lastIpcObject ?? monitor?.lastIpcObject ?? null;
+    }
+
+    function monitorLogicalSize(ipc) {
+        if (!ipc || !ipc.width || !ipc.height)
+            return {
+                "width": monitorPhysicalWidth,
+                "height": monitorPhysicalHeight
+            };
+
+        const monScale = ipc.scale > 0 ? ipc.scale : 1;
+        const rotated = ((ipc.transform ?? 0) % 2) === 1;
+        return {
+            "width": (rotated ? ipc.height : ipc.width) / monScale,
+            "height": (rotated ? ipc.width : ipc.height) / monScale
+        };
+    }
+
+    function cellForWorkspace(workspaceId) {
+        const cell = gridLayout.cells.find(c => c.id === workspaceId);
+        if (cell)
+            return cell;
+        return {
+            "id": workspaceId,
+            "x": 0,
+            "y": 0,
+            "width": workspaceImplicitWidth,
+            "height": workspaceImplicitHeight
+        };
+    }
+
+    function getWorkspaceViewportBounds(workspaceId, cellWidth, cellHeight) {
+        const ipc = monitorIpcForWorkspace(workspaceId) ?? {};
+        const logical = monitorLogicalSize(ipc);
+        const reserved = ipc.reserved || [0, 0, 0, 0];
+
+        const x = (ipc.x ?? 0) + (reserved[0] ?? 0);
+        const y = (ipc.y ?? 0) + (reserved[1] ?? 0);
+        const width = Math.max(logical.width - (reserved[0] ?? 0) - (reserved[2] ?? 0), 1);
+        const height = Math.max(logical.height - (reserved[1] ?? 0) - (reserved[3] ?? 0), 1);
+
+        return {
+            "x": x,
+            "y": y,
+            "scale": Math.min(cellWidth / width, cellHeight / height)
+        };
+    }
+
     property bool monitorIsFocused: monitor?.focused ?? false
     property real scale: SettingsData.overviewScale
     property color activeBorderColor: Theme.primary
@@ -121,9 +201,60 @@ Item {
     property int monitorLabelZ: 2
     property int windowDraggingZ: 99999
     property real workspaceSpacing: 5
+    readonly property int workspaceBorderWidth: 2
 
     property int draggingFromWorkspace: -1
     property int draggingTargetWorkspace: -1
+
+    readonly property var gridLayout: {
+        const ids = displayedWorkspaceIds;
+        const columns = effectiveColumns;
+        if (!ids || ids.length === 0 || columns < 1)
+            return {
+                "cells": [],
+                "width": 0,
+                "height": 0
+            };
+
+        const rows = [];
+        for (let i = 0; i < ids.length; i += columns) {
+            rows.push(ids.slice(i, i + columns).map(id => {
+                const logical = monitorLogicalSize(monitorIpcForWorkspace(id));
+                return {
+                    "id": id,
+                    "width": logical.width * scale,
+                    "height": logical.height * scale
+                };
+            }));
+        }
+
+        const rowWidth = row => row.reduce((acc, cell) => acc + cell.width, 0) + workspaceSpacing * (row.length - 1);
+        const totalWidth = rows.reduce((acc, row) => Math.max(acc, rowWidth(row)), 0);
+
+        const cells = [];
+        let cursorY = 0;
+        for (const row of rows) {
+            const rowHeight = row.reduce((acc, cell) => Math.max(acc, cell.height), 0);
+            let cursorX = (totalWidth - rowWidth(row)) / 2;
+            for (const cell of row) {
+                cells.push({
+                    "id": cell.id,
+                    "x": cursorX,
+                    "y": cursorY + (rowHeight - cell.height) / 2,
+                    "width": cell.width,
+                    "height": cell.height
+                });
+                cursorX += cell.width + workspaceSpacing;
+            }
+            cursorY += rowHeight + workspaceSpacing;
+        }
+
+        return {
+            "cells": cells,
+            "width": totalWidth,
+            "height": cursorY - workspaceSpacing
+        };
+    }
 
     implicitWidth: overviewBackground.implicitWidth + Theme.spacingL * 2
     implicitHeight: overviewBackground.implicitHeight + Theme.spacingL * 2
@@ -148,10 +279,10 @@ Item {
         anchors.fill: parent
         anchors.margins: Theme.spacingL
 
-        implicitWidth: workspaceColumnLayout.implicitWidth + padding * 2
-        implicitHeight: workspaceColumnLayout.implicitHeight + padding * 2
+        implicitWidth: workspaceGrid.implicitWidth + padding * 2
+        implicitHeight: workspaceGrid.implicitHeight + padding * 2
         radius: Theme.cornerRadius
-        color: Theme.surfaceContainer
+        color: Theme.hostSurface
 
         ElevationShadow {
             anchors.fill: parent
@@ -159,89 +290,83 @@ Item {
             level: Theme.elevationLevel2
             fallbackOffset: 4
             targetRadius: Theme.cornerRadius
-            targetColor: Theme.surfaceContainer
+            targetColor: Theme.hostSurface
             shadowOpacity: Theme.elevationLevel2 && Theme.elevationLevel2.alpha !== undefined ? Theme.elevationLevel2.alpha : 0.25
             shadowEnabled: Theme.elevationEnabled
         }
 
-        ColumnLayout {
-            id: workspaceColumnLayout
+        Item {
+            id: workspaceGrid
 
             z: root.workspaceZ
             anchors.centerIn: parent
-            spacing: workspaceSpacing
+            implicitWidth: root.gridLayout.width
+            implicitHeight: root.gridLayout.height
 
             Repeater {
-                model: root.effectiveRows
-                delegate: RowLayout {
-                    id: row
-                    property int rowIndex: index
-                    spacing: workspaceSpacing
+                model: root.gridLayout.cells.length
 
-                    Repeater {
-                        model: root.effectiveColumns
-                        Rectangle {
-                            id: workspace
-                            property int colIndex: index
-                            property int workspaceIndex: rowIndex * root.effectiveColumns + colIndex
-                            property int workspaceValue: (root.displayedWorkspaceIds && workspaceIndex < root.displayedWorkspaceIds.length) ? root.displayedWorkspaceIds[workspaceIndex] : -1
-                            property bool workspaceExists: (root.allWorkspaceIds && workspaceValue > 0) ? root.allWorkspaceIds.includes(workspaceValue) : false
-                            property var workspaceObj: (workspaceExists && Hyprland.workspaces?.values) ? Hyprland.workspaces.values.find(ws => ws?.id === workspaceValue) : null
-                            property bool isActive: workspaceObj?.active ?? false
-                            property bool isOnThisMonitor: (workspaceObj && root.monitor) ? (workspaceObj.monitor?.name === root.monitor.name) : true
-                            property bool hasWindows: (workspaceValue > 0) ? root.workspaceHasWindows(workspaceValue) : false
-                            property string workspaceMonitorName: (workspaceValue > 0) ? root.getWorkspaceMonitorName(workspaceValue) : ""
-                            property color defaultWorkspaceColor: workspaceExists ? Theme.surfaceContainer : Theme.withAlpha(Theme.surfaceContainer, 0.3)
-                            property color hoveredWorkspaceColor: Qt.lighter(defaultWorkspaceColor, 1.1)
-                            property color hoveredBorderColor: Theme.surfaceVariant
-                            property bool hoveredWhileDragging: false
-                            property bool shouldShowActiveIndicator: isActive && isOnThisMonitor && hasWindows
+                Rectangle {
+                    id: workspace
+                    required property int index
+                    readonly property var cell: root.gridLayout.cells[index] ?? null
+                    property int workspaceValue: cell?.id ?? -1
+                    property bool workspaceExists: (root.allWorkspaceIds && workspaceValue > 0) ? root.allWorkspaceIds.includes(workspaceValue) : false
+                    property var workspaceObj: (workspaceExists && Hyprland.workspaces?.values) ? Hyprland.workspaces.values.find(ws => ws?.id === workspaceValue) : null
+                    property bool isActive: workspaceObj?.active ?? false
+                    property bool isOnThisMonitor: (workspaceObj && root.monitor) ? (workspaceObj.monitor?.name === root.monitor.name) : true
+                    property bool hasWindows: (workspaceValue > 0) ? root.workspaceHasWindows(workspaceValue) : false
+                    property color defaultWorkspaceColor: workspaceExists ? Theme.cardSurface : Theme.withAlpha(Theme.cardSurface, 0.3)
+                    property color hoveredWorkspaceColor: Theme.hoverTint(defaultWorkspaceColor)
+                    property color hoveredBorderColor: Theme.surfaceVariant
+                    property bool hoveredWhileDragging: false
+                    property bool shouldShowActiveIndicator: isActive && isOnThisMonitor && hasWindows
 
-                            visible: workspaceValue !== -1
+                    visible: workspaceValue !== -1
 
-                            implicitWidth: root.workspaceImplicitWidth
-                            implicitHeight: root.workspaceImplicitHeight
-                            color: hoveredWhileDragging ? hoveredWorkspaceColor : defaultWorkspaceColor
-                            radius: Theme.cornerRadius
-                            border.width: 2
-                            border.color: hoveredWhileDragging ? hoveredBorderColor : (shouldShowActiveIndicator ? root.activeBorderColor : "transparent")
+                    x: cell?.x ?? 0
+                    y: cell?.y ?? 0
+                    width: cell?.width ?? 0
+                    height: cell?.height ?? 0
+                    color: hoveredWhileDragging ? hoveredWorkspaceColor : defaultWorkspaceColor
+                    radius: Theme.cornerRadius
+                    border.width: root.workspaceBorderWidth
+                    border.color: hoveredWhileDragging ? hoveredBorderColor : (shouldShowActiveIndicator ? root.activeBorderColor : Theme.withAlpha(root.activeBorderColor, 0))
 
-                            StyledText {
-                                anchors.centerIn: parent
-                                text: workspaceValue
-                                font.pixelSize: Theme.fontSizeXLarge * 6
-                                font.weight: Font.DemiBold
-                                color: Theme.withAlpha(Theme.surfaceText, workspaceExists ? 0.2 : 0.1)
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
+                    StyledText {
+                        anchors.centerIn: parent
+                        text: workspace.workspaceValue
+                        font.pixelSize: Theme.fontSizeXLarge * 6
+                        font.weight: Theme.fontWeightMedium
+                        color: Theme.withAlpha(Theme.surfaceText, workspace.workspaceExists ? 0.2 : 0.1)
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    MouseArea {
+                        id: workspaceArea
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton
+                        onClicked: {
+                            if (root.draggingTargetWorkspace === -1) {
+                                root.overviewOpen = false;
+                                HyprlandService.focusWorkspace(workspace.workspaceValue);
                             }
+                        }
+                    }
 
-                            MouseArea {
-                                id: workspaceArea
-                                anchors.fill: parent
-                                acceptedButtons: Qt.LeftButton
-                                onClicked: {
-                                    if (root.draggingTargetWorkspace === -1) {
-                                        root.overviewOpen = false;
-                                        Hyprland.dispatch(`workspace ${workspaceValue}`);
-                                    }
-                                }
-                            }
-
-                            DropArea {
-                                anchors.fill: parent
-                                onEntered: {
-                                    root.draggingTargetWorkspace = workspaceValue;
-                                    if (root.draggingFromWorkspace == root.draggingTargetWorkspace)
-                                        return;
-                                    hoveredWhileDragging = true;
-                                }
-                                onExited: {
-                                    hoveredWhileDragging = false;
-                                    if (root.draggingTargetWorkspace == workspaceValue)
-                                        root.draggingTargetWorkspace = -1;
-                                }
-                            }
+                    DropArea {
+                        anchors.fill: parent
+                        onEntered: {
+                            root.draggingTargetWorkspace = workspace.workspaceValue;
+                            if (root.draggingFromWorkspace == root.draggingTargetWorkspace)
+                                return;
+                            workspace.hoveredWhileDragging = true;
+                        }
+                        onExited: {
+                            workspace.hoveredWhileDragging = false;
+                            if (root.draggingTargetWorkspace == workspace.workspaceValue)
+                                root.draggingTargetWorkspace = -1;
                         }
                     }
                 }
@@ -251,8 +376,8 @@ Item {
         Item {
             id: windowSpace
             anchors.centerIn: parent
-            implicitWidth: workspaceColumnLayout.implicitWidth
-            implicitHeight: workspaceColumnLayout.implicitHeight
+            implicitWidth: workspaceGrid.implicitWidth
+            implicitHeight: workspaceGrid.implicitHeight
 
             Repeater {
                 model: ScriptModel {
@@ -288,37 +413,23 @@ Item {
 
                     overviewOpen: root.overviewOpen
                     readonly property int windowWorkspaceId: modelData?.workspace?.id ?? -1
-
-                    function getWorkspaceIndex() {
-                        if (!root.displayedWorkspaceIds || root.displayedWorkspaceIds.length === 0)
-                            return 0;
-                        if (!windowWorkspaceId || windowWorkspaceId < 0)
-                            return 0;
-                        try {
-                            for (let i = 0; i < root.displayedWorkspaceIds.length; i++) {
-                                if (root.displayedWorkspaceIds[i] === windowWorkspaceId) {
-                                    return i;
-                                }
-                            }
-                            return 0;
-                        } catch (e) {
-                            return 0;
-                        }
-                    }
-
-                    readonly property int workspaceIndex: getWorkspaceIndex()
-                    readonly property int workspaceColIndex: workspaceIndex % root.effectiveColumns
-                    readonly property int workspaceRowIndex: Math.floor(workspaceIndex / root.effectiveColumns)
+                    readonly property var workspaceCell: root.cellForWorkspace(windowWorkspaceId)
+                    readonly property real contentWidth: workspaceCell.width - root.workspaceBorderWidth * 2
+                    readonly property real contentHeight: workspaceCell.height - root.workspaceBorderWidth * 2
+                    readonly property var workspaceBounds: root.getWorkspaceViewportBounds(windowWorkspaceId, contentWidth, contentHeight)
 
                     toplevel: modelData
                     scale: root.scale
                     monitorDpr: root.dpr
-                    availableWorkspaceWidth: root.workspaceImplicitWidth
-                    availableWorkspaceHeight: root.workspaceImplicitHeight
+                    availableWorkspaceWidth: contentWidth
+                    availableWorkspaceHeight: contentHeight
+                    contentOriginX: workspaceBounds.x
+                    contentOriginY: workspaceBounds.y
+                    contentScale: workspaceBounds.scale
                     widgetMonitorId: root.monitor.id
 
-                    xOffset: (root.workspaceImplicitWidth + workspaceSpacing) * workspaceColIndex
-                    yOffset: (root.workspaceImplicitHeight + workspaceSpacing) * workspaceRowIndex
+                    xOffset: workspaceCell.x + root.workspaceBorderWidth
+                    yOffset: workspaceCell.y + root.workspaceBorderWidth
 
                     z: atInitPosition ? root.windowZ : root.windowDraggingZ
                     property bool atInitPosition: (initX == x && initY == y)
@@ -352,7 +463,7 @@ Item {
                             root.draggingTargetWorkspace = -1;
 
                             if (targetWorkspace !== -1 && targetWorkspace !== windowData?.workspace.id) {
-                                Hyprland.dispatch(`movetoworkspacesilent ${targetWorkspace},address:${windowData?.address}`);
+                                HyprlandService.moveToWorkspace(targetWorkspace, windowData?.address, false);
                                 Qt.callLater(() => {
                                     Hyprland.refreshToplevels();
                                     Hyprland.refreshWorkspaces();
@@ -372,13 +483,20 @@ Item {
                                 return;
                             if (event.button === Qt.LeftButton) {
                                 root.overviewOpen = false;
-                                Hyprland.dispatch(`focuswindow address:${windowData.address}`);
+                                HyprlandService.focusWindow(windowData.address);
                                 event.accepted = true;
                             } else if (event.button === Qt.MiddleButton) {
-                                Hyprland.dispatch(`closewindow address:${windowData.address}`);
+                                HyprlandService.closeWindow(windowData.address);
                                 event.accepted = true;
                             }
                         }
+                    }
+
+                    // on top of dragArea so a right press never starts a drag
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: mouse => root.openWindowMenu(window, mouse.x, mouse.y)
                     }
                 }
             }
@@ -387,54 +505,44 @@ Item {
         Item {
             id: monitorLabelSpace
             anchors.centerIn: parent
-            implicitWidth: workspaceColumnLayout.implicitWidth
-            implicitHeight: workspaceColumnLayout.implicitHeight
+            implicitWidth: workspaceGrid.implicitWidth
+            implicitHeight: workspaceGrid.implicitHeight
             z: root.monitorLabelZ
 
             Repeater {
-                model: root.effectiveRows
+                model: root.gridLayout.cells.length
                 delegate: Item {
-                    id: labelRow
-                    property int rowIndex: index
-                    y: (root.workspaceImplicitHeight + workspaceSpacing) * rowIndex
-                    width: parent.width
-                    height: root.workspaceImplicitHeight
+                    id: labelItem
+                    required property int index
+                    readonly property var cell: root.gridLayout.cells[index] ?? null
+                    property int workspaceValue: cell?.id ?? -1
+                    property bool workspaceExists: (root.allWorkspaceIds && workspaceValue > 0) ? root.allWorkspaceIds.includes(workspaceValue) : false
+                    property string workspaceMonitorName: (workspaceValue > 0) ? root.getWorkspaceMonitorName(workspaceValue) : ""
 
-                    Repeater {
-                        model: root.effectiveColumns
-                        delegate: Item {
-                            id: labelItem
-                            property int colIndex: index
-                            property int workspaceIndex: labelRow.rowIndex * root.effectiveColumns + colIndex
-                            property int workspaceValue: (root.displayedWorkspaceIds && workspaceIndex < root.displayedWorkspaceIds.length) ? root.displayedWorkspaceIds[workspaceIndex] : -1
-                            property bool workspaceExists: (root.allWorkspaceIds && workspaceValue > 0) ? root.allWorkspaceIds.includes(workspaceValue) : false
-                            property string workspaceMonitorName: (workspaceValue > 0) ? root.getWorkspaceMonitorName(workspaceValue) : ""
+                    x: cell?.x ?? 0
+                    y: cell?.y ?? 0
+                    width: cell?.width ?? 0
+                    height: cell?.height ?? 0
 
-                            x: (root.workspaceImplicitWidth + workspaceSpacing) * colIndex
-                            width: root.workspaceImplicitWidth
-                            height: root.workspaceImplicitHeight
+                    Rectangle {
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: Theme.spacingS
+                        width: monitorNameText.contentWidth + Theme.spacingS * 2
+                        height: monitorNameText.contentHeight + Theme.spacingXS * 2
+                        radius: Theme.cornerRadius
+                        color: Theme.chipSurface
+                        visible: labelItem.workspaceExists && labelItem.workspaceMonitorName !== ""
 
-                            Rectangle {
-                                anchors.right: parent.right
-                                anchors.top: parent.top
-                                anchors.margins: Theme.spacingS
-                                width: monitorNameText.contentWidth + Theme.spacingS * 2
-                                height: monitorNameText.contentHeight + Theme.spacingXS * 2
-                                radius: Theme.cornerRadius
-                                color: Theme.surface
-                                visible: labelItem.workspaceExists && labelItem.workspaceMonitorName !== ""
-
-                                StyledText {
-                                    id: monitorNameText
-                                    anchors.centerIn: parent
-                                    text: labelItem.workspaceMonitorName
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    font.weight: Font.Medium
-                                    color: Theme.surfaceText
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                }
-                            }
+                        StyledText {
+                            id: monitorNameText
+                            anchors.centerIn: parent
+                            text: labelItem.workspaceMonitorName
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.weight: Theme.fontWeightMedium
+                            color: Theme.surfaceText
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
                         }
                     }
                 }

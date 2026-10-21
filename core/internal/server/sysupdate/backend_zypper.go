@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"os/exec"
+	"strings"
 )
 
 func init() {
@@ -74,11 +76,34 @@ func (zypperBackend) Upgrade(ctx context.Context, opts UpgradeOptions, onLine fu
 	if opts.DryRun {
 		return Run(ctx, []string{"zypper", "--non-interactive", "--dry-run", "update"}, RunOptions{OnLine: onLine})
 	}
-	names := pickTargetNames(opts.Targets, "zypper", true)
-	if len(names) == 0 {
+	if !BackendHasTargets(zypperBackend{}, opts.Targets, opts.IncludeAUR, opts.IncludeFlatpak) {
 		return nil
 	}
-	privesc := privescBin(opts.UseSudo)
-	argv := append([]string{privesc, "zypper", "--non-interactive", "update"}, names...)
-	return Run(ctx, argv, RunOptions{OnLine: onLine})
+	return Run(ctx, zypperUpgradeArgv(opts), RunOptions{OnLine: onLine, AttachStdio: opts.AttachStdio})
+}
+
+func zypperUpgradeArgv(opts UpgradeOptions) []string {
+	ignored := shellSafeNames(opts.Ignored)
+	if len(ignored) == 0 {
+		return privilegedArgv(opts, zypperUpdateArgv(opts)...)
+	}
+	return privilegedArgv(opts, "sh", "-c", zypperLockScript(ignored, strings.Join(zypperUpdateArgv(opts), " ")))
+}
+
+func zypperUpdateArgv(opts UpgradeOptions) []string {
+	if opts.Interactive {
+		return []string{"zypper", "update"}
+	}
+	return []string{"zypper", "--non-interactive", "update"}
+}
+
+// zypperLockScript locks ignored packages only for the update, leaving pre-existing user locks untouched.
+func zypperLockScript(ignored []string, update string) string {
+	names := strings.Join(ignored, " ")
+	return fmt.Sprintf(
+		`new=""; for p in %s; do grep -qsE "^solvable_name:[[:space:]]*$p$" /etc/zypp/locks || new="$new $p"; done; `+
+			`[ -n "$new" ] && zypper --non-interactive al $new; `+
+			`%s; rc=$?; `+
+			`[ -n "$new" ] && zypper --non-interactive rl $new; exit $rc`,
+		names, update)
 }

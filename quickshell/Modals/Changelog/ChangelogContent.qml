@@ -1,250 +1,306 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Effects
 import qs.Common
 import qs.Services
+import qs.DCommon.Widgets
 import qs.Widgets
+import qs.Modules.Settings.Widgets
 
 Column {
     id: root
 
-    readonly property real logoSize: Math.round(Theme.iconSize * 2.8)
-    readonly property real badgeHeight: Math.round(Theme.fontSizeSmall * 1.7)
+    readonly property string pluginDocsUrl: Site.docs + "/dms/plugin-development"
+    readonly property string compositorDocsUrl: Site.docs + "/dms/compositors"
 
-    topPadding: Theme.spacingL
+    readonly property var features: [
+        {
+            "icon": "palette",
+            "shape": "softBurst",
+            "hoverShape": "flower",
+            "accent": "purple",
+            "heading": "A new design",
+            "description": "Material 3 Expressive across Settings, Control Center, Dash, and every control",
+            "target": "theme_surfaces"
+        },
+        {
+            "icon": "space_dashboard",
+            "shape": "cookie9",
+            "hoverShape": "sunny",
+            "accent": "blue",
+            "heading": "Dash plugins",
+            "description": "Plugins add full tabs or overview cards, sized and ordered your way",
+            "target": "dank_dash"
+        },
+        {
+            "icon": "lock",
+            "shape": "clover4",
+            "hoverShape": "cookie4",
+            "accent": "green",
+            "heading": "Build your lock screen",
+            "description": "Place the clock, media, status, and any desktop widget where you want",
+            "target": "lock_screen"
+        },
+        {
+            "icon": "lyrics",
+            "shape": "sunny",
+            "hoverShape": "softBurst",
+            "accent": "pink",
+            "heading": "Lyrical Engine",
+            "description": "Word synced lyrics from six providers, right in the media player",
+            "target": "media_player"
+        },
+        {
+            "icon": "wallpaper",
+            "shape": "gem",
+            "hoverShape": "cookie6",
+            "accent": "orange",
+            "heading": "Material wallpapers",
+            "description": "Presets from your seed color, plus layouts from wallpaper.duxlabs.dev",
+            "target": "personalization"
+        },
+        {
+            "icon": "digital_wellbeing",
+            "shape": "puffy",
+            "hoverShape": "clover8",
+            "accent": "teal",
+            "heading": "Digital wellbeing",
+            "description": "Screen time, daily and app limits, with its own Dash tab",
+            "target": "wellbeing"
+        }
+    ]
+
+    readonly property var additions: [
+        {
+            "icon": "view_in_ar",
+            "accent": "purple",
+            "title": "Island",
+            "subtitle": "Notch mode, workspace switcher, tray slot, clipboard, and shadows",
+            "target": "dankbar_settings"
+        },
+        {
+            "icon": "grid_view",
+            "accent": "green",
+            "title": "Launcher",
+            "subtitle": "Custom keybindings, dmenu mode, Open with, and app editing",
+            "target": "launcher"
+        },
+        {
+            "icon": "dock_to_bottom",
+            "accent": "orange",
+            "title": "Dock",
+            "subtitle": "Proximity magnification and a focused app pill",
+            "target": "dock_appearance"
+        },
+        {
+            "icon": "notifications",
+            "accent": "pink",
+            "title": "Notifications",
+            "subtitle": "Rule conditions, timed app mutes, and two finger swipe to dismiss",
+            "target": "notification_rules"
+        },
+        {
+            "icon": "extension",
+            "accent": "teal",
+            "title": "Plugin browser",
+            "subtitle": "Discover shelves, quick filters, upvotes, and typo tolerant search",
+            "target": "plugins"
+        },
+        {
+            "icon": "format_paint",
+            "accent": "yellow",
+            "title": "Themes",
+            "subtitle": "Bold palettes, injected palettes, fixed radius, and terminal opacity",
+            "target": "theme"
+        },
+        {
+            "icon": "monitor",
+            "accent": "red",
+            "title": "Displays",
+            "subtitle": "Per-output ICC profiles and color temperature",
+            "target": "display_config"
+        },
+        {
+            "icon": "system_update_alt",
+            "accent": "blue",
+            "title": "Software updates",
+            "subtitle": "Update dms from Settings and switch between stable and beta",
+            "target": "updater"
+        },
+        {
+            "icon": "devices",
+            "accent": "green",
+            "title": "More platforms",
+            "subtitle": "FreeBSD, Enterprise Linux 10, Mango, Hyprland 0.56, Umbriel, and Aqueous",
+            "target": root.compositorDocsUrl
+        }
+    ]
+
+    function open(target) {
+        if (target.startsWith("https://")) {
+            Qt.openUrlExternally(target);
+            return;
+        }
+        PopoutService.openSettingsWithTab(target);
+    }
+
+    topPadding: 0
     spacing: Theme.spacingL
 
-    Column {
+    ReleaseHero {
         width: parent.width
-        spacing: Theme.spacingM
+    }
+
+    Grid {
+        id: grid
+
+        readonly property real cardWidth: (width - columnSpacing * (columns - 1)) / columns
+        readonly property real cellHeight: {
+            let tallest = 0;
+            for (const card of children)
+                tallest = Math.max(tallest, card.implicitHeight ?? 0);
+            return tallest;
+        }
+
+        width: parent.width
+        columns: 3
+        rowSpacing: Theme.spacingS
+        columnSpacing: Theme.spacingS
+        layoutDirection: I18n.isRtl ? Qt.RightToLeft : Qt.LeftToRight
+
+        Repeater {
+            model: root.features
+
+            delegate: FeatureCard {
+                required property var modelData
+
+                width: grid.cardWidth
+                height: grid.cellHeight
+                iconName: modelData.icon
+                shape: modelData.shape
+                hoverShape: modelData.hoverShape
+                accent: modelData.accent
+                heading: modelData.heading
+                description: modelData.description
+                onClicked: root.open(modelData.target)
+            }
+        }
+    }
+
+    SettingsCard {
+        title: "More in " + ChangelogService.currentVersion
+
+        Repeater {
+            model: root.additions
+
+            delegate: SettingsRow {
+                id: addition
+
+                required property var modelData
+
+                readonly property var accentPair: Theme.accent(modelData.accent)
+
+                title: modelData.title
+                subtitle: modelData.subtitle
+                resetKeys: []
+                clickable: modelData.target !== ""
+                showChevron: clickable
+                onClicked: root.open(modelData.target)
+
+                leading: Rectangle {
+                    width: SettingsMetrics.navIconSize
+                    height: width
+                    radius: Theme.fullRadius(width, height)
+                    color: addition.accentPair?.container ?? Theme.primaryContainer
+
+                    DIcon {
+                        anchors.centerIn: parent
+                        name: addition.modelData.icon
+                        size: Theme.iconSizeMedium
+                        color: addition.accentPair?.onContainer ?? Theme.onPrimaryContainer
+                    }
+                }
+            }
+        }
+    }
+
+    DCard {
+        width: parent.width
+        height: pluginNote.implicitHeight + pad * 2
+        tone: "tertiary"
+        pad: Theme.spacingL
+        restRadius: Theme.groupedListOuterRadius
 
         Row {
-            anchors.horizontalCenter: parent.horizontalCenter
-            spacing: Theme.spacingM
+            id: pluginNote
+            width: parent.width
+            spacing: Theme.spacingL
+            LayoutMirroring.enabled: I18n.isRtl
 
-            Image {
-                width: root.logoSize
-                height: width * (569.94629 / 506.50931)
-                anchors.verticalCenter: parent.verticalCenter
-                fillMode: Image.PreserveAspectFit
-                smooth: true
-                mipmap: true
-                asynchronous: true
-                source: "file://" + Theme.shellDir + "/assets/danklogonormal.svg"
-                layer.enabled: true
-                layer.smooth: true
-                layer.mipmap: true
-                layer.effect: MultiEffect {
-                    saturation: 0
-                    colorization: 1
-                    colorizationColor: Theme.primary
+            DMaterialShape {
+                width: Theme.buttonHeightM
+                height: width
+                shape: "cookie6"
+                color: Theme.onTertiaryContainer
+
+                DIcon {
+                    anchors.centerIn: parent
+                    name: "code"
+                    size: Theme.iconSize
+                    color: Theme.tertiaryContainer
                 }
             }
 
             Column {
+                width: parent.width - Theme.buttonHeightM - docsButton.width - parent.spacing * 2
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Theme.spacingXS
+                spacing: Theme.spacingXXS
 
-                Row {
-                    spacing: Theme.spacingS
-
-                    StyledText {
-                        text: "DMS " + ChangelogService.currentVersion
-                        font.pixelSize: Theme.fontSizeXLarge + 2
-                        font.weight: Font.Bold
-                        color: Theme.surfaceText
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-
-                    Rectangle {
-                        width: codenameText.implicitWidth + Theme.spacingM * 2
-                        height: root.badgeHeight
-                        radius: root.badgeHeight / 2
-                        color: Theme.primaryContainer
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        StyledText {
-                            id: codenameText
-                            anchors.centerIn: parent
-                            text: "Saffron Bloom"
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.weight: Font.Medium
-                            color: Theme.primary
-                        }
-                    }
+                StyledText {
+                    width: parent.width
+                    text: "Plugin authors"
+                    font.pixelSize: Theme.fontSizeLarge
+                    font.weight: Theme.fontWeightBold
+                    color: Theme.onTertiaryContainer
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignLeft
                 }
 
                 StyledText {
-                    text: "New launcher, enhanced plugin system, KDE Connect, & more"
+                    width: parent.width
+                    text: "The Dank* widget wrappers are deprecated. Import qs.DCommon.Widgets and use the D names, DankButton becomes DButton. Each old type logs its replacement."
                     font.pixelSize: Theme.fontSizeMedium
-                    color: Theme.surfaceVariantText
+                    color: Theme.onTertiaryContainer
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignLeft
                 }
             }
-        }
-    }
 
-    Rectangle {
-        width: parent.width
-        height: 1
-        color: Theme.outlineMedium
-        opacity: 0.3
+            DButton {
+                id: docsButton
+                anchors.verticalCenter: parent.verticalCenter
+                text: I18n.tr("Docs")
+                iconName: "open_in_new"
+                backgroundColor: Theme.onTertiaryContainer
+                textColor: Theme.tertiaryContainer
+                onClicked: Qt.openUrlExternally(root.pluginDocsUrl)
+            }
+        }
     }
 
     Column {
         width: parent.width
-        spacing: Theme.spacingM
+        visible: ChangelogService.release !== null
+        spacing: 0
 
-        StyledText {
-            text: "What's New"
-            font.pixelSize: Theme.fontSizeMedium
-            font.weight: Font.Medium
-            color: Theme.surfaceText
+        SettingsSectionLabel {
+            text: I18n.tr("What changed", "changelog section heading listing the changes in a release")
         }
 
-        Grid {
+        ReleaseNotesCard {
             width: parent.width
-            columns: 2
-            rowSpacing: Theme.spacingS
-            columnSpacing: Theme.spacingS
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "space_dashboard"
-                title: "Dank Launcher V2"
-                description: "New capabilities & plugins"
-                onClicked: PopoutService.openDankLauncherV2()
-            }
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "smartphone"
-                title: "Phone Connect"
-                description: "KDE Connect & Valent"
-                onClicked: Qt.openUrlExternally("https://github.com/AvengeMedia/dms-plugins/tree/master/DankKDEConnect")
-            }
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "monitor_heart"
-                title: "System Monitor"
-                description: "Redesigned process list"
-                onClicked: PopoutService.showProcessListModal()
-            }
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "window"
-                title: "Window Rules"
-                description: "niri window rule manager"
-                visible: CompositorService.isNiri
-                onClicked: PopoutService.openSettingsWithTab("window_rules")
-            }
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "notifications_active"
-                title: "Enhanced Notifications"
-                description: "Configurable rules & styling"
-                visible: !CompositorService.isNiri
-                onClicked: PopoutService.openSettingsWithTab("notifications")
-            }
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "dock_to_bottom"
-                title: "Dock Enhancements"
-                description: "Bar dock widget & more"
-                onClicked: PopoutService.openSettingsWithTab("dock")
-            }
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "volume_up"
-                title: "Audio Aliases"
-                description: "Custom device names"
-                onClicked: PopoutService.openSettingsWithTab("audio")
-            }
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "extension"
-                title: "Enhanced Plugin System"
-                description: "Enables new types of plugins"
-                onClicked: PopoutService.openSettingsWithTab("plugins")
-            }
-
-            ChangelogFeatureCard {
-                width: (parent.width - Theme.spacingS) / 2
-                iconName: "light_mode"
-                title: "Auto Light/Dark"
-                description: "Automatic mode switching"
-                onClicked: PopoutService.openSettingsWithTab("theme")
-            }
+            release: ChangelogService.release
+            showTitle: false
         }
-    }
-
-    Rectangle {
-        width: parent.width
-        height: 1
-        color: Theme.outlineMedium
-        opacity: 0.3
-    }
-
-    Column {
-        width: parent.width
-        spacing: Theme.spacingS
-
-        Row {
-            spacing: Theme.spacingS
-
-            DankIcon {
-                name: "warning"
-                size: Theme.iconSizeSmall
-                color: Theme.warning
-                anchors.verticalCenter: parent.verticalCenter
-            }
-
-            StyledText {
-                text: "Upgrade Notes"
-                font.pixelSize: Theme.fontSizeMedium
-                font.weight: Font.Medium
-                color: Theme.surfaceText
-                anchors.verticalCenter: parent.verticalCenter
-            }
-        }
-
-        Rectangle {
-            width: parent.width
-            height: upgradeNotesColumn.height + Theme.spacingM * 2
-            radius: Theme.cornerRadius
-            color: Theme.withAlpha(Theme.warning, 0.08)
-            border.width: 1
-            border.color: Theme.withAlpha(Theme.warning, 0.2)
-
-            Column {
-                id: upgradeNotesColumn
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: Theme.spacingM
-                spacing: Theme.spacingS
-
-                ChangelogUpgradeNote {
-                    width: parent.width
-                    text: "Spotlight replaced by Dank Launcher V2 — check settings for new options"
-                }
-
-                ChangelogUpgradeNote {
-                    width: parent.width
-                    text: "Plugin API updated — third-party plugins may need updates"
-                }
-            }
-        }
-
-        // StyledText {
-        //     text: "See full release notes for migration steps"
-        //     font.pixelSize: Theme.fontSizeSmall
-        //     color: Theme.surfaceVariantText
-        //     width: parent.width
-        // }
     }
 }

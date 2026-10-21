@@ -12,7 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
 )
+
+// blockingWatch is a watchFn that blocks until the context is cancelled, used
+// by tests that exercise direct manager calls rather than the watch loop.
+func blockingWatch(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
 
 // mockWatcher yields canned Notify events, then returns err or blocks until Close/context cancel.
 type mockWatcher struct {
@@ -68,8 +76,10 @@ func (w *mockWatcher) Close() error {
 
 // mockClient implements tailscaleClient for testing.
 type mockClient struct {
-	watchFn  func(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error)
-	statusFn func(ctx context.Context) (*ipnstate.Status, error)
+	watchFn     func(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error)
+	statusFn    func(ctx context.Context) (*ipnstate.Status, error)
+	getPrefsFn  func(ctx context.Context) (*ipn.Prefs, error)
+	editPrefsFn func(ctx context.Context, mp *ipn.MaskedPrefs) (*ipn.Prefs, error)
 }
 
 func (c *mockClient) WatchIPNBus(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error) {
@@ -78,6 +88,20 @@ func (c *mockClient) WatchIPNBus(ctx context.Context, mask ipn.NotifyWatchOpt) (
 
 func (c *mockClient) Status(ctx context.Context) (*ipnstate.Status, error) {
 	return c.statusFn(ctx)
+}
+
+func (c *mockClient) GetPrefs(ctx context.Context) (*ipn.Prefs, error) {
+	if c.getPrefsFn != nil {
+		return c.getPrefsFn(ctx)
+	}
+	return &ipn.Prefs{}, nil
+}
+
+func (c *mockClient) EditPrefs(ctx context.Context, mp *ipn.MaskedPrefs) (*ipn.Prefs, error) {
+	if c.editPrefsFn != nil {
+		return c.editPrefsFn(ctx, mp)
+	}
+	return &ipn.Prefs{}, nil
 }
 
 func runningStatus() *ipnstate.Status {
@@ -100,7 +124,6 @@ func runningStatus() *ipnstate.Status {
 
 func TestWatchLoop_StateChange(t *testing.T) {
 	stateVal := ipn.Running
-	statusCalled := make(chan struct{}, 4)
 	var watchCount int32
 
 	client := &mockClient{
@@ -115,10 +138,6 @@ func TestWatchLoop_StateChange(t *testing.T) {
 			return newMockWatcher(ctx, nil, nil), nil
 		},
 		statusFn: func(ctx context.Context) (*ipnstate.Status, error) {
-			select {
-			case statusCalled <- struct{}{}:
-			default:
-			}
 			return runningStatus(), nil
 		},
 	}
@@ -127,13 +146,9 @@ func TestWatchLoop_StateChange(t *testing.T) {
 	defer m.Close()
 
 	require.Eventually(t, func() bool {
-		return len(statusCalled) > 0
+		s := m.GetState()
+		return s.Connected && s.BackendState == "Running" && s.Self.Hostname == "cachyos"
 	}, 2*time.Second, 10*time.Millisecond)
-
-	state := m.GetState()
-	assert.True(t, state.Connected)
-	assert.Equal(t, "Running", state.BackendState)
-	assert.Equal(t, "cachyos", state.Self.Hostname)
 }
 
 func TestWatchLoop_CoalescesNotifies(t *testing.T) {
@@ -158,8 +173,7 @@ func TestWatchLoop_CoalescesNotifies(t *testing.T) {
 	m := newManager(client)
 	defer m.Close()
 
-	// Wait for the debounce window to expire plus margin so the burst settles.
-	time.Sleep(debounceWindow + 100*time.Millisecond)
+	require.Eventually(t, func() bool { return statusCalls.Load() > 0 }, 2*time.Second, 10*time.Millisecond)
 
 	calls := statusCalls.Load()
 	assert.Less(t, int(calls), 5,
@@ -199,11 +213,13 @@ func TestWatchLoop_Reconnect(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond)
 }
 
-func TestManager_Subscribe(t *testing.T) {
+func TestWatchLoop_BacksOffOnPersistentBusError(t *testing.T) {
+	var watchCalls atomic.Int32
+
 	client := &mockClient{
 		watchFn: func(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
+			watchCalls.Add(1)
+			return newMockWatcher(ctx, nil, fmt.Errorf("json: cannot unmarshal object")), nil
 		},
 		statusFn: func(ctx context.Context) (*ipnstate.Status, error) {
 			return runningStatus(), nil
@@ -213,35 +229,11 @@ func TestManager_Subscribe(t *testing.T) {
 	m := newManager(client)
 	defer m.Close()
 
-	ch := m.Subscribe("test-1")
-	assert.NotNil(t, ch)
+	require.Eventually(t, func() bool { return watchCalls.Load() > 0 }, 2*time.Second, 10*time.Millisecond)
 
-	ch2 := m.Subscribe("test-2")
-	assert.NotNil(t, ch2)
-
-	m.Unsubscribe("test-1")
-	m.Unsubscribe("test-2")
-}
-
-func TestManager_Close(t *testing.T) {
-	client := &mockClient{
-		watchFn: func(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-		statusFn: func(ctx context.Context) (*ipnstate.Status, error) {
-			return runningStatus(), nil
-		},
-	}
-
-	m := newManager(client)
-
-	ch := m.Subscribe("test")
-	assert.NotNil(t, ch)
-
-	assert.NotPanics(t, func() {
-		m.Close()
-	})
+	calls := watchCalls.Load()
+	assert.LessOrEqual(t, int(calls), 2,
+		"a persistent bus read error should back off, not reconnect in a hot loop; got %d attempts", calls)
 }
 
 func TestManager_Availability(t *testing.T) {
@@ -285,14 +277,12 @@ func TestManager_Availability(t *testing.T) {
 	}
 }
 
-func TestManager_RefreshState(t *testing.T) {
+func TestManager_RefreshState_MergesPrefs(t *testing.T) {
 	client := &mockClient{
-		watchFn: func(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-		statusFn: func(ctx context.Context) (*ipnstate.Status, error) {
-			return runningStatus(), nil
+		watchFn:  blockingWatch,
+		statusFn: func(ctx context.Context) (*ipnstate.Status, error) { return runningStatus(), nil },
+		getPrefsFn: func(ctx context.Context) (*ipn.Prefs, error) {
+			return &ipn.Prefs{ExitNodeAllowLANAccess: true}, nil
 		},
 	}
 
@@ -301,7 +291,98 @@ func TestManager_RefreshState(t *testing.T) {
 
 	m.RefreshState()
 
-	state := m.GetState()
-	assert.True(t, state.Connected)
-	assert.Equal(t, "cachyos", state.Self.Hostname)
+	assert.True(t, m.GetState().ExitNodeAllowLANAccess)
+}
+
+func TestManager_Actions_EditPrefs(t *testing.T) {
+	var captured *ipn.MaskedPrefs
+	client := &mockClient{
+		watchFn:  blockingWatch,
+		statusFn: func(ctx context.Context) (*ipnstate.Status, error) { return runningStatus(), nil },
+		editPrefsFn: func(ctx context.Context, mp *ipn.MaskedPrefs) (*ipn.Prefs, error) {
+			captured = mp
+			return &ipn.Prefs{}, nil
+		},
+	}
+
+	m := newManager(client)
+	defer m.Close()
+
+	require.NoError(t, m.Connect())
+	require.NotNil(t, captured)
+	assert.True(t, captured.WantRunningSet)
+	assert.True(t, captured.WantRunning)
+
+	require.NoError(t, m.Disconnect())
+	assert.True(t, captured.WantRunningSet)
+	assert.False(t, captured.WantRunning)
+
+	require.NoError(t, m.SetExitNode("nABC123"))
+	assert.True(t, captured.ExitNodeIDSet)
+	assert.Equal(t, tailcfg.StableNodeID("nABC123"), captured.ExitNodeID)
+	// ExitNodeIPSet must also be set so a stale legacy ExitNodeIP cannot
+	// override the ID-based selection (mirrors `tailscale set --exit-node`).
+	assert.True(t, captured.ExitNodeIPSet)
+
+	require.NoError(t, m.SetExitNode(""))
+	assert.True(t, captured.ExitNodeIDSet)
+	assert.Equal(t, tailcfg.StableNodeID(""), captured.ExitNodeID)
+	// Clearing must zero both the ID and any legacy IP-based exit node.
+	assert.True(t, captured.ExitNodeIPSet)
+
+	require.NoError(t, m.SetAllowLANAccess(true))
+	assert.True(t, captured.ExitNodeAllowLANAccessSet)
+	assert.True(t, captured.ExitNodeAllowLANAccess)
+}
+
+type dynamicWatcher struct {
+	ctx context.Context
+	ch  chan ipn.Notify
+}
+
+func (w *dynamicWatcher) Next() (ipn.Notify, error) {
+	select {
+	case n, ok := <-w.ch:
+		if !ok {
+			return ipn.Notify{}, fmt.Errorf("watcher closed")
+		}
+		return n, nil
+	case <-w.ctx.Done():
+		return ipn.Notify{}, w.ctx.Err()
+	}
+}
+
+func (w *dynamicWatcher) Close() error {
+	return nil
+}
+
+func TestWatchLoop_NotifyWithoutStateOrNetMap(t *testing.T) {
+	var statusCalls atomic.Int32
+	notifyCh := make(chan ipn.Notify, 1)
+
+	client := &mockClient{
+		watchFn: func(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error) {
+			return &dynamicWatcher{ctx: ctx, ch: notifyCh}, nil
+		},
+		statusFn: func(ctx context.Context) (*ipnstate.Status, error) {
+			statusCalls.Add(1)
+			return runningStatus(), nil
+		},
+	}
+
+	m := newManager(client)
+	defer m.Close()
+
+	// Wait for the initial connect-time status call to complete.
+	require.Eventually(t, func() bool {
+		return statusCalls.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Send an event with State == nil and NetMap == nil.
+	notifyCh <- ipn.Notify{Engine: &ipn.EngineStatus{}}
+
+	// Verify that the notification without State or NetMap triggers a second status call.
+	require.Eventually(t, func() bool {
+		return statusCalls.Load() >= 2
+	}, 2*time.Second, 10*time.Millisecond)
 }

@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell.Widgets
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
 DockContextMenuBase {
     id: root
@@ -11,65 +11,113 @@ DockContextMenuBase {
     property bool hidePin: false
     property var desktopEntry: null
     property var dockApps: null
-    readonly property bool isDmsWindow: appData?.appId === "org.quickshell" || appData?.appId === "com.danklinux.dms"
+    readonly property bool isDmsWindow: Paths.isDmsAppId(appData?.appId)
+    readonly property var settingsJumpGroups: visible && appData?.appId === "dms_settings" ? buildSettingsJumpGroups() : []
 
     layerNamespace: "dms:dock-context-menu"
 
     function showForButton(button, data, dockHeight, hidePinOption, entry, dockScreen, parentDockApps) {
-        appData = data;
+        appData = Qt.binding(() => button?.appData ?? null);
         hidePin = hidePinOption || false;
         desktopEntry = entry || null;
         dockApps = parentDockApps || null;
+        options = dockApps?.options ?? ({});
         show(button, dockHeight, dockScreen);
+    }
+
+    function buildSettingsJumpGroups() {
+        const groups = [[]];
+        for (const item of SettingsTabs.structure) {
+            if (item.separator) {
+                if (groups[groups.length - 1].length > 0)
+                    groups.push([]);
+                continue;
+            }
+            const entry = SettingsTabs.page(item.id);
+            if (SettingsTabs.isVisible(entry))
+                groups[groups.length - 1].push(entry);
+        }
+        return groups.filter(group => group.length > 0);
     }
 
     Repeater {
         model: {
             if (!root.appData || root.appData.type !== "grouped")
                 return [];
-
-            const toplevels = [];
-            const allToplevels = ToplevelManager.toplevels.values;
-            for (let i = 0; i < allToplevels.length; i++) {
-                const toplevel = allToplevels[i];
-                if (toplevel.appId === root.appData.appId) {
-                    toplevels.push(toplevel);
-                }
-            }
-            return toplevels;
+            return (root.appData.allWindows || []).map(w => w.toplevel).filter(t => t != null);
         }
 
         Rectangle {
+            implicitWidth: Theme.spacingS + windowTitle.implicitWidth + Theme.spacingXS + (minimizeButton.visible ? minimizeButton.width + 2 : 0) + closeButton.width + Theme.spacingXS
             width: parent.width
             height: 28
             radius: Theme.cornerRadius
-            color: windowArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : "transparent"
+            color: windowArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : Theme.withAlpha(BlurService.hoverColor(Theme.widgetBaseHoverColor), 0)
 
             StyledText {
+                id: windowTitle
                 anchors.left: parent.left
                 anchors.leftMargin: Theme.spacingS
-                anchors.right: closeButton.left
+                anchors.right: minimizeButton.visible ? minimizeButton.left : closeButton.left
                 anchors.rightMargin: Theme.spacingXS
                 anchors.verticalCenter: parent.verticalCenter
-                text: (modelData && modelData.title) ? modelData.title : I18n.tr("(Unnamed)")
+                text: (modelData && modelData.title) ? modelData.title : I18n.tr("(Unnamed)", "dock menu fallback for a window without a title")
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.surfaceText
-                font.weight: Font.Normal
+                font.weight: Theme.fontWeight
                 elide: Text.ElideRight
                 wrapMode: Text.NoWrap
             }
 
             Rectangle {
+                id: minimizeButton
+                Accessible.role: Accessible.Button
+                Accessible.name: modelData.minimized ? I18n.tr("Restore", "verb, action restoring a minimized window") : I18n.tr("Minimize", "verb, action minimizing a window")
+                visible: CompositorService.canMinimize(modelData)
+                anchors.right: closeButton.left
+                anchors.rightMargin: 2
+                anchors.verticalCenter: parent.verticalCenter
+                width: 20
+                height: 20
+                radius: Theme.cornerRadiusS
+                color: minimizeMouseArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : "transparent"
+
+                DIcon {
+                    anchors.centerIn: parent
+                    name: modelData.minimized ? "expand_content" : "minimize"
+                    size: 12
+                    color: Theme.surfaceText
+                }
+
+                MouseArea {
+                    id: minimizeMouseArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        if (modelData.minimized) {
+                            CompositorService.activateToplevel(modelData);
+                        } else {
+                            modelData.minimized = true;
+                        }
+                        root.close();
+                    }
+                }
+            }
+
+            Rectangle {
                 id: closeButton
+                Accessible.role: Accessible.Button
+                Accessible.name: I18n.tr("Close Window")
                 anchors.right: parent.right
                 anchors.rightMargin: Theme.spacingXS
                 anchors.verticalCenter: parent.verticalCenter
                 width: 20
                 height: 20
-                radius: 10
-                color: closeMouseArea.containsMouse ? Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.2) : "transparent"
+                radius: Theme.cornerRadiusS
+                color: closeMouseArea.containsMouse ? Theme.errorPressed : Theme.withAlpha(Theme.errorPressed, 0)
 
-                DankIcon {
+                DIcon {
                     anchors.centerIn: parent
                     name: "close"
                     size: 12
@@ -90,7 +138,7 @@ DockContextMenuBase {
                 }
             }
 
-            DankRipple {
+            DRipple {
                 id: windowRipple
                 rippleColor: Theme.surfaceText
                 cornerRadius: Theme.cornerRadius
@@ -99,14 +147,12 @@ DockContextMenuBase {
             MouseArea {
                 id: windowArea
                 anchors.fill: parent
-                anchors.rightMargin: 24
+                anchors.rightMargin: minimizeButton.visible ? 46 : 24
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onPressed: mouse => windowRipple.trigger(mouse.x, mouse.y)
                 onClicked: {
-                    if (modelData && modelData.activate) {
-                        modelData.activate();
-                    }
+                    CompositorService.activateToplevel(modelData);
                     root.close();
                 }
             }
@@ -123,53 +169,53 @@ DockContextMenuBase {
         }
         width: parent.width
         height: 1
-        color: Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.2)
+        color: Theme.outlineHeavy
     }
 
     Repeater {
         model: root.desktopEntry && root.desktopEntry.actions ? root.desktopEntry.actions : []
 
         Rectangle {
+            implicitWidth: Theme.spacingS * 2 + (actionIcon.visible ? actionIcon.width + Theme.spacingXS : 0) + actionLabel.implicitWidth
             width: parent.width
             height: 28
             radius: Theme.cornerRadius
-            color: actionArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : "transparent"
+            color: actionArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : Theme.withAlpha(BlurService.hoverColor(Theme.widgetBaseHoverColor), 0)
 
-            Row {
+            Item {
+                id: actionIcon
                 anchors.left: parent.left
                 anchors.leftMargin: Theme.spacingS
-                anchors.right: parent.right
-                anchors.rightMargin: Theme.spacingS
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Theme.spacingXS
+                width: 16
+                height: 16
+                visible: modelData.icon && modelData.icon !== ""
 
-                Item {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: 16
-                    height: 16
-                    visible: modelData.icon && modelData.icon !== ""
-
-                    IconImage {
-                        anchors.fill: parent
-                        source: modelData.icon ? Paths.resolveIconPath(modelData.icon) : ""
-                        smooth: true
-                        asynchronous: true
-                        visible: status === Image.Ready
-                    }
-                }
-
-                StyledText {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: modelData.name || ""
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.surfaceText
-                    font.weight: Font.Normal
-                    elide: Text.ElideRight
-                    wrapMode: Text.NoWrap
+                IconImage {
+                    anchors.fill: parent
+                    source: modelData.icon ? Paths.resolveIconPath(modelData.icon) : ""
+                    smooth: true
+                    asynchronous: true
+                    visible: status === Image.Ready
                 }
             }
 
-            DankRipple {
+            StyledText {
+                id: actionLabel
+                anchors.left: actionIcon.visible ? actionIcon.right : parent.left
+                anchors.leftMargin: actionIcon.visible ? Theme.spacingXS : Theme.spacingS
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacingS
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.name || ""
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.surfaceText
+                font.weight: Theme.fontWeight
+                elide: Text.ElideRight
+                wrapMode: Text.NoWrap
+            }
+
+            DRipple {
                 id: actionRipple
                 rippleColor: Theme.surfaceText
                 cornerRadius: Theme.cornerRadius
@@ -191,6 +237,50 @@ DockContextMenuBase {
         }
     }
 
+    Repeater {
+        model: root.settingsJumpGroups
+
+        Column {
+            id: jumpGroup
+
+            required property var modelData
+            required property int index
+
+            width: parent.width
+            spacing: 1
+
+            Rectangle {
+                visible: jumpGroup.index > 0
+                width: parent.width
+                height: 1
+                color: Theme.outlineHeavy
+            }
+
+            Repeater {
+                model: jumpGroup.modelData
+
+                DockTrashMenuItem {
+                    required property var modelData
+
+                    width: parent.width
+                    text: modelData.text
+                    iconName: modelData.icon
+                    onTriggered: {
+                        PopoutService.openSettingsWithTab(modelData.id);
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        visible: root.settingsJumpGroups.length > 0 && !root.hidePin
+        width: parent.width
+        height: 1
+        color: Theme.outlineHeavy
+    }
+
     Rectangle {
         visible: {
             if (!root.desktopEntry?.actions || root.desktopEntry.actions.length === 0) {
@@ -200,44 +290,44 @@ DockContextMenuBase {
         }
         width: parent.width
         height: 1
-        color: Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.2)
+        color: Theme.outlineHeavy
     }
 
     Rectangle {
         visible: !root.hidePin
+        implicitWidth: Theme.spacingS * 2 + pinIcon.width + Theme.spacingXS + pinLabel.implicitWidth
         width: parent.width
         height: 28
         radius: Theme.cornerRadius
-        color: pinArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : "transparent"
+        color: pinArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : Theme.withAlpha(BlurService.hoverColor(Theme.widgetBaseHoverColor), 0)
 
-        Row {
+        DIcon {
+            id: pinIcon
             anchors.left: parent.left
             anchors.leftMargin: Theme.spacingS
+            anchors.verticalCenter: parent.verticalCenter
+            name: root.appData && root.appData.isPinned ? "keep_off" : "push_pin"
+            size: 14
+            color: Theme.surfaceText
+            opacity: 0.7
+        }
+
+        StyledText {
+            id: pinLabel
+            anchors.left: pinIcon.right
+            anchors.leftMargin: Theme.spacingXS
             anchors.right: parent.right
             anchors.rightMargin: Theme.spacingS
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Theme.spacingXS
-
-            DankIcon {
-                anchors.verticalCenter: parent.verticalCenter
-                name: root.appData && root.appData.isPinned ? "keep_off" : "push_pin"
-                size: 14
-                color: Theme.surfaceText
-                opacity: 0.7
-            }
-
-            StyledText {
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.appData && root.appData.isPinned ? I18n.tr("Unpin from Dock") : I18n.tr("Pin to Dock")
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                font.weight: Font.Normal
-                elide: Text.ElideRight
-                wrapMode: Text.NoWrap
-            }
+            text: root.appData && root.appData.isPinned ? I18n.tr("Unpin from Dock") : I18n.tr("Pin to Dock")
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceText
+            font.weight: Theme.fontWeight
+            elide: Text.ElideRight
+            wrapMode: Text.NoWrap
         }
 
-        DankRipple {
+        DRipple {
             id: pinRipple
             rippleColor: Theme.surfaceText
             cornerRadius: Theme.cornerRadius
@@ -254,9 +344,9 @@ DockContextMenuBase {
                     return;
 
                 if (root.appData.isPinned) {
-                    SessionData.removePinnedApp(root.appData.appId);
+                    root.dockApps.removePinnedApp(root.appData.appId);
                 } else {
-                    SessionData.addPinnedApp(root.appData.appId);
+                    root.dockApps.addPinnedApp(root.appData.appId);
                 }
                 root.close();
             }
@@ -273,44 +363,44 @@ DockContextMenuBase {
         }
         width: parent.width
         height: 1
-        color: Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.2)
+        color: Theme.outlineHeavy
     }
 
     Rectangle {
         visible: !root.isDmsWindow && root.desktopEntry && SessionService.nvidiaCommand
+        implicitWidth: Theme.spacingS * 2 + nvidiaIcon.width + Theme.spacingXS + nvidiaLabel.implicitWidth
         width: parent.width
         height: 28
         radius: Theme.cornerRadius
-        color: nvidiaArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : "transparent"
+        color: nvidiaArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : Theme.withAlpha(BlurService.hoverColor(Theme.widgetBaseHoverColor), 0)
 
-        Row {
+        DIcon {
+            id: nvidiaIcon
             anchors.left: parent.left
             anchors.leftMargin: Theme.spacingS
+            anchors.verticalCenter: parent.verticalCenter
+            name: "memory"
+            size: 14
+            color: Theme.surfaceText
+            opacity: 0.7
+        }
+
+        StyledText {
+            id: nvidiaLabel
+            anchors.left: nvidiaIcon.right
+            anchors.leftMargin: Theme.spacingXS
             anchors.right: parent.right
             anchors.rightMargin: Theme.spacingS
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Theme.spacingXS
-
-            DankIcon {
-                anchors.verticalCenter: parent.verticalCenter
-                name: "memory"
-                size: 14
-                color: Theme.surfaceText
-                opacity: 0.7
-            }
-
-            StyledText {
-                anchors.verticalCenter: parent.verticalCenter
-                text: I18n.tr("Launch on dGPU")
-                font.pixelSize: Theme.fontSizeSmall
-                color: Theme.surfaceText
-                font.weight: Font.Normal
-                elide: Text.ElideRight
-                wrapMode: Text.NoWrap
-            }
+            text: I18n.tr("Launch on dGPU")
+            font.pixelSize: Theme.fontSizeSmall
+            color: Theme.surfaceText
+            font.weight: Theme.fontWeight
+            elide: Text.ElideRight
+            wrapMode: Text.NoWrap
         }
 
-        DankRipple {
+        DRipple {
             id: nvidiaRipple
             rippleColor: Theme.surfaceText
             cornerRadius: Theme.cornerRadius
@@ -333,39 +423,39 @@ DockContextMenuBase {
 
     Rectangle {
         visible: root.appData && (root.appData.type === "window" || (root.appData.type === "grouped" && root.appData.windowCount > 0))
+        implicitWidth: Theme.spacingS * 2 + closeIcon.width + Theme.spacingXS + closeLabel.implicitWidth
         width: parent.width
         height: 28
         radius: Theme.cornerRadius
-        color: closeArea.containsMouse ? Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.12) : "transparent"
+        color: closeArea.containsMouse ? Theme.errorHover : Theme.withAlpha(Theme.errorHover, 0)
 
-        Row {
+        DIcon {
+            id: closeIcon
             anchors.left: parent.left
             anchors.leftMargin: Theme.spacingS
+            anchors.verticalCenter: parent.verticalCenter
+            name: "close"
+            size: 14
+            color: closeArea.containsMouse ? Theme.error : Theme.surfaceText
+            opacity: 0.7
+        }
+
+        StyledText {
+            id: closeLabel
+            anchors.left: closeIcon.right
+            anchors.leftMargin: Theme.spacingXS
             anchors.right: parent.right
             anchors.rightMargin: Theme.spacingS
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Theme.spacingXS
-
-            DankIcon {
-                anchors.verticalCenter: parent.verticalCenter
-                name: "close"
-                size: 14
-                color: closeArea.containsMouse ? Theme.error : Theme.surfaceText
-                opacity: 0.7
-            }
-
-            StyledText {
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.appData && root.appData.type === "grouped" ? I18n.tr("Close All Windows") : I18n.tr("Close Window")
-                font.pixelSize: Theme.fontSizeSmall
-                color: closeArea.containsMouse ? Theme.error : Theme.surfaceText
-                font.weight: Font.Normal
-                elide: Text.ElideRight
-                wrapMode: Text.NoWrap
-            }
+            text: root.appData && root.appData.type === "grouped" ? I18n.tr("Close All Windows") : I18n.tr("Close Window")
+            font.pixelSize: Theme.fontSizeSmall
+            color: closeArea.containsMouse ? Theme.error : Theme.surfaceText
+            font.weight: Theme.fontWeight
+            elide: Text.ElideRight
+            wrapMode: Text.NoWrap
         }
 
-        DankRipple {
+        DRipple {
             id: closeRipple
             rippleColor: Theme.error
             cornerRadius: Theme.cornerRadius
@@ -385,6 +475,16 @@ DockContextMenuBase {
                 }
                 root.close();
             }
+        }
+    }
+    DockTrashMenuItem {
+        visible: root.dockApps?.surfaceContext?.kind === "dock"
+        width: parent.width
+        text: I18n.tr("Edit widgets")
+        iconName: "edit"
+        onTriggered: {
+            root.dockApps.surfaceContext.host.editMode = true;
+            root.close();
         }
     }
 }

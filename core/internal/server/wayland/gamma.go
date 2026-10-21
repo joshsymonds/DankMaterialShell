@@ -2,6 +2,8 @@ package wayland
 
 import (
 	"math"
+
+	"github.com/duxlabs-dev/dux-shell/core/internal/icc"
 )
 
 type GammaRamp struct {
@@ -114,10 +116,7 @@ func calcWhitepoint(temp int) rgb {
 		wp.x = x1*sineFactor + x2*(1.0-sineFactor)
 		wp.y = y1*sineFactor + y2*(1.0-sineFactor)
 	default:
-		t := temp
-		if t < 1667 {
-			t = 1667
-		}
+		t := max(temp, 1667)
 		x, y, _ := planckianLocus(t)
 		wp.x = x
 		wp.y = y
@@ -130,7 +129,11 @@ func calcWhitepoint(temp int) rgb {
 	return wpRGB
 }
 
-func GenerateGammaRamp(size uint32, temp int, gamma float64) GammaRamp {
+func applyContrast(val, contrast float64) float64 {
+	return clamp01((val-0.5)*contrast + 0.5)
+}
+
+func GenerateGammaRamp(size uint32, temp int, gamma, contrast float64) GammaRamp {
 	ramp := GammaRamp{
 		Red:   make([]uint16, size),
 		Green: make([]uint16, size),
@@ -139,14 +142,27 @@ func GenerateGammaRamp(size uint32, temp int, gamma float64) GammaRamp {
 
 	wp := calcWhitepoint(temp)
 
-	for i := uint32(0); i < size; i++ {
-		val := float64(i) / float64(size-1)
+	for i := range size {
+		val := applyContrast(float64(i)/float64(size-1), contrast)
 		ramp.Red[i] = uint16(clamp01(math.Pow(val*wp.r, 1.0/gamma)) * 65535.0)
 		ramp.Green[i] = uint16(clamp01(math.Pow(val*wp.g, 1.0/gamma)) * 65535.0)
 		ramp.Blue[i] = uint16(clamp01(math.Pow(val*wp.b, 1.0/gamma)) * 65535.0)
 	}
 
 	return ramp
+}
+
+func brightnessScale(percent int) float64 {
+	return outputBrightnessFloor + (1-outputBrightnessFloor)*float64(percent)/100
+}
+
+// scaleRamp dims the ramp in perceived brightness, not light output.
+func scaleRamp(ramp GammaRamp, factor float64) {
+	for _, channel := range [][]uint16{ramp.Red, ramp.Green, ramp.Blue} {
+		for i, v := range channel {
+			channel[i] = uint16(float64(v) * factor)
+		}
+	}
 }
 
 func GenerateIdentityRamp(size uint32) GammaRamp {
@@ -156,7 +172,7 @@ func GenerateIdentityRamp(size uint32) GammaRamp {
 		Blue:  make([]uint16, size),
 	}
 
-	for i := uint32(0); i < size; i++ {
+	for i := range size {
 		val := uint16((float64(i) / float64(size-1)) * 65535.0)
 		ramp.Red[i] = val
 		ramp.Green[i] = val
@@ -164,4 +180,53 @@ func GenerateIdentityRamp(size uint32) GammaRamp {
 	}
 
 	return ramp
+}
+
+// ProfileRampWithTemp builds the ramp for an output with an ICC profile: the
+// vcgt table is sampled at the contrast-adjusted input, the user gamma is
+// applied to the result, and a temperature target (targetTemp > 0) is composed
+// as the white point ratio against baseTemp, the profile's reference white.
+func ProfileRampWithTemp(size uint32, profile *icc.Profile, baseTemp, targetTemp int, gamma, contrast float64) (GammaRamp, error) {
+	iccRamp, err := icc.GenerateGammaRampAt(size, profile, func(t float64) float64 { return applyContrast(t, contrast) })
+	if err != nil {
+		return GammaRamp{}, err
+	}
+
+	tint := whitepointRatio(baseTemp, targetTemp)
+	ramp := GammaRamp{
+		Red:   make([]uint16, size),
+		Green: make([]uint16, size),
+		Blue:  make([]uint16, size),
+	}
+	for i := range size {
+		ramp.Red[i] = adjustRampValue(iccRamp.Red[i], tint.r, gamma)
+		ramp.Green[i] = adjustRampValue(iccRamp.Green[i], tint.g, gamma)
+		ramp.Blue[i] = adjustRampValue(iccRamp.Blue[i], tint.b, gamma)
+	}
+	return ramp, nil
+}
+
+func whitepointRatio(baseTemp, targetTemp int) rgb {
+	if targetTemp <= 0 || targetTemp == baseTemp {
+		return rgb{r: 1, g: 1, b: 1}
+	}
+	base := calcWhitepoint(baseTemp)
+	target := calcWhitepoint(targetTemp)
+	return rgb{
+		r: channelRatio(target.r, base.r),
+		g: channelRatio(target.g, base.g),
+		b: channelRatio(target.b, base.b),
+	}
+}
+
+func channelRatio(target, base float64) float64 {
+	if base <= 0 {
+		return 1
+	}
+	return target / base
+}
+
+func adjustRampValue(value uint16, tint, gamma float64) uint16 {
+	linear := clamp01(float64(value) / 65535.0 * tint)
+	return uint16(math.Round(clamp01(math.Pow(linear, 1.0/gamma)) * 65535.0))
 }

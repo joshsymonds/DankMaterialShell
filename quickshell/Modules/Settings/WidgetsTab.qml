@@ -1,15 +1,29 @@
 import QtQuick
-import QtQuick.Layouts
 import Quickshell
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
+import qs.Modules.Settings.Widgets
 
 Item {
     id: widgetsTab
 
     property var parentModal: null
-    property string selectedBarId: "default"
+    property string selectedBarId: SettingsUiState.selectedBarId
+
+    onSelectedBarIdChanged: {
+        if (SettingsUiState.selectedBarId !== selectedBarId)
+            SettingsUiState.selectedBarId = selectedBarId;
+    }
+
+    Connections {
+        target: SettingsUiState
+
+        function onSelectedBarIdChanged() {
+            if (widgetsTab.selectedBarId !== SettingsUiState.selectedBarId)
+                widgetsTab.selectedBarId = SettingsUiState.selectedBarId;
+        }
+    }
 
     property var selectedBarConfig: {
         selectedBarId;
@@ -24,245 +38,86 @@ Item {
         return pos === SettingsData.Position.Left || pos === SettingsData.Position.Right;
     }
 
-    property bool hasMultipleBars: SettingsData.barConfigs.length > 1
+    readonly property bool dankIslandOwnsSelectedBarCenter: {
+        SettingsData.barConfigs;
+        selectedBarId;
+        return SettingsData.isIslandBarConfig(SettingsData.getBarConfig(selectedBarId));
+    }
 
-    DankTooltipV2 {
-        id: sharedTooltip
+    readonly property bool islandSatellitesHidden: {
+        SettingsData.barConfigs;
+        selectedBarId;
+        const bc = SettingsData.getBarConfig(selectedBarId);
+        if (!SettingsData.isIslandBarConfig(bc))
+            return false;
+        return SettingsData.isDotBarConfig(bc) || !SettingsData.islandSetting(bc, "islandSatellitesEnabled");
+    }
+
+    property bool hasMultipleBars: SettingsData.barConfigs.length > 1
+    property int pluginCatalogRevision: 0
+
+    property string highlightedId: ""
+    property string highlightedSection: ""
+
+    property alias reorderGroup: dragGroup
+
+    SettingsReorderGroup {
+        id: dragGroup
+
+        coordinateItem: widgetsTab
+        onTransferred: (source, sourceIndex, target, targetIndex) => widgetsTab.moveWidget(source.groupKey, target.groupKey, source.model[sourceIndex].id, targetIndex, sourceIndex)
+    }
+
+    readonly property var widgetAvailability: {
+        const dgopWarning = DgopService.dgopAvailable ? undefined : I18n.tr("Requires 'dgop' tool");
+        return {
+            "layout": {
+                "enabled": CompositorService.isMango && MangoService.available,
+                "warning": !CompositorService.isMango ? I18n.tr("Requires MangoWC compositor") : (!MangoService.available ? I18n.tr("Mango service not available") : undefined)
+            },
+            "cpuUsage": {
+                "enabled": DgopService.dgopAvailable,
+                "warning": dgopWarning
+            },
+            "memUsage": {
+                "enabled": DgopService.dgopAvailable,
+                "warning": dgopWarning
+            },
+            "diskUsage": {
+                "enabled": DgopService.dgopAvailable,
+                "warning": dgopWarning
+            },
+            "cpuTemp": {
+                "enabled": DgopService.dgopAvailable,
+                "warning": dgopWarning
+            },
+            "gpuTemp": {
+                "enabled": DgopService.dgopAvailable,
+                "warning": dgopWarning ?? I18n.tr("This widget prevents GPU power off states, which can significantly impact battery life on laptops. It is not recommended to use this on laptops with hybrid graphics.")
+            },
+            "network_speed_monitor": {
+                "enabled": DgopService.dgopAvailable,
+                "warning": dgopWarning
+            },
+            "systemUpdate": {
+                "enabled": SystemUpdateService.sysupdateAvailable,
+                "warning": SystemUpdateService.sysupdateAvailable ? undefined : I18n.tr("Requires DMS server with sysupdate capability")
+            }
+        };
     }
 
     property var baseWidgetDefinitions: {
-        var coreWidgets = [
-            {
-                "id": "layout",
-                "text": I18n.tr("Layout"),
-                "description": I18n.tr("Display and switch DWL layouts"),
-                "icon": "view_quilt",
-                "enabled": CompositorService.isDwl && DwlService.dwlAvailable,
-                "warning": !CompositorService.isDwl ? I18n.tr("Requires DWL compositor") : (!DwlService.dwlAvailable ? I18n.tr("DWL service not available") : undefined)
-            },
-            {
-                "id": "launcherButton",
-                "text": I18n.tr("App Launcher"),
-                "description": I18n.tr("Quick access to application launcher"),
-                "icon": "apps",
+        pluginCatalogRevision;
+        var coreWidgets = BarWidgetCatalog.widgets.map(widget => Object.assign({
                 "enabled": true
-            },
-            {
-                "id": "workspaceSwitcher",
-                "text": I18n.tr("Workspace Switcher"),
-                "description": I18n.tr("Shows current workspace and allows switching"),
-                "icon": "view_module",
-                "enabled": true
-            },
-            {
-                "id": "focusedWindow",
-                "text": I18n.tr("Focused Window"),
-                "description": I18n.tr("Display currently focused application title"),
-                "icon": "window",
-                "enabled": true
-            },
-            {
-                "id": "runningApps",
-                "text": I18n.tr("Running Apps"),
-                "description": I18n.tr("Shows all running applications with focus indication"),
-                "icon": "apps",
-                "enabled": true
-            },
-            {
-                "id": "appsDock",
-                "text": I18n.tr("Apps Dock"),
-                "description": I18n.tr("Pinned and running apps with drag-and-drop"),
-                "icon": "dock_to_bottom",
-                "enabled": true
-            },
-            {
-                "id": "clock",
-                "text": I18n.tr("Clock"),
-                "description": I18n.tr("Current time and date display"),
-                "icon": "schedule",
-                "enabled": true
-            },
-            {
-                "id": "weather",
-                "text": I18n.tr("Weather Widget"),
-                "description": I18n.tr("Current weather conditions and temperature"),
-                "icon": "wb_sunny",
-                "enabled": true
-            },
-            {
-                "id": "music",
-                "text": I18n.tr("Media Controls"),
-                "description": I18n.tr("Control currently playing media"),
-                "icon": "music_note",
-                "enabled": true
-            },
-            {
-                "id": "clipboard",
-                "text": I18n.tr("Clipboard Manager"),
-                "description": I18n.tr("Access clipboard history"),
-                "icon": "content_paste",
-                "enabled": true
-            },
-            {
-                "id": "cpuUsage",
-                "text": I18n.tr("CPU Usage"),
-                "description": I18n.tr("CPU usage indicator"),
-                "icon": "memory",
-                "enabled": DgopService.dgopAvailable,
-                "warning": !DgopService.dgopAvailable ? I18n.tr("Requires 'dgop' tool") : undefined
-            },
-            {
-                "id": "memUsage",
-                "text": I18n.tr("Memory Usage"),
-                "description": I18n.tr("Memory usage indicator"),
-                "icon": "developer_board",
-                "enabled": DgopService.dgopAvailable,
-                "warning": !DgopService.dgopAvailable ? I18n.tr("Requires 'dgop' tool") : undefined
-            },
-            {
-                "id": "diskUsage",
-                "text": I18n.tr("Disk Usage"),
-                "description": I18n.tr("Percentage"),
-                "icon": "storage",
-                "enabled": DgopService.dgopAvailable,
-                "warning": !DgopService.dgopAvailable ? I18n.tr("Requires 'dgop' tool") : undefined
-            },
-            {
-                "id": "cpuTemp",
-                "text": I18n.tr("CPU Temperature"),
-                "description": I18n.tr("CPU temperature display"),
-                "icon": "device_thermostat",
-                "enabled": DgopService.dgopAvailable,
-                "warning": !DgopService.dgopAvailable ? I18n.tr("Requires 'dgop' tool") : undefined
-            },
-            {
-                "id": "gpuTemp",
-                "text": I18n.tr("GPU Temperature"),
-                "description": I18n.tr("GPU temperature display"),
-                "icon": "auto_awesome_mosaic",
-                "warning": !DgopService.dgopAvailable ? I18n.tr("Requires 'dgop' tool") : I18n.tr("This widget prevents GPU power off states, which can significantly impact battery life on laptops. It is not recommended to use this on laptops with hybrid graphics."),
-                "enabled": DgopService.dgopAvailable
-            },
-            {
-                "id": "systemTray",
-                "text": I18n.tr("System Tray"),
-                "description": I18n.tr("System notification area icons"),
-                "icon": "notifications",
-                "enabled": true
-            },
-            {
-                "id": "privacyIndicator",
-                "text": I18n.tr("Privacy Indicator"),
-                "description": I18n.tr("Shows when microphone, camera, or screen sharing is active"),
-                "icon": "privacy_tip",
-                "enabled": true
-            },
-            {
-                "id": "controlCenterButton",
-                "text": I18n.tr("Control Center"),
-                "description": I18n.tr("Access to system controls and settings"),
-                "icon": "settings",
-                "enabled": true
-            },
-            {
-                "id": "notificationButton",
-                "text": I18n.tr("Notification Center"),
-                "description": I18n.tr("Access to notifications and do not disturb"),
-                "icon": "notifications",
-                "enabled": true
-            },
-            {
-                "id": "battery",
-                "text": I18n.tr("Battery"),
-                "description": I18n.tr("Battery level and power management"),
-                "icon": "battery_std",
-                "enabled": true
-            },
-            {
-                "id": "vpn",
-                "text": I18n.tr("VPN"),
-                "description": I18n.tr("VPN status and quick connect"),
-                "icon": "vpn_lock",
-                "enabled": true
-            },
-            {
-                "id": "idleInhibitor",
-                "text": I18n.tr("Idle Inhibitor"),
-                "description": I18n.tr("Prevent screen timeout"),
-                "icon": "motion_sensor_active",
-                "enabled": true
-            },
-            {
-                "id": "capsLockIndicator",
-                "text": I18n.tr("Caps Lock Indicator"),
-                "description": I18n.tr("Shows when caps lock is active"),
-                "icon": "shift_lock",
-                "enabled": true
-            },
-            {
-                "id": "spacer",
-                "text": I18n.tr("Spacer"),
-                "description": I18n.tr("Customizable empty space"),
-                "icon": "more_horiz",
-                "enabled": true
-            },
-            {
-                "id": "separator",
-                "text": I18n.tr("Separator"),
-                "description": I18n.tr("Visual divider between widgets"),
-                "icon": "remove",
-                "enabled": true
-            },
-            {
-                "id": "network_speed_monitor",
-                "text": I18n.tr("Network Speed Monitor"),
-                "description": I18n.tr("Network download and upload speed display"),
-                "icon": "network_check",
-                "warning": !DgopService.dgopAvailable ? I18n.tr("Requires 'dgop' tool") : undefined,
-                "enabled": DgopService.dgopAvailable
-            },
-            {
-                "id": "keyboard_layout_name",
-                "text": I18n.tr("Keyboard Layout Name"),
-                "description": I18n.tr("Displays the active keyboard layout and allows switching"),
-                "icon": "keyboard"
-            },
-            {
-                "id": "notepadButton",
-                "text": I18n.tr("Notepad"),
-                "description": I18n.tr("Quick access to notepad"),
-                "icon": "assignment",
-                "enabled": true
-            },
-            {
-                "id": "colorPicker",
-                "text": I18n.tr("Color Picker"),
-                "description": I18n.tr("Quick access to color picker"),
-                "icon": "palette",
-                "enabled": true
-            },
-            {
-                "id": "systemUpdate",
-                "text": I18n.tr("System Update"),
-                "description": I18n.tr("Check for system updates"),
-                "icon": "update",
-                "enabled": SystemUpdateService.sysupdateAvailable,
-                "warning": SystemUpdateService.sysupdateAvailable ? undefined : I18n.tr("Requires DMS server with sysupdate capability")
-            },
-            {
-                "id": "powerMenuButton",
-                "text": I18n.tr("Power"),
-                "description": I18n.tr("Display the power system menu"),
-                "icon": "power_settings_new",
-                "enabled": true
-            },
-        ];
+            }, widget, widgetsTab.widgetAvailability[widget.id] ?? {}));
 
         var allPluginVariants = PluginService.getAllPluginVariants();
         for (var i = 0; i < allPluginVariants.length; i++) {
             var variant = allPluginVariants[i];
             coreWidgets.push({
                 "id": variant.fullId,
+                "pluginId": variant.pluginId,
                 "text": variant.name,
                 "description": variant.description,
                 "icon": variant.icon,
@@ -272,6 +127,83 @@ Item {
         }
 
         return coreWidgets;
+    }
+
+    focus: true
+    Keys.onPressed: function (event) {
+        var flat = flatList();
+        if (flat.length === 0)
+            return;
+        var ctrl = (event.modifiers & Qt.ControlModifier) !== 0;
+        if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
+            var focusedRow = focusedWidgetRow();
+            if (focusedRow) {
+                highlightedSection = focusedRow.section;
+                highlightedId = focusedRow.id;
+            }
+            widgetsTab.forceActiveFocus();
+            var dir = event.key === Qt.Key_Down ? 1 : -1;
+            if (ctrl) {
+                if (highlightedId !== "")
+                    moveWithinSection(highlightedSection, highlightedId, dir);
+            } else {
+                var idx = -1;
+                for (var i = 0; i < flat.length; i++) {
+                    if (flat[i].section === highlightedSection && flat[i].id === highlightedId) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx < 0) {
+                    var f = dir > 0 ? flat[0] : flat[flat.length - 1];
+                    highlightedSection = f.section;
+                    highlightedId = f.id;
+                } else {
+                    idx = Math.max(0, Math.min(flat.length - 1, idx + dir));
+                    highlightedSection = flat[idx].section;
+                    highlightedId = flat[idx].id;
+                }
+            }
+            event.accepted = true;
+        } else if ((event.key === Qt.Key_Left || event.key === Qt.Key_Right) && ctrl) {
+            if (highlightedId !== "")
+                moveAcrossSections(highlightedSection, highlightedId, event.key === Qt.Key_Right ? 1 : -1);
+            event.accepted = true;
+        } else if (event.key === Qt.Key_Space) {
+            if (highlightedId !== "") {
+                toggleHighlighted();
+                event.accepted = true;
+            }
+        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (highlightedId !== "") {
+                configureHighlighted();
+                event.accepted = true;
+            }
+        }
+    }
+
+    Connections {
+        target: PluginService
+
+        function onPluginDataChanged() {
+            widgetsTab.pluginCatalogRevision++;
+        }
+
+        function onPluginListUpdated() {
+            widgetsTab.pluginCatalogRevision++;
+        }
+
+        function onPluginLoaded() {
+            widgetsTab.pluginCatalogRevision++;
+        }
+
+        function onPluginStateChanged() {
+            widgetsTab.pluginCatalogRevision++;
+        }
+
+        function onPluginUnloaded() {
+            widgetsTab.pluginCatalogRevision++;
+        }
     }
 
     property var defaultLeftWidgets: [
@@ -339,6 +271,8 @@ Item {
     }
 
     function setWidgetsForSection(sectionId, widgets) {
+        if (sectionId === "center" && dankIslandOwnsSelectedBarCenter)
+            return;
         switch (sectionId) {
         case "left":
             SettingsData.updateBarConfig(selectedBarId, {
@@ -359,59 +293,34 @@ Item {
     }
 
     function getWidgetsForPopup() {
+        const config = SettingsData.getBarConfig(selectedBarId);
         return baseWidgetDefinitions.filter(widget => {
             if (widget.warning && widget.warning.includes("Plugin is disabled"))
                 return false;
             if (widget.enabled === false)
                 return false;
-            return true;
+            return !(widget.single && SettingsData.barWidgetEntry(config, widget.id));
+        }).map(widget => {
+            if (widget.id !== "island")
+                return widget;
+            if (SettingsData.isIslandBarConfig(config))
+                return Object.assign({}, widget, {
+                    "disabled": true,
+                    "description": I18n.tr("This bar is the Island", "bar widget picker: island widget unavailable on an island-layout bar")
+                });
+            if (!SettingsData.islandWidgetBlocked(config))
+                return widget;
+            return Object.assign({}, widget, {
+                "disabled": true,
+                "description": I18n.tr("An Island bar already covers a display this bar is on", "bar widget picker: island widget blocked by an island-layout bar sharing a display")
+            });
         });
     }
 
     function addWidgetToSection(widgetId, targetSection) {
-        var widgetObj = {
-            "id": widgetId,
-            "enabled": true
-        };
-        if (widgetId === "spacer")
-            widgetObj.size = 20;
-        if (widgetId === "gpuTemp") {
-            widgetObj.selectedGpuIndex = 0;
-            widgetObj.pciId = "";
-        }
-        if (widgetId === "controlCenterButton") {
-            widgetObj.showNetworkIcon = SettingsData.controlCenterShowNetworkIcon;
-            widgetObj.showBluetoothIcon = SettingsData.controlCenterShowBluetoothIcon;
-            widgetObj.showAudioIcon = SettingsData.controlCenterShowAudioIcon;
-            widgetObj.showAudioPercent = SettingsData.controlCenterShowAudioPercent;
-            widgetObj.showVpnIcon = SettingsData.controlCenterShowVpnIcon;
-            widgetObj.showBrightnessIcon = SettingsData.controlCenterShowBrightnessIcon;
-            widgetObj.showBrightnessPercent = SettingsData.controlCenterShowBrightnessPercent;
-            widgetObj.showMicIcon = SettingsData.controlCenterShowMicIcon;
-            widgetObj.showMicPercent = SettingsData.controlCenterShowMicPercent;
-            widgetObj.showBatteryIcon = SettingsData.controlCenterShowBatteryIcon;
-            widgetObj.showPrinterIcon = SettingsData.controlCenterShowPrinterIcon;
-            widgetObj.showScreenSharingIcon = SettingsData.controlCenterShowScreenSharingIcon;
-            widgetObj.controlCenterGroupOrder = ["network", "vpn", "bluetooth", "audio", "microphone", "brightness", "battery", "printer", "screenSharing"];
-        }
-        if (widgetId === "runningApps") {
-            widgetObj.runningAppsCompactMode = SettingsData.runningAppsCompactMode;
-            widgetObj.runningAppsGroupByApp = SettingsData.runningAppsGroupByApp;
-            widgetObj.runningAppsCurrentWorkspace = SettingsData.runningAppsCurrentWorkspace;
-            widgetObj.runningAppsCurrentMonitor = false;
-        }
-        if (widgetId === "diskUsage") {
-            widgetObj.mountPath = "/";
-            widgetObj.diskUsageMode = 0;
-        }
-        if (widgetId === "cpuUsage" || widgetId === "memUsage" || widgetId === "cpuTemp" || widgetId === "gpuTemp")
-            widgetObj.minimumWidth = true;
-        if (widgetId === "memUsage")
-            widgetObj.showInGb = false;
-
-        var widgets = getWidgetsForSection(targetSection).slice();
-        widgets.push(widgetObj);
-        setWidgetsForSection(targetSection, widgets);
+        if (targetSection === "center" && dankIslandOwnsSelectedBarCenter)
+            return;
+        SettingsData.addBarWidget(selectedBarId, targetSection, widgetId);
     }
 
     function removeWidgetFromSection(sectionId, widgetIndex) {
@@ -427,16 +336,7 @@ Item {
                 "id": widget,
                 "enabled": true
             };
-        var result = {
-            "id": widget.id,
-            "enabled": widget.enabled
-        };
-        var keys = ["size", "selectedGpuIndex", "pciId", "mountPath", "diskUsageMode", "minimumWidth", "showSwap", "showInGb", "mediaSize", "clockCompactMode", "focusedWindowCompactMode", "runningAppsCompactMode", "keyboardLayoutNameCompactMode", "runningAppsGroupByApp", "runningAppsCurrentWorkspace", "runningAppsCurrentMonitor", "showNetworkIcon", "showBluetoothIcon", "showAudioIcon", "showAudioPercent", "showVpnIcon", "showBrightnessIcon", "showBrightnessPercent", "showMicIcon", "showMicPercent", "showBatteryIcon", "showPrinterIcon", "showScreenSharingIcon", "controlCenterGroupOrder", "barMaxVisibleApps", "barMaxVisibleRunningApps", "barShowOverflowBadge", "trayUseInlineExpansion", "hideWhenIdle"];
-        for (var i = 0; i < keys.length; i++) {
-            if (widget[keys[i]] !== undefined)
-                result[keys[i]] = widget[keys[i]];
-        }
-        return result;
+        return Object.assign({}, widget);
     }
 
     function handleItemEnabledChanged(sectionId, itemId, enabled) {
@@ -454,8 +354,121 @@ Item {
         setWidgetsForSection(sectionId, widgets);
     }
 
-    function handleItemOrderChanged(sectionId, newOrder) {
-        setWidgetsForSection(sectionId, newOrder);
+    function barKey(sectionId) {
+        return sectionId === "left" ? "leftWidgets" : sectionId === "center" ? "centerWidgets" : "rightWidgets";
+    }
+
+    function sectionItem(sectionId) {
+        return sectionId === "left" ? leftSection : sectionId === "center" ? centerSection : sectionId === "right" ? rightSection : null;
+    }
+
+    function reorderSection(sectionId, orderedIds) {
+        var remaining = getWidgetsForSection(sectionId).slice();
+        var reordered = [];
+        orderedIds.forEach(id => {
+            var idx = remaining.findIndex(w => (typeof w === "string" ? w : w.id) === id);
+            if (idx < 0)
+                return;
+            reordered.push(remaining.splice(idx, 1)[0]);
+        });
+        setWidgetsForSection(sectionId, reordered.concat(remaining));
+    }
+
+    function moveWidget(fromSection, toSection, movedId, toIndex, sourceIndex = -1) {
+        if (dankIslandOwnsSelectedBarCenter && (fromSection === "center" || toSection === "center"))
+            return;
+        if (fromSection === toSection) {
+            var arr = getWidgetsForSection(fromSection).slice();
+            var fi = arr.findIndex(w => (typeof w === "string" ? w : w.id) === movedId);
+            if (fi < 0)
+                return;
+            var m = arr.splice(fi, 1)[0];
+            arr.splice(Math.max(0, Math.min(toIndex, arr.length)), 0, m);
+            setWidgetsForSection(fromSection, arr);
+            return;
+        }
+        var src = getWidgetsForSection(fromSection).slice();
+        var fromIdx = sourceIndex >= 0 ? sourceIndex : src.findIndex(w => (typeof w === "string" ? w : w.id) === movedId);
+        if (fromIdx < 0 || fromIdx >= src.length)
+            return;
+        var moved = src.splice(fromIdx, 1)[0];
+        var dst = getWidgetsForSection(toSection).slice();
+        dst.splice(Math.max(0, Math.min(toIndex, dst.length)), 0, moved);
+        var updates = {};
+        updates[barKey(fromSection)] = src;
+        updates[barKey(toSection)] = dst;
+        SettingsData.updateBarConfig(selectedBarId, updates);
+    }
+
+    // A row reached with Tab has focus but no cursor, so the cursor starts from it
+    function focusedWidgetRow() {
+        for (var item = Window.activeFocusItem; item; item = item.parent) {
+            if (item.reorderList === undefined || !item.modelData?.id)
+                continue;
+            for (var section = item.parent; section; section = section.parent) {
+                if (section.sectionId !== undefined)
+                    return {
+                        "section": section.sectionId,
+                        "id": item.modelData.id
+                    };
+            }
+            return null;
+        }
+        return null;
+    }
+
+    function flatList() {
+        var out = [];
+        ["left", "center", "right"].forEach(s => {
+            getWidgetsForSection(s).forEach(w => {
+                out.push({
+                    "section": s,
+                    "id": (typeof w === "string" ? w : w.id)
+                });
+            });
+        });
+        return out;
+    }
+
+    function moveWithinSection(sectionId, id, delta) {
+        var ids = getWidgetsForSection(sectionId).map(w => typeof w === "string" ? w : w.id);
+        var pos = ids.indexOf(id);
+        var next = pos + delta;
+        if (pos < 0 || next < 0 || next >= ids.length)
+            return;
+        ids.splice(pos, 1);
+        ids.splice(next, 0, id);
+        reorderSection(sectionId, ids);
+    }
+
+    function moveAcrossSections(sectionId, id, delta) {
+        var order = dankIslandOwnsSelectedBarCenter ? ["left", "right"] : ["left", "center", "right"];
+        var si = order.indexOf(sectionId);
+        var ti = si + delta;
+        if (si < 0 || ti < 0 || ti >= order.length)
+            return;
+        var to = order[ti];
+        moveWidget(sectionId, to, id, getWidgetsForSection(to).length);
+        highlightedSection = to;
+    }
+
+    function toggleHighlighted() {
+        if (highlightedId === "" || highlightedSection === "")
+            return;
+        var w = getWidgetsForSection(highlightedSection).find(x => (typeof x === "string" ? x : x.id) === highlightedId);
+        if (w === undefined)
+            return;
+        var en = (typeof w === "string") ? true : (w.enabled !== false);
+        handleItemEnabledChanged(highlightedSection, highlightedId, !en);
+    }
+
+    function configureHighlighted() {
+        const index = getWidgetsForSection(highlightedSection).findIndex(x => (typeof x === "string" ? x : x.id) === highlightedId);
+        if (index < 0)
+            return;
+        if (!BarWidgetCatalog.configurable(getItemsForSection(highlightedSection)[index]))
+            return;
+        configureWidget(highlightedSection, index);
     }
 
     function handleSpacerSizeChanged(sectionId, widgetIndex, newSize) {
@@ -472,179 +485,21 @@ Item {
         setWidgetsForSection(sectionId, widgets);
     }
 
-    function handleGpuSelectionChanged(sectionId, widgetIndex, selectedGpuIndex) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length)
+    function configureWidget(sectionId, widgetIndex) {
+        SettingsUiState.selectedDockId = "";
+        const item = getItemsForSection(sectionId)[widgetIndex];
+        if (!item)
             return;
-        var pciId = DgopService.availableGpus && DgopService.availableGpus.length > selectedGpuIndex ? DgopService.availableGpus[selectedGpuIndex].pciId : "";
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget.selectedGpuIndex = selectedGpuIndex;
-        newWidget.pciId = pciId;
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleDiskMountSelectionChanged(sectionId, widgetIndex, mountPath) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length)
-            return;
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget.mountPath = mountPath;
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleControlCenterSettingChanged(sectionId, widgetIndex, settingName, value) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length)
-            return;
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget[settingName] = value;
-
-        if (!value) {
-            switch (settingName) {
-            case "showAudioIcon":
-                newWidget.showAudioPercent = false;
-                break;
-            case "showMicIcon":
-                newWidget.showMicPercent = false;
-                break;
-            case "showBrightnessIcon":
-                newWidget.showBrightnessPercent = false;
-                break;
-            }
-        }
-
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleControlCenterGroupOrderChanged(sectionId, widgetIndex, groupOrder) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length)
-            return;
-        var previousWidget = widgets[widgetIndex];
-        var newWidget = cloneWidgetData(previousWidget);
-        newWidget.controlCenterGroupOrder = groupOrder.slice();
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handlePrivacySettingChanged(sectionId, widgetIndex, settingName, value) {
-        switch (settingName) {
-        case "showMicIcon":
-            SettingsData.set("privacyShowMicIcon", value);
-            break;
-        case "showCameraIcon":
-            SettingsData.set("privacyShowCameraIcon", value);
-            break;
-        case "showScreenSharingIcon":
-            SettingsData.set("privacyShowScreenShareIcon", value);
-            break;
-        }
-    }
-
-    function handleMinimumWidthChanged(sectionId, widgetIndex, enabled) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length) {
-            setWidgetsForSection(sectionId, widgets);
+        if (item.pluginId) {
+            parentModal?.navigateTo(SettingsTabs.pluginPrefix + item.pluginId);
             return;
         }
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget.minimumWidth = enabled;
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleShowSwapChanged(sectionId, widgetIndex, enabled) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length) {
-            setWidgetsForSection(sectionId, widgets);
-            return;
-        }
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget.showSwap = enabled;
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleShowInGbChanged(sectionId, widgetIndex, enabled) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length) {
-            setWidgetsForSection(sectionId, widgets);
-            return;
-        }
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget.showInGb = enabled;
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleHideWhenIdleChanged(sectionId, widgetIndex, enabled) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length) {
-            return;
-        }
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget.hideWhenIdle = enabled;
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleDiskUsageModeChanged(sectionId, widgetIndex, mode) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length) {
-            setWidgetsForSection(sectionId, widgets);
-            return;
-        }
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget.diskUsageMode = mode;
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleOverflowSettingChanged(sectionId, widgetIndex, settingName, value) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        if (widgetIndex < 0 || widgetIndex >= widgets.length) {
-            setWidgetsForSection(sectionId, widgets);
-            return;
-        }
-        var newWidget = cloneWidgetData(widgets[widgetIndex]);
-        newWidget[settingName] = value;
-        widgets[widgetIndex] = newWidget;
-        setWidgetsForSection(sectionId, widgets);
-    }
-
-    function handleCompactModeChanged(sectionId, widgetId, value) {
-        var widgets = getWidgetsForSection(sectionId).slice();
-        for (var i = 0; i < widgets.length; i++) {
-            var widget = widgets[i];
-            var currentId = typeof widget === "string" ? widget : widget.id;
-            if (currentId !== widgetId)
-                continue;
-
-            var newWidget = cloneWidgetData(widget);
-            switch (widgetId) {
-            case "music":
-                newWidget.mediaSize = value;
-                break;
-            case "clock":
-                newWidget.clockCompactMode = value;
-                break;
-            case "focusedWindow":
-                newWidget.focusedWindowCompactMode = value;
-                break;
-            case "runningApps":
-                newWidget.runningAppsCompactMode = value;
-                break;
-            case "keyboard_layout_name":
-                newWidget.keyboardLayoutNameCompactMode = value;
-                break;
-            }
-            widgets[i] = newWidget;
-            break;
-        }
-        setWidgetsForSection(sectionId, widgets);
+        SettingsUiState.selectedWidgetSection = sectionId;
+        SettingsUiState.selectedWidgetIndex = widgetIndex;
+        SettingsUiState.selectedWidgetTitle = item.text;
+        SettingsUiState.selectedWidgetDescription = item.description ?? "";
+        SettingsUiState.selectedWidgetIcon = item.icon ?? "";
+        parentModal?.navigateTo("bar_widget");
     }
 
     function getItemsForSection(sectionId) {
@@ -654,81 +509,19 @@ Item {
             var isString = typeof widget === "string";
             var widgetId = isString ? widget : widget.id;
             var widgetDef = baseWidgetDefinitions.find(w => w.id === widgetId);
-            if (!widgetDef)
-                return;
-
-            var item = Object.assign({}, widgetDef);
-            item.enabled = isString ? true : widget.enabled;
-            if (!isString) {
-                if (widget.size !== undefined)
-                    item.size = widget.size;
-                if (widget.selectedGpuIndex !== undefined)
-                    item.selectedGpuIndex = widget.selectedGpuIndex;
-                if (widget.pciId !== undefined)
-                    item.pciId = widget.pciId;
-                if (widget.mountPath !== undefined)
-                    item.mountPath = widget.mountPath;
-                if (widget.diskUsageMode !== undefined)
-                    item.diskUsageMode = widget.diskUsageMode;
-                if (widget.showNetworkIcon !== undefined)
-                    item.showNetworkIcon = widget.showNetworkIcon;
-                if (widget.showBluetoothIcon !== undefined)
-                    item.showBluetoothIcon = widget.showBluetoothIcon;
-                if (widget.showAudioIcon !== undefined)
-                    item.showAudioIcon = widget.showAudioIcon;
-                if (widget.showAudioPercent !== undefined)
-                    item.showAudioPercent = widget.showAudioPercent;
-                if (widget.showVpnIcon !== undefined)
-                    item.showVpnIcon = widget.showVpnIcon;
-                if (widget.showBrightnessIcon !== undefined)
-                    item.showBrightnessIcon = widget.showBrightnessIcon;
-                if (widget.showBrightnessPercent !== undefined)
-                    item.showBrightnessPercent = widget.showBrightnessPercent;
-                if (widget.showMicIcon !== undefined)
-                    item.showMicIcon = widget.showMicIcon;
-                if (widget.showMicPercent !== undefined)
-                    item.showMicPercent = widget.showMicPercent;
-                if (widget.showBatteryIcon !== undefined)
-                    item.showBatteryIcon = widget.showBatteryIcon;
-                if (widget.showPrinterIcon !== undefined)
-                    item.showPrinterIcon = widget.showPrinterIcon;
-                if (widget.showScreenSharingIcon !== undefined)
-                    item.showScreenSharingIcon = widget.showScreenSharingIcon;
-                if (widget.controlCenterGroupOrder !== undefined)
-                    item.controlCenterGroupOrder = widget.controlCenterGroupOrder;
-                if (widget.minimumWidth !== undefined)
-                    item.minimumWidth = widget.minimumWidth;
-                if (widget.showSwap !== undefined)
-                    item.showSwap = widget.showSwap;
-                if (widget.showInGb !== undefined)
-                    item.showInGb = widget.showInGb;
-                if (widget.mediaSize !== undefined)
-                    item.mediaSize = widget.mediaSize;
-                if (widget.clockCompactMode !== undefined)
-                    item.clockCompactMode = widget.clockCompactMode;
-                if (widget.focusedWindowCompactMode !== undefined)
-                    item.focusedWindowCompactMode = widget.focusedWindowCompactMode;
-                if (widget.runningAppsCompactMode !== undefined)
-                    item.runningAppsCompactMode = widget.runningAppsCompactMode;
-                if (widget.runningAppsGroupByApp !== undefined)
-                    item.runningAppsGroupByApp = widget.runningAppsGroupByApp;
-                if (widget.runningAppsCurrentWorkspace !== undefined)
-                    item.runningAppsCurrentWorkspace = widget.runningAppsCurrentWorkspace;
-                if (widget.runningAppsCurrentMonitor !== undefined)
-                    item.runningAppsCurrentMonitor = widget.runningAppsCurrentMonitor;
-                if (widget.keyboardLayoutNameCompactMode !== undefined)
-                    item.keyboardLayoutNameCompactMode = widget.keyboardLayoutNameCompactMode;
-                if (widget.barMaxVisibleApps !== undefined)
-                    item.barMaxVisibleApps = widget.barMaxVisibleApps;
-                if (widget.barMaxVisibleRunningApps !== undefined)
-                    item.barMaxVisibleRunningApps = widget.barMaxVisibleRunningApps;
-                if (widget.barShowOverflowBadge !== undefined)
-                    item.barShowOverflowBadge = widget.barShowOverflowBadge;
-                if (widget.trayUseInlineExpansion !== undefined)
-                    item.trayUseInlineExpansion = widget.trayUseInlineExpansion;
-                if (widget.hideWhenIdle !== undefined)
-                    item.hideWhenIdle = widget.hideWhenIdle;
+            if (!widgetDef) {
+                // Skipping entries would desync row indices from the config array (issue #2844)
+                widgetDef = {
+                    "id": widgetId,
+                    "text": widgetId || I18n.tr("Unknown"),
+                    "description": "",
+                    "icon": "extension",
+                    "warning": I18n.tr("Unavailable")
+                };
             }
+
+            var item = Object.assign({}, isString ? {} : widget, widgetDef);
+            item.enabled = isString ? true : widget.enabled !== false;
             widgets.push(item);
         });
         return widgets;
@@ -782,387 +575,246 @@ Item {
         if (!widgetSelectionPopupLoader.item)
             return;
         widgetSelectionPopupLoader.item.targetSection = sectionId;
-        widgetSelectionPopupLoader.item.allWidgets = widgetsTab.getWidgetsForPopup();
+        widgetSelectionPopupLoader.item.widgets = widgetsTab.getWidgetsForPopup();
         widgetSelectionPopupLoader.item.show();
     }
 
-    DankFlickable {
-        anchors.fill: parent
-        clip: true
-        contentHeight: mainColumn.height + Theme.spacingXL
-        contentWidth: width
+    SettingsPage {
+        id: mainColumn
 
-        Column {
-            id: mainColumn
-            topPadding: 4
-            width: Math.min(550, parent.width - Theme.spacingL * 2)
-            anchors.horizontalCenter: parent.horizontalCenter
-            spacing: Theme.spacingXL
+        TapHandler {
+            onTapped: widgetsTab.forceActiveFocus()
+        }
 
-            StyledRect {
-                width: parent.width
-                height: barSelectorContent.implicitHeight + Theme.spacingL * 2
-                radius: Theme.cornerRadius
-                color: Theme.surfaceContainerHigh
-                border.width: 0
-                visible: hasMultipleBars
+        SettingsCard {
+            iconName: "toolbar"
+            title: I18n.tr("Bar")
+            visible: hasMultipleBars
 
-                Column {
-                    id: barSelectorContent
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingL
-                    spacing: Theme.spacingM
-
-                    Row {
-                        width: parent.width
-                        spacing: Theme.spacingM
-
-                        DankIcon {
-                            name: "toolbar"
-                            size: Theme.iconSize
-                            color: Theme.primary
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-
-                        StyledText {
-                            text: I18n.tr("Select Bar")
-                            font.pixelSize: Theme.fontSizeLarge
-                            font.weight: Font.Medium
-                            color: Theme.surfaceText
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                    }
-
-                    DankButtonGroup {
-                        id: barSelectorGroup
-                        width: parent.width
-                        model: SettingsData.barConfigs.map(cfg => cfg.name || ("Bar " + (SettingsData.barConfigs.indexOf(cfg) + 1)))
-                        currentIndex: {
-                            const idx = SettingsData.barConfigs.findIndex(cfg => cfg.id === selectedBarId);
-                            return idx >= 0 ? idx : 0;
-                        }
-                        checkEnabled: false
-                        onSelectionChanged: (index, selected) => {
-                            if (!selected)
-                                return;
-                            if (index >= 0 && index < SettingsData.barConfigs.length)
-                                selectedBarId = SettingsData.barConfigs[index].id;
-                        }
-                    }
-                }
-            }
-
-            StyledRect {
-                width: parent.width
-                height: widgetManagementHeader.implicitHeight + Theme.spacingL * 2
-                radius: Theme.cornerRadius
-                color: Theme.surfaceContainerHigh
-                border.width: 0
-
-                Column {
-                    id: widgetManagementHeader
-                    anchors.fill: parent
-                    anchors.margins: Theme.spacingL
-                    spacing: Theme.spacingM
-
-                    RowLayout {
-                        width: parent.width
-                        spacing: Theme.spacingM
-
-                        DankIcon {
-                            name: "widgets"
-                            size: Theme.iconSize
-                            color: Theme.primary
-                            Layout.alignment: Qt.AlignVCenter
-                        }
-
-                        StyledText {
-                            text: I18n.tr("Widget Management")
-                            font.pixelSize: Theme.fontSizeLarge
-                            font.weight: Font.Medium
-                            color: Theme.surfaceText
-                            Layout.alignment: Qt.AlignVCenter
-                        }
-
-                        Item {
-                            height: 1
-                            Layout.fillWidth: true
-                        }
-
-                        Rectangle {
-                            width: resetContentRow.implicitWidth + Theme.spacingM * 2
-                            height: 28
-                            radius: Theme.cornerRadius
-                            color: resetArea.containsMouse ? Theme.surfacePressed : Theme.surfaceVariant
-                            Layout.alignment: Qt.AlignVCenter
-                            border.width: 0
-
-                            Row {
-                                id: resetContentRow
-                                anchors.centerIn: parent
-                                spacing: Theme.spacingXS
-
-                                DankIcon {
-                                    name: "refresh"
-                                    size: 14
-                                    color: Theme.surfaceText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-
-                                StyledText {
-                                    text: I18n.tr("Reset")
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    font.weight: Font.Medium
-                                    color: Theme.surfaceText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                            }
-
-                            MouseArea {
-                                id: resetArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    setWidgetsForSection("left", defaultLeftWidgets);
-                                    setWidgetsForSection("center", defaultCenterWidgets);
-                                    setWidgetsForSection("right", defaultRightWidgets);
-                                }
-                            }
-
-                            Behavior on color {
-                                ColorAnimation {
-                                    duration: Theme.shortDuration
-                                    easing.type: Theme.standardEasing
-                                }
-                            }
-                        }
-                    }
-
-                    StyledText {
-                        width: parent.width
-                        text: I18n.tr("Drag widgets to reorder within sections. Use the eye icon to hide/show widgets (maintains spacing), or X to remove them completely.")
-                        font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.surfaceVariantText
-                        wrapMode: Text.WordWrap
-                    }
-                }
-            }
-
-            Column {
-                width: parent.width
-                spacing: Theme.spacingL
-
-                StyledRect {
+            SettingsRow {
+                body: DButtonGroup {
+                    id: barSelectorGroup
+                    arrowKeysSelect: false
                     width: parent.width
-                    height: leftSection.implicitHeight + Theme.spacingL * 2
-                    radius: Theme.cornerRadius
-                    color: Theme.surfaceContainerHigh
-                    border.width: 0
-
-                    WidgetsTabSection {
-                        id: leftSection
-                        anchors.fill: parent
-                        anchors.margins: Theme.spacingL
-                        title: selectedBarIsVertical ? I18n.tr("Top Section") : I18n.tr("Left Section")
-                        titleIcon: "format_align_left"
-                        sectionId: "left"
-                        allWidgets: widgetsTab.baseWidgetDefinitions
-                        items: widgetsTab.getItemsForSection("left")
-                        onItemEnabledChanged: (sectionId, itemId, enabled) => {
-                            widgetsTab.handleItemEnabledChanged(sectionId, itemId, enabled);
-                        }
-                        onItemOrderChanged: newOrder => {
-                            widgetsTab.handleItemOrderChanged(sectionId, newOrder);
-                        }
-                        onAddWidget: sectionId => {
-                            showWidgetSelectionPopup(sectionId);
-                        }
-                        onRemoveWidget: (sectionId, index) => {
-                            widgetsTab.removeWidgetFromSection(sectionId, index);
-                        }
-                        onSpacerSizeChanged: (sectionId, index, size) => {
-                            widgetsTab.handleSpacerSizeChanged(sectionId, index, size);
-                        }
-                        onGpuSelectionChanged: (sectionId, index, gpuIndex) => {
-                            widgetsTab.handleGpuSelectionChanged(sectionId, index, gpuIndex);
-                        }
-                        onDiskMountSelectionChanged: (sectionId, index, mountPath) => {
-                            widgetsTab.handleDiskMountSelectionChanged(sectionId, index, mountPath);
-                        }
-                        onControlCenterSettingChanged: (sectionId, index, setting, value) => {
-                            widgetsTab.handleControlCenterSettingChanged(sectionId, index, setting, value);
-                        }
-                        onControlCenterGroupOrderChanged: (sectionId, index, groupOrder) => {
-                            widgetsTab.handleControlCenterGroupOrderChanged(sectionId, index, groupOrder);
-                        }
-                        onPrivacySettingChanged: (sectionId, index, setting, value) => {
-                            widgetsTab.handlePrivacySettingChanged(sectionId, index, setting, value);
-                        }
-                        onMinimumWidthChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleMinimumWidthChanged(sectionId, index, enabled);
-                        }
-                        onShowSwapChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleShowSwapChanged(sectionId, index, enabled);
-                        }
-                        onShowInGbChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleShowInGbChanged(sectionId, index, enabled);
-                        }
-                        onDiskUsageModeChanged: (sectionId, widgetIndex, mode) => {
-                            widgetsTab.handleDiskUsageModeChanged(sectionId, widgetIndex, mode);
-                        }
-                        onCompactModeChanged: (widgetId, value) => {
-                            widgetsTab.handleCompactModeChanged(sectionId, widgetId, value);
-                        }
-                        onOverflowSettingChanged: (sectionId, widgetIndex, settingName, value) => {
-                            widgetsTab.handleOverflowSettingChanged(sectionId, widgetIndex, settingName, value);
-                        }
-                        onHideWhenIdleChanged: (sectionId, widgetIndex, enabled) => {
-                            widgetsTab.handleHideWhenIdleChanged(sectionId, widgetIndex, enabled);
-                        }
+                    model: SettingsData.barConfigs.map(cfg => cfg.name || ("Bar " + (SettingsData.barConfigs.indexOf(cfg) + 1)))
+                    currentIndex: {
+                        const idx = SettingsData.barConfigs.findIndex(cfg => cfg.id === selectedBarId);
+                        return idx >= 0 ? idx : 0;
                     }
-                }
-
-                StyledRect {
-                    width: parent.width
-                    height: centerSection.implicitHeight + Theme.spacingL * 2
-                    radius: Theme.cornerRadius
-                    color: Theme.surfaceContainerHigh
-                    border.width: 0
-
-                    WidgetsTabSection {
-                        id: centerSection
-                        anchors.fill: parent
-                        anchors.margins: Theme.spacingL
-                        title: selectedBarIsVertical ? I18n.tr("Middle Section") : I18n.tr("Center Section")
-                        titleIcon: "format_align_center"
-                        sectionId: "center"
-                        allWidgets: widgetsTab.baseWidgetDefinitions
-                        items: widgetsTab.getItemsForSection("center")
-                        onItemEnabledChanged: (sectionId, itemId, enabled) => {
-                            widgetsTab.handleItemEnabledChanged(sectionId, itemId, enabled);
-                        }
-                        onItemOrderChanged: newOrder => {
-                            widgetsTab.handleItemOrderChanged(sectionId, newOrder);
-                        }
-                        onAddWidget: sectionId => {
-                            showWidgetSelectionPopup(sectionId);
-                        }
-                        onRemoveWidget: (sectionId, index) => {
-                            widgetsTab.removeWidgetFromSection(sectionId, index);
-                        }
-                        onSpacerSizeChanged: (sectionId, index, size) => {
-                            widgetsTab.handleSpacerSizeChanged(sectionId, index, size);
-                        }
-                        onGpuSelectionChanged: (sectionId, index, gpuIndex) => {
-                            widgetsTab.handleGpuSelectionChanged(sectionId, index, gpuIndex);
-                        }
-                        onDiskMountSelectionChanged: (sectionId, index, mountPath) => {
-                            widgetsTab.handleDiskMountSelectionChanged(sectionId, index, mountPath);
-                        }
-                        onControlCenterSettingChanged: (sectionId, index, setting, value) => {
-                            widgetsTab.handleControlCenterSettingChanged(sectionId, index, setting, value);
-                        }
-                        onControlCenterGroupOrderChanged: (sectionId, index, groupOrder) => {
-                            widgetsTab.handleControlCenterGroupOrderChanged(sectionId, index, groupOrder);
-                        }
-                        onPrivacySettingChanged: (sectionId, index, setting, value) => {
-                            widgetsTab.handlePrivacySettingChanged(sectionId, index, setting, value);
-                        }
-                        onMinimumWidthChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleMinimumWidthChanged(sectionId, index, enabled);
-                        }
-                        onShowSwapChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleShowSwapChanged(sectionId, index, enabled);
-                        }
-                        onShowInGbChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleShowInGbChanged(sectionId, index, enabled);
-                        }
-                        onDiskUsageModeChanged: (sectionId, widgetIndex, mode) => {
-                            widgetsTab.handleDiskUsageModeChanged(sectionId, widgetIndex, mode);
-                        }
-                        onCompactModeChanged: (widgetId, value) => {
-                            widgetsTab.handleCompactModeChanged(sectionId, widgetId, value);
-                        }
-                        onOverflowSettingChanged: (sectionId, widgetIndex, settingName, value) => {
-                            widgetsTab.handleOverflowSettingChanged(sectionId, widgetIndex, settingName, value);
-                        }
-                        onHideWhenIdleChanged: (sectionId, widgetIndex, enabled) => {
-                            widgetsTab.handleHideWhenIdleChanged(sectionId, widgetIndex, enabled);
-                        }
-                    }
-                }
-
-                StyledRect {
-                    width: parent.width
-                    height: rightSection.implicitHeight + Theme.spacingL * 2
-                    radius: Theme.cornerRadius
-                    color: Theme.surfaceContainerHigh
-                    border.width: 0
-
-                    WidgetsTabSection {
-                        id: rightSection
-                        anchors.fill: parent
-                        anchors.margins: Theme.spacingL
-                        title: selectedBarIsVertical ? I18n.tr("Bottom Section") : I18n.tr("Right Section")
-                        titleIcon: "format_align_right"
-                        sectionId: "right"
-                        allWidgets: widgetsTab.baseWidgetDefinitions
-                        items: widgetsTab.getItemsForSection("right")
-                        onItemEnabledChanged: (sectionId, itemId, enabled) => {
-                            widgetsTab.handleItemEnabledChanged(sectionId, itemId, enabled);
-                        }
-                        onItemOrderChanged: newOrder => {
-                            widgetsTab.handleItemOrderChanged(sectionId, newOrder);
-                        }
-                        onAddWidget: sectionId => {
-                            showWidgetSelectionPopup(sectionId);
-                        }
-                        onRemoveWidget: (sectionId, index) => {
-                            widgetsTab.removeWidgetFromSection(sectionId, index);
-                        }
-                        onSpacerSizeChanged: (sectionId, index, size) => {
-                            widgetsTab.handleSpacerSizeChanged(sectionId, index, size);
-                        }
-                        onGpuSelectionChanged: (sectionId, index, gpuIndex) => {
-                            widgetsTab.handleGpuSelectionChanged(sectionId, index, gpuIndex);
-                        }
-                        onDiskMountSelectionChanged: (sectionId, index, mountPath) => {
-                            widgetsTab.handleDiskMountSelectionChanged(sectionId, index, mountPath);
-                        }
-                        onControlCenterSettingChanged: (sectionId, index, setting, value) => {
-                            widgetsTab.handleControlCenterSettingChanged(sectionId, index, setting, value);
-                        }
-                        onControlCenterGroupOrderChanged: (sectionId, index, groupOrder) => {
-                            widgetsTab.handleControlCenterGroupOrderChanged(sectionId, index, groupOrder);
-                        }
-                        onPrivacySettingChanged: (sectionId, index, setting, value) => {
-                            widgetsTab.handlePrivacySettingChanged(sectionId, index, setting, value);
-                        }
-                        onMinimumWidthChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleMinimumWidthChanged(sectionId, index, enabled);
-                        }
-                        onShowSwapChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleShowSwapChanged(sectionId, index, enabled);
-                        }
-                        onShowInGbChanged: (sectionId, index, enabled) => {
-                            widgetsTab.handleShowInGbChanged(sectionId, index, enabled);
-                        }
-                        onDiskUsageModeChanged: (sectionId, widgetIndex, mode) => {
-                            widgetsTab.handleDiskUsageModeChanged(sectionId, widgetIndex, mode);
-                        }
-                        onCompactModeChanged: (widgetId, value) => {
-                            widgetsTab.handleCompactModeChanged(sectionId, widgetId, value);
-                        }
-                        onOverflowSettingChanged: (sectionId, widgetIndex, settingName, value) => {
-                            widgetsTab.handleOverflowSettingChanged(sectionId, widgetIndex, settingName, value);
-                        }
-                        onHideWhenIdleChanged: (sectionId, widgetIndex, enabled) => {
-                            widgetsTab.handleHideWhenIdleChanged(sectionId, widgetIndex, enabled);
-                        }
+                    checkEnabled: false
+                    onSelectionChanged: (index, selected) => {
+                        if (!selected)
+                            return;
+                        if (index >= 0 && index < SettingsData.barConfigs.length)
+                            selectedBarId = SettingsData.barConfigs[index].id;
                     }
                 }
             }
         }
+
+        SettingsCard {
+            iconName: "widgets"
+            title: I18n.tr("Sections", "bar widget settings heading for left, center, right sections")
+
+            headerActions: DButton {
+                text: I18n.tr("Reset")
+                iconName: "refresh"
+                buttonHeight: Theme.buttonHeightXS
+                backgroundColor: Theme.secondaryContainer
+                textColor: Theme.onSecondaryContainer
+                onClicked: {
+                    setWidgetsForSection("left", defaultLeftWidgets);
+                    setWidgetsForSection("center", defaultCenterWidgets);
+                    setWidgetsForSection("right", defaultRightWidgets);
+                }
+            }
+
+            SettingsRow {
+                body: StyledText {
+                    width: parent.width
+                    text: I18n.tr("Drag the handle to reorder. Tap a widget for its settings, use the switch to hide it without changing spacing, or X to remove it.")
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceVariantText
+                    wrapMode: Text.WordWrap
+                }
+            }
+
+            SettingsRow {
+                iconName: "info"
+                iconColor: Theme.surfaceVariantText
+                visible: widgetsTab.islandSatellitesHidden
+                title: I18n.tr("Satellites", "island settings: satellite widgets card title")
+                subtitle: I18n.tr("Not shown on this bar, so its section widgets stay hidden", "widgets settings: island satellites are not rendered on this bar")
+            }
+        }
+
+        Column {
+            width: parent.width
+            spacing: Theme.spacingL
+
+            WidgetsTabSection {
+                id: leftSection
+                width: parent.width
+                title: selectedBarIsVertical ? I18n.tr("Top section") : I18n.tr("Left section")
+                sectionId: "left"
+                barId: widgetsTab.selectedBarId
+                allWidgets: widgetsTab.baseWidgetDefinitions
+                items: widgetsTab.getItemsForSection("left")
+                onItemEnabledChanged: (sectionId, itemId, enabled) => {
+                    widgetsTab.handleItemEnabledChanged(sectionId, itemId, enabled);
+                }
+                highlightedId: widgetsTab.highlightedId
+                highlightedSection: widgetsTab.highlightedSection
+                onItemOrderChanged: (sectionId, indices) => {
+                    const items = widgetsTab.getWidgetsForSection(sectionId);
+                    widgetsTab.setWidgetsForSection(sectionId, indices.map(i => items[i]));
+                }
+                reorderGroup: dragGroup
+                onDragStarted: {
+                    widgetsTab.highlightedSection = "";
+                    widgetsTab.highlightedId = "";
+                }
+                onAddWidget: sectionId => {
+                    showWidgetSelectionPopup(sectionId);
+                }
+                onRemoveWidget: (sectionId, index) => {
+                    widgetsTab.removeWidgetFromSection(sectionId, index);
+                }
+                onSpacerSizeChanged: (sectionId, index, size) => {
+                    widgetsTab.handleSpacerSizeChanged(sectionId, index, size);
+                }
+                onConfigureWidget: (sectionId, index) => widgetsTab.configureWidget(sectionId, index)
+            }
+
+            SettingsCard {
+                width: parent.width
+                iconName: "view_in_ar"
+                title: I18n.tr("Home compact", "island settings: home face card title")
+                settingKey: "islandHomeLayout"
+                tags: ["island", "home", "compact", "layout", "groups", "order"]
+                visible: widgetsTab.dankIslandOwnsSelectedBarCenter
+
+                SettingsRow {
+                    iconName: "info"
+                    iconColor: Theme.surfaceVariantText
+                    title: selectedBarIsVertical ? I18n.tr("Middle section", "widgets settings: bar section replaced by the island") : I18n.tr("Center section", "widgets settings: bar section replaced by the island")
+                    subtitle: I18n.tr("The Island takes its place on this bar", "widgets settings: the island replaces the bar's center section")
+                }
+
+                Loader {
+                    width: parent.width
+                    readonly property bool isSettingsRow: true
+                    readonly property bool transparentSlot: true
+                    height: item?.implicitHeight ?? 0
+                    active: widgetsTab.dankIslandOwnsSelectedBarCenter
+                    sourceComponent: IslandHomeLayoutEditor {
+                        settingKey: ""
+                        barId: widgetsTab.selectedBarId
+                    }
+                }
+
+                SettingsRow {
+                    body: Flow {
+                        width: parent.width
+                        spacing: Theme.spacingS
+
+                        DButton {
+                            text: I18n.tr("Launcher", "island settings: button to launcher tab")
+                            iconName: "grid_view"
+                            onClicked: {
+                                if (!widgetsTab.parentModal)
+                                    return;
+                                SettingsSearchService.navigateToSection("launcherStyle");
+                                widgetsTab.parentModal.navigateTo("launcher");
+                            }
+                        }
+
+                        DButton {
+                            text: I18n.tr("Time & weather", "island settings: button to weather tab")
+                            iconName: "cloud"
+                            onClicked: {
+                                if (!widgetsTab.parentModal)
+                                    return;
+                                SettingsSearchService.navigateToSection("weatherEnabled");
+                                widgetsTab.parentModal.navigateTo("time_weather");
+                            }
+                        }
+                    }
+                }
+            }
+
+            WidgetsTabSection {
+                id: centerSection
+                width: parent.width
+                visible: !widgetsTab.dankIslandOwnsSelectedBarCenter
+                title: selectedBarIsVertical ? I18n.tr("Middle section") : I18n.tr("Center section")
+                sectionId: "center"
+                barId: widgetsTab.selectedBarId
+                allWidgets: widgetsTab.baseWidgetDefinitions
+                items: widgetsTab.getItemsForSection("center")
+                onItemEnabledChanged: (sectionId, itemId, enabled) => {
+                    widgetsTab.handleItemEnabledChanged(sectionId, itemId, enabled);
+                }
+                highlightedId: widgetsTab.highlightedId
+                highlightedSection: widgetsTab.highlightedSection
+                onItemOrderChanged: (sectionId, indices) => {
+                    const items = widgetsTab.getWidgetsForSection(sectionId);
+                    widgetsTab.setWidgetsForSection(sectionId, indices.map(i => items[i]));
+                }
+                reorderGroup: dragGroup
+                onDragStarted: {
+                    widgetsTab.highlightedSection = "";
+                    widgetsTab.highlightedId = "";
+                }
+                onAddWidget: sectionId => {
+                    showWidgetSelectionPopup(sectionId);
+                }
+                onRemoveWidget: (sectionId, index) => {
+                    widgetsTab.removeWidgetFromSection(sectionId, index);
+                }
+                onSpacerSizeChanged: (sectionId, index, size) => {
+                    widgetsTab.handleSpacerSizeChanged(sectionId, index, size);
+                }
+                onConfigureWidget: (sectionId, index) => widgetsTab.configureWidget(sectionId, index)
+            }
+
+            WidgetsTabSection {
+                id: rightSection
+                width: parent.width
+                title: selectedBarIsVertical ? I18n.tr("Bottom section") : I18n.tr("Right section")
+                sectionId: "right"
+                barId: widgetsTab.selectedBarId
+                allWidgets: widgetsTab.baseWidgetDefinitions
+                items: widgetsTab.getItemsForSection("right")
+                onItemEnabledChanged: (sectionId, itemId, enabled) => {
+                    widgetsTab.handleItemEnabledChanged(sectionId, itemId, enabled);
+                }
+                highlightedId: widgetsTab.highlightedId
+                highlightedSection: widgetsTab.highlightedSection
+                onItemOrderChanged: (sectionId, indices) => {
+                    const items = widgetsTab.getWidgetsForSection(sectionId);
+                    widgetsTab.setWidgetsForSection(sectionId, indices.map(i => items[i]));
+                }
+                reorderGroup: dragGroup
+                onDragStarted: {
+                    widgetsTab.highlightedSection = "";
+                    widgetsTab.highlightedId = "";
+                }
+                onAddWidget: sectionId => {
+                    showWidgetSelectionPopup(sectionId);
+                }
+                onRemoveWidget: (sectionId, index) => {
+                    widgetsTab.removeWidgetFromSection(sectionId, index);
+                }
+                onSpacerSizeChanged: (sectionId, index, size) => {
+                    widgetsTab.handleSpacerSizeChanged(sectionId, index, size);
+                }
+                onConfigureWidget: (sectionId, index) => widgetsTab.configureWidget(sectionId, index)
+            }
+        }
+    }
+
+    SettingsReorderPreview {
+        group: dragGroup
     }
 }

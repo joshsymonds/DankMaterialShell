@@ -3,10 +3,10 @@
 # Usage: ./create-source.sh <package-dir> [ubuntu-series]
 #
 # Example:
-#   ./create-source.sh ../dms questing    # Ubuntu 25.10 (default series in ppa-upload)
-#   ./create-source.sh ../dms resolute     # Ubuntu 26.04 LTS
-#   ./create-source.sh ../dms-git questing
+#   ./create-source.sh ../dms resolute     # Ubuntu 26.04 LTS (default series in ppa-upload)
+#   ./create-source.sh ../dms stonking     # Ubuntu 26.10
 #   ./create-source.sh ../dms-git resolute
+#   ./create-source.sh ../dms-git stonking
 
 set -e
 
@@ -21,19 +21,36 @@ success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# go.mod may declare "1.27" with no patch level; resolve it to the newest release.
+go_toolchain_version() {
+    local declared
+    declared="$(grep -m1 '^go ' "$1" 2>/dev/null | awk '{print $2}')"
+    [[ -n "$declared" ]] || return 1
+    if [[ "$declared" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        printf '%s' "$declared"
+        return
+    fi
+    [[ "$declared" =~ ^[0-9]+\.[0-9]+$ ]] || return 1
+    curl -fsSL 'https://go.dev/dl/?mode=json&include=all' \
+        | grep -o "\"version\": *\"go${declared//./\\.}\.[0-9]*\"" \
+        | grep -o '[0-9][0-9.]*' \
+        | sort -t. -k3,3n \
+        | tail -1
+}
+
 if [ $# -lt 1 ]; then
     error "Usage: $0 <package-dir> [ubuntu-series]"
     echo
     echo "Arguments:"
     echo "  package-dir     : Path to package directory (e.g., ../dms)"
     echo "  ubuntu-series   : Ubuntu series (optional, default: noble)"
-    echo "                    Options: noble, jammy, oracular, mantic, questing, resolute"
+    echo "                    Options: noble, jammy, oracular, mantic, resolute, stonking"
     echo
     echo "Examples:"
-    echo "  $0 ../dms questing"
     echo "  $0 ../dms resolute"
-    echo "  $0 ../dms-git questing"
+    echo "  $0 ../dms stonking"
     echo "  $0 ../dms-git resolute"
+    echo "  $0 ../dms-git stonking"
     exit 1
 fi
 
@@ -118,7 +135,6 @@ get_ppa_name() {
     case "$pkg" in
         dms) echo "dms" ;;
         dms-git) echo "dms-git" ;;
-        dms-greeter) echo "danklinux" ;;
         *) echo "" ;;
     esac
 }
@@ -135,7 +151,7 @@ check_ppa_version_exists() {
     local CHECK_MODE="${4:-commit}"
     local DISTRO_SERIES="${5:-}"
 
-    # Query Launchpad API (optionally scoped to one Ubuntu series so the same version can ship to questing and resolute)
+    # Query Launchpad API (optionally scoped to one Ubuntu series so the same version can ship to resolute and stonking)
     local API_URL="https://api.launchpad.net/1.0/~avengemedia/+archive/ubuntu/$PPA_NAME?ws.op=getPublishedSources&source_name=$SOURCE_NAME&status=Published"
     if [[ -n "$DISTRO_SERIES" ]]; then
         API_URL+="&distro_series=https://api.launchpad.net/1.0/ubuntu/${DISTRO_SERIES}"
@@ -221,20 +237,17 @@ fi
 case "$PACKAGE_NAME" in
 dms-git)
     IS_GIT_PACKAGE=true
-    GIT_REPO="AvengeMedia/DankMaterialShell"
+    GIT_REPO="duxlabs-dev/dux-shell"
     SOURCE_DIR="dms-git-repo"
     ;;
 dms)
-    GIT_REPO="AvengeMedia/DankMaterialShell"
-    ;;
-dms-greeter)
-    GIT_REPO="AvengeMedia/DankMaterialShell"
+    GIT_REPO="duxlabs-dev/dux-shell"
     ;;
 danksearch)
-    GIT_REPO="AvengeMedia/danksearch"
+    GIT_REPO="duxlabs-dev/dux-search"
     ;;
 dgop)
-    GIT_REPO="AvengeMedia/dgop"
+    GIT_REPO="duxlabs-dev/dux-gop"
     ;;
 esac
 
@@ -323,7 +336,7 @@ EOF
         info "Downloading pre-built binaries and source for dms..."
         if [ ! -f "dms-distropkg-amd64.gz" ]; then
             info "Downloading dms binary for amd64..."
-            if wget -O dms-distropkg-amd64.gz "https://github.com/AvengeMedia/DankMaterialShell/releases/download/v${VERSION}/dms-distropkg-amd64.gz"; then
+            if wget -O dms-distropkg-amd64.gz "https://github.com/duxlabs-dev/dux-shell/releases/download/v${VERSION}/dms-distropkg-amd64.gz"; then
                 success "amd64 binary downloaded"
             else
                 error "Failed to download dms-distropkg-amd64.gz"
@@ -334,7 +347,7 @@ EOF
         if [ ! -f "dms-distropkg-arm64.gz" ]; then
             info "Downloading dms binary for arm64..."
             # Try to download arm64 binary, but don't fail if it doesn't exist (yet)
-            if wget -O dms-distropkg-arm64.gz "https://github.com/AvengeMedia/DankMaterialShell/releases/download/v${VERSION}/dms-distropkg-arm64.gz"; then
+            if wget -O dms-distropkg-arm64.gz "https://github.com/duxlabs-dev/dux-shell/releases/download/v${VERSION}/dms-distropkg-arm64.gz"; then
                 success "arm64 binary downloaded"
             else
                 warn "Failed to download dms-distropkg-arm64.gz (skipping)"
@@ -344,22 +357,10 @@ EOF
 
         if [ ! -f "dms-source.tar.gz" ]; then
             info "Downloading dms source for QML files..."
-            if wget -O dms-source.tar.gz "https://github.com/AvengeMedia/DankMaterialShell/archive/refs/tags/v${VERSION}.tar.gz"; then
+            if wget -O dms-source.tar.gz "https://github.com/duxlabs-dev/dux-shell/releases/download/v${VERSION}/dms-source.tar.gz"; then
                 success "source tarball downloaded"
             else
                 error "Failed to download dms-source.tar.gz"
-                exit 1
-            fi
-        fi
-        ;;
-    dms-greeter)
-        info "Downloading source for dms-greeter..."
-        if [ ! -f "dms-greeter-source.tar.gz" ]; then
-            info "Downloading dms-greeter source..."
-            if wget -O dms-greeter-source.tar.gz "https://github.com/AvengeMedia/DankMaterialShell/archive/refs/tags/v${VERSION}.tar.gz"; then
-                success "source tarball downloaded"
-            else
-                error "Failed to download dms-greeter-source.tar.gz"
                 exit 1
             fi
         fi
@@ -386,7 +387,7 @@ if [ "$IS_GIT_PACKAGE" = true ] && [ -n "$GIT_REPO" ]; then
 
     info "Cloning $GIT_REPO from GitHub (getting latest commit info)..."
     TEMP_CLONE=$(mktemp -d "$TEMP_BASE/ppa_clone_XXXXXX")
-    if git clone "https://github.com/$GIT_REPO.git" "$TEMP_CLONE"; then
+    if git clone --recurse-submodules --shallow-submodules "https://github.com/$GIT_REPO.git" "$TEMP_CLONE"; then
         GIT_COMMIT_HASH=$(cd "$TEMP_CLONE" && git rev-parse --short HEAD)
         GIT_COMMIT_COUNT=$(cd "$TEMP_CLONE" && git rev-list --count HEAD)
         UPSTREAM_VERSION=$(cd "$TEMP_CLONE" && git tag -l "v*" | sed 's/^v//' | sort -V | tail -1)
@@ -497,6 +498,29 @@ EOF
             fi
 
             success "Go dependencies vendored successfully"
+
+            # Launchpad has no network and distro Go lags go.mod; bundle the exact toolchain
+            GO_TOOLCHAIN_VERSION=$(go_toolchain_version go.mod || true)
+            if [ -z "$GO_TOOLCHAIN_VERSION" ]; then
+                error "Could not resolve a Go toolchain release from core/go.mod"
+                exit 1
+            fi
+            GO_TOOLCHAIN_CACHE="${GO_TOOLCHAIN_CACHE:-$HOME/.cache/dms-ppa-go-toolchain}/$GO_TOOLCHAIN_VERSION"
+            mkdir -p "$GO_TOOLCHAIN_CACHE"
+            for GO_ARCH in amd64 arm64; do
+                GO_TARBALL="go${GO_TOOLCHAIN_VERSION}.linux-${GO_ARCH}.tar.gz"
+                if [ ! -f "$GO_TOOLCHAIN_CACHE/$GO_TARBALL" ]; then
+                    info "Downloading Go ${GO_TOOLCHAIN_VERSION} (${GO_ARCH})..."
+                    if ! curl -fsSL -o "$GO_TOOLCHAIN_CACHE/$GO_TARBALL.tmp" "https://go.dev/dl/$GO_TARBALL"; then
+                        rm -f "$GO_TOOLCHAIN_CACHE/$GO_TARBALL.tmp"
+                        error "Failed to download https://go.dev/dl/$GO_TARBALL"
+                        exit 1
+                    fi
+                    mv "$GO_TOOLCHAIN_CACHE/$GO_TARBALL.tmp" "$GO_TOOLCHAIN_CACHE/$GO_TARBALL"
+                fi
+                cp -f "$GO_TOOLCHAIN_CACHE/$GO_TARBALL" "$WORK_PACKAGE_DIR/$SOURCE_DIR/$GO_TARBALL"
+            done
+            success "Bundled Go ${GO_TOOLCHAIN_VERSION} toolchains"
             cd "$PACKAGE_DIR"
         fi
 
@@ -520,7 +544,7 @@ danksearch)
 
     if [ ! -f "dsearch-amd64" ]; then
         info "Downloading dsearch binary for amd64..."
-        if wget -O dsearch-amd64.gz "https://github.com/AvengeMedia/danksearch/releases/download/v${VERSION}/dsearch-linux-amd64.gz"; then
+        if wget -O dsearch-amd64.gz "https://github.com/duxlabs-dev/dux-search/releases/download/v${VERSION}/dsearch-linux-amd64.gz"; then
             gunzip dsearch-amd64.gz
             chmod +x dsearch-amd64
             success "amd64 binary downloaded"
@@ -532,7 +556,7 @@ danksearch)
 
     if [ ! -f "dsearch-arm64" ]; then
         info "Downloading dsearch binary for arm64..."
-        if wget -O dsearch-arm64.gz "https://github.com/AvengeMedia/danksearch/releases/download/v${VERSION}/dsearch-linux-arm64.gz"; then
+        if wget -O dsearch-arm64.gz "https://github.com/duxlabs-dev/dux-search/releases/download/v${VERSION}/dsearch-linux-arm64.gz"; then
             gunzip dsearch-arm64.gz
             chmod +x dsearch-arm64
             success "arm64 binary downloaded"

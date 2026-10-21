@@ -3,386 +3,200 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import "ConnectedSurfaceDescriptor.js" as SurfaceDescriptor
 
 Singleton {
     id: root
 
-    readonly property var emptyDockState: ({
-            "reveal": false,
-            "barSide": "bottom",
-            "bodyX": 0,
-            "bodyY": 0,
-            "bodyW": 0,
-            "bodyH": 0,
-            "slideX": 0,
-            "slideY": 0
-        })
-
-    // Popout state (updated by DankPopout when connectedFrameModeActive)
-    property string popoutOwnerId: ""
-    property bool popoutVisible: false
-    property string popoutBarSide: "top"
-    property real popoutBodyX: 0
-    property real popoutBodyY: 0
-    property real popoutBodyW: 0
-    property real popoutBodyH: 0
-    property real popoutAnimX: 0
-    property real popoutAnimY: 0
-    property string popoutScreen: ""
-    property bool popoutOmitStartConnector: false
-    property bool popoutOmitEndConnector: false
-
-    // Dock state (updated by Dock when connectedFrameModeActive), keyed by screen.name
-    property var dockStates: ({})
-
-    // Dock slide offsets — hot-path updates separated from full geometry state
-    property var dockSlides: ({})
-
-    function _cloneDict(src) {
-        const next = {};
-        for (const k in src)
-            next[k] = src[k];
-        return next;
-    }
-
-    function hasPopoutOwner(claimId) {
-        return !!claimId && popoutOwnerId === claimId;
-    }
-
-    function claimPopout(claimId, state) {
-        if (!claimId)
-            return false;
-
-        popoutOwnerId = claimId;
-        return updatePopout(claimId, state);
-    }
-
-    function updatePopout(claimId, state) {
-        if (!hasPopoutOwner(claimId) || !state)
-            return false;
-
-        if (state.visible !== undefined)
-            popoutVisible = !!state.visible;
-        if (state.barSide !== undefined)
-            popoutBarSide = state.barSide || "top";
-        if (state.bodyX !== undefined)
-            popoutBodyX = Number(state.bodyX);
-        if (state.bodyY !== undefined)
-            popoutBodyY = Number(state.bodyY);
-        if (state.bodyW !== undefined)
-            popoutBodyW = Number(state.bodyW);
-        if (state.bodyH !== undefined)
-            popoutBodyH = Number(state.bodyH);
-        if (state.animX !== undefined)
-            popoutAnimX = Number(state.animX);
-        if (state.animY !== undefined)
-            popoutAnimY = Number(state.animY);
-        if (state.screen !== undefined)
-            popoutScreen = state.screen || "";
-        if (state.omitStartConnector !== undefined)
-            popoutOmitStartConnector = !!state.omitStartConnector;
-        if (state.omitEndConnector !== undefined)
-            popoutOmitEndConnector = !!state.omitEndConnector;
-
-        return true;
-    }
-
-    function releasePopout(claimId) {
-        if (!hasPopoutOwner(claimId))
-            return false;
-
-        popoutOwnerId = "";
-        popoutVisible = false;
-        popoutBarSide = "top";
-        popoutBodyX = 0;
-        popoutBodyY = 0;
-        popoutBodyW = 0;
-        popoutBodyH = 0;
-        popoutAnimX = 0;
-        popoutAnimY = 0;
-        popoutScreen = "";
-        popoutOmitStartConnector = false;
-        popoutOmitEndConnector = false;
-        return true;
-    }
-
-    function setPopoutAnim(claimId, animX, animY) {
-        if (!hasPopoutOwner(claimId))
-            return false;
-        if (animX !== undefined) {
-            const nextX = Number(animX);
-            if (!isNaN(nextX) && popoutAnimX !== nextX)
-                popoutAnimX = nextX;
-        }
-        if (animY !== undefined) {
-            const nextY = Number(animY);
-            if (!isNaN(nextY) && popoutAnimY !== nextY)
-                popoutAnimY = nextY;
-        }
-        return true;
-    }
-
-    function setPopoutBody(claimId, bodyX, bodyY, bodyW, bodyH) {
-        if (!hasPopoutOwner(claimId))
-            return false;
-        if (bodyX !== undefined) {
-            const nextX = Number(bodyX);
-            if (!isNaN(nextX) && popoutBodyX !== nextX)
-                popoutBodyX = nextX;
-        }
-        if (bodyY !== undefined) {
-            const nextY = Number(bodyY);
-            if (!isNaN(nextY) && popoutBodyY !== nextY)
-                popoutBodyY = nextY;
-        }
-        if (bodyW !== undefined) {
-            const nextW = Number(bodyW);
-            if (!isNaN(nextW) && popoutBodyW !== nextW)
-                popoutBodyW = nextW;
-        }
-        if (bodyH !== undefined) {
-            const nextH = Number(bodyH);
-            if (!isNaN(nextH) && popoutBodyH !== nextH)
-                popoutBodyH = nextH;
-        }
-        return true;
-    }
-
-    function _normalizeDockState(state) {
-        return {
-            "reveal": !!(state && state.reveal),
-            "barSide": state && state.barSide ? state.barSide : "bottom",
-            "bodyX": Number(state && state.bodyX !== undefined ? state.bodyX : 0),
-            "bodyY": Number(state && state.bodyY !== undefined ? state.bodyY : 0),
-            "bodyW": Number(state && state.bodyW !== undefined ? state.bodyW : 0),
-            "bodyH": Number(state && state.bodyH !== undefined ? state.bodyH : 0),
-            "slideX": Number(state && state.slideX !== undefined ? state.slideX : 0),
-            "slideY": Number(state && state.slideY !== undefined ? state.slideY : 0)
-        };
-    }
-
-    function _sameDockState(a, b) {
-        if (!a || !b)
-            return false;
-        return a.reveal === b.reveal && a.barSide === b.barSide && Math.abs(a.bodyX - b.bodyX) < 0.5 && Math.abs(a.bodyY - b.bodyY) < 0.5 && Math.abs(a.bodyW - b.bodyW) < 0.5 && Math.abs(a.bodyH - b.bodyH) < 0.5 && Math.abs(a.slideX - b.slideX) < 0.5 && Math.abs(a.slideY - b.slideY) < 0.5;
-    }
-
-    function setDockState(screenName, state) {
-        if (!screenName || !state)
-            return false;
-
-        const normalized = _normalizeDockState(state);
-        if (_sameDockState(dockStates[screenName], normalized))
-            return true;
-
-        const next = _cloneDict(dockStates);
-        next[screenName] = normalized;
-        dockStates = next;
-        return true;
-    }
-
-    function clearDockState(screenName) {
-        if (!screenName || !dockStates[screenName])
-            return false;
-
-        const next = _cloneDict(dockStates);
-        delete next[screenName];
-        dockStates = next;
-
-        // Also clear corresponding slide
-        if (dockSlides[screenName]) {
-            const nextSlides = _cloneDict(dockSlides);
-            delete nextSlides[screenName];
-            dockSlides = nextSlides;
-        }
-        return true;
-    }
-
-    function setDockSlide(screenName, x, y) {
-        if (!screenName)
-            return false;
-        const numX = Number(x);
-        const numY = Number(y);
-        const cur = dockSlides[screenName];
-        if (cur && Math.abs(cur.x - numX) < 0.5 && Math.abs(cur.y - numY) < 0.5)
-            return true;
-        const next = _cloneDict(dockSlides);
-        next[screenName] = {
-            "x": numX,
-            "y": numY
-        };
-        dockSlides = next;
-        return true;
-    }
-
-    readonly property var emptyNotificationState: ({
-            "visible": false,
-            "barSide": "top",
-            "bodyX": 0,
-            "bodyY": 0,
-            "bodyW": 0,
-            "bodyH": 0,
-            "omitStartConnector": false,
-            "omitEndConnector": false
-        })
-
-    property var notificationStates: ({})
-
-    function _normalizeNotificationState(state) {
-        return {
-            "visible": !!(state && state.visible),
-            "barSide": state && state.barSide ? state.barSide : "top",
-            "bodyX": Number(state && state.bodyX !== undefined ? state.bodyX : 0),
-            "bodyY": Number(state && state.bodyY !== undefined ? state.bodyY : 0),
-            "bodyW": Number(state && state.bodyW !== undefined ? state.bodyW : 0),
-            "bodyH": Number(state && state.bodyH !== undefined ? state.bodyH : 0),
-            "omitStartConnector": !!(state && state.omitStartConnector),
-            "omitEndConnector": !!(state && state.omitEndConnector)
-        };
-    }
-
-    function _sameNotificationGeometry(a, b) {
-        if (!a || !b)
-            return false;
-        return Math.abs(Number(a.bodyX) - Number(b.bodyX)) < 0.5 && Math.abs(Number(a.bodyY) - Number(b.bodyY)) < 0.5 && Math.abs(Number(a.bodyW) - Number(b.bodyW)) < 0.5 && Math.abs(Number(a.bodyH) - Number(b.bodyH)) < 0.5;
-    }
-
-    function _sameNotificationState(a, b) {
-        if (!a || !b)
-            return false;
-        return a.visible === b.visible && a.barSide === b.barSide && a.omitStartConnector === b.omitStartConnector && a.omitEndConnector === b.omitEndConnector && _sameNotificationGeometry(a, b);
-    }
-
-    function setNotificationState(screenName, state) {
-        if (!screenName || !state)
-            return false;
-
-        const normalized = _normalizeNotificationState(state);
-        if (_sameNotificationState(notificationStates[screenName], normalized))
-            return true;
-
-        const next = _cloneDict(notificationStates);
-        next[screenName] = normalized;
-        notificationStates = next;
-        return true;
-    }
-
-    function clearNotificationState(screenName) {
-        if (!screenName || !notificationStates[screenName])
-            return false;
-
-        const next = _cloneDict(notificationStates);
-        delete next[screenName];
-        notificationStates = next;
-        return true;
-    }
-
-    // DankModal / DankLauncherV2Modal State
-    readonly property var emptyModalState: ({
-            "visible": false,
-            "barSide": "bottom",
-            "bodyX": 0,
-            "bodyY": 0,
-            "bodyW": 0,
-            "bodyH": 0,
-            "animX": 0,
-            "animY": 0,
-            "omitStartConnector": false,
-            "omitEndConnector": false
-        })
-
-    property var modalStates: ({})
-
-    function _normalizeModalState(state) {
-        return {
-            "visible": !!(state && state.visible),
-            "barSide": state && state.barSide ? state.barSide : "bottom",
-            "bodyX": Number(state && state.bodyX !== undefined ? state.bodyX : 0),
-            "bodyY": Number(state && state.bodyY !== undefined ? state.bodyY : 0),
-            "bodyW": Number(state && state.bodyW !== undefined ? state.bodyW : 0),
-            "bodyH": Number(state && state.bodyH !== undefined ? state.bodyH : 0),
-            "animX": Number(state && state.animX !== undefined ? state.animX : 0),
-            "animY": Number(state && state.animY !== undefined ? state.animY : 0),
-            "omitStartConnector": !!(state && state.omitStartConnector),
-            "omitEndConnector": !!(state && state.omitEndConnector)
-        };
-    }
-
-    function _sameModalGeometry(a, b) {
-        if (!a || !b)
-            return false;
-        return Math.abs(Number(a.bodyX) - Number(b.bodyX)) < 0.5 && Math.abs(Number(a.bodyY) - Number(b.bodyY)) < 0.5 && Math.abs(Number(a.bodyW) - Number(b.bodyW)) < 0.5 && Math.abs(Number(a.bodyH) - Number(b.bodyH)) < 0.5 && Math.abs(Number(a.animX) - Number(b.animX)) < 0.5 && Math.abs(Number(a.animY) - Number(b.animY)) < 0.5;
-    }
-
-    function _sameModalState(a, b) {
-        if (!a || !b)
-            return false;
-        return a.visible === b.visible && a.barSide === b.barSide && a.omitStartConnector === b.omitStartConnector && a.omitEndConnector === b.omitEndConnector && _sameModalGeometry(a, b);
-    }
-
-    function setModalState(screenName, state) {
-        if (!screenName || !state)
-            return false;
-
-        const normalized = _normalizeModalState(state);
-        if (_sameModalState(modalStates[screenName], normalized))
-            return true;
-
-        const next = _cloneDict(modalStates);
-        next[screenName] = normalized;
-        modalStates = next;
-        return true;
-    }
-
-    function clearModalState(screenName) {
-        if (!screenName || !modalStates[screenName])
-            return false;
-
-        const next = _cloneDict(modalStates);
-        delete next[screenName];
-        modalStates = next;
-        return true;
-    }
-
-    function setModalAnim(screenName, animX, animY) {
-        const cur = screenName ? modalStates[screenName] : null;
-        if (!cur)
-            return false;
-        const nax = animX !== undefined ? Number(animX) : cur.animX;
-        const nay = animY !== undefined ? Number(animY) : cur.animY;
-        if (Math.abs(nax - cur.animX) < 0.5 && Math.abs(nay - cur.animY) < 0.5)
-            return false;
-        const next = _cloneDict(modalStates);
-        next[screenName] = Object.assign({}, cur, {
-            "animX": nax,
-            "animY": nay
-        });
-        modalStates = next;
-        return true;
-    }
-
-    function setModalBody(screenName, bodyX, bodyY, bodyW, bodyH) {
-        const cur = screenName ? modalStates[screenName] : null;
-        if (!cur)
-            return false;
-        const nx = bodyX !== undefined ? Number(bodyX) : cur.bodyX;
-        const ny = bodyY !== undefined ? Number(bodyY) : cur.bodyY;
-        const nw = bodyW !== undefined ? Number(bodyW) : cur.bodyW;
-        const nh = bodyH !== undefined ? Number(bodyH) : cur.bodyH;
-        if (Math.abs(nx - cur.bodyX) < 0.5 && Math.abs(ny - cur.bodyY) < 0.5 && Math.abs(nw - cur.bodyW) < 0.5 && Math.abs(nh - cur.bodyH) < 0.5)
-            return false;
-        const next = _cloneDict(modalStates);
-        next[screenName] = Object.assign({}, cur, {
-            "bodyX": nx,
-            "bodyY": ny,
-            "bodyW": nw,
-            "bodyH": nh
-        });
-        modalStates = next;
-        return true;
-    }
-
+    property var surfaceDescriptors: ({})
+    property var surfaceMotion: ({})
+    property var surfaceRevisions: ({})
     property var dockRetractRequests: ({})
+    property var popoutMotionHandoff: null
+
+    // One notifying object per claimed slot keeps animation frames from invalidating every descriptor binding.
+    Component {
+        id: motionComponent
+
+        QtObject {
+            property var frame: ({
+                    "bodyX": 0,
+                    "bodyY": 0,
+                    "bodyW": 0,
+                    "bodyH": 0,
+                    "animX": 0,
+                    "animY": 0
+                })
+        }
+    }
+
+    function surfaceSlot(kind, instanceId) {
+        const slot = SurfaceDescriptor.slotForKind(kind);
+        return instanceId ? slot + ":" + instanceId : slot;
+    }
+
+    function _motionKey(screenName, slot) {
+        return screenName + "|" + slot;
+    }
+
+    function _stored(screenName, slot) {
+        return screenName ? surfaceDescriptors[screenName]?.[slot] ?? null : null;
+    }
+
+    function surfaceDescriptor(screenName, slot) {
+        const base = _stored(screenName, slot) ?? SurfaceDescriptor.empty(slot.split(":")[0], screenName);
+        const motion = surfaceMotion[_motionKey(screenName, slot)];
+        if (!motion)
+            return base;
+        return SurfaceDescriptor.normalize(motion.frame, base);
+    }
+
+    function surfaceDescriptorsOfKind(screenName, kind) {
+        const screen = screenName ? surfaceDescriptors[screenName] : null;
+        if (!screen)
+            return [];
+        return Object.keys(screen).filter(slot => slot === kind || slot.startsWith(kind + ":")).map(slot => surfaceDescriptor(screenName, slot));
+    }
+
+    function surfaceOwnerId(screenName, slot) {
+        return _stored(screenName, slot)?.ownerId ?? "";
+    }
+
+    function hasSurfaceOwner(screenName, slot, ownerId) {
+        return !!ownerId && surfaceOwnerId(screenName, slot) === ownerId;
+    }
+
+    function hasSurfaceDescriptor(screenName, slot, ownerId) {
+        const descriptor = _stored(screenName, slot);
+        return !!descriptor && descriptor.phase !== "hidden" && (!ownerId || descriptor.ownerId === ownerId);
+    }
+
+    function claimSurface(screenName, slot, state, ownerId, exclusive) {
+        if (!screenName || !slot || !state || !ownerId)
+            return false;
+        if (exclusive) {
+            for (const name of Object.keys(surfaceDescriptors)) {
+                if (name !== screenName)
+                    releaseSurface(name, slot, "");
+            }
+        }
+        return _writeSurface(screenName, slot, state, ownerId);
+    }
+
+    function updateSurface(screenName, slot, state, ownerId) {
+        if (!state || !hasSurfaceOwner(screenName, slot, ownerId))
+            return false;
+        return _writeSurface(screenName, slot, state, ownerId);
+    }
+
+    function _bumpSurfaceRevision(screenName) {
+        surfaceRevisions = Object.assign({}, surfaceRevisions, {
+            [screenName]: (surfaceRevisions[screenName] ?? 0) + 1
+        });
+    }
+
+    function _writeSurface(screenName, slot, state, ownerId) {
+        const stored = _stored(screenName, slot);
+        const previous = surfaceDescriptor(screenName, slot);
+        let next = SurfaceDescriptor.normalize(Object.assign({}, state, {
+            "ownerId": ownerId,
+            "screenName": screenName,
+            "revision": previous.revision
+        }), previous);
+        if (SurfaceDescriptor.same(previous, next))
+            return true;
+        next = SurfaceDescriptor.withRevision(next, previous.revision + 1);
+        const screen = Object.assign({}, surfaceDescriptors[screenName]);
+        screen[slot] = next;
+        surfaceDescriptors = Object.assign({}, surfaceDescriptors, {
+            [screenName]: screen
+        });
+        if (!stored || stored.ownerId !== next.ownerId || stored.visible !== next.visible)
+            _bumpSurfaceRevision(screenName);
+        const key = _motionKey(screenName, slot);
+        const motion = surfaceMotion[key] ?? motionComponent.createObject(root);
+        motion.frame = {
+            "bodyX": next.bodyRect.x,
+            "bodyY": next.bodyRect.y,
+            "bodyW": next.bodyRect.width,
+            "bodyH": next.bodyRect.height,
+            "animX": next.animationOffset.x,
+            "animY": next.animationOffset.y
+        };
+        if (!surfaceMotion[key])
+            surfaceMotion = Object.assign({}, surfaceMotion, {
+                [key]: motion
+            });
+        return true;
+    }
+
+    function releaseSurface(screenName, slot, ownerId) {
+        const current = _stored(screenName, slot);
+        if (!current || (ownerId && current.ownerId !== ownerId))
+            return false;
+        const screen = Object.assign({}, surfaceDescriptors[screenName]);
+        delete screen[slot];
+        const next = Object.assign({}, surfaceDescriptors);
+        if (Object.keys(screen).length)
+            next[screenName] = screen;
+        else
+            delete next[screenName];
+        surfaceDescriptors = next;
+        _dropMotion([_motionKey(screenName, slot)]);
+        _bumpSurfaceRevision(screenName);
+        return true;
+    }
+
+    function setSurfaceMotion(screenName, slot, ownerId, patch) {
+        if (!patch || !hasSurfaceOwner(screenName, slot, ownerId))
+            return false;
+        const motion = surfaceMotion[_motionKey(screenName, slot)];
+        if (!motion)
+            return false;
+        let frame = null;
+        for (const key in patch) {
+            const value = Number(patch[key]);
+            if (isNaN(value) || !(key in motion.frame) || motion.frame[key] === value)
+                continue;
+            frame = frame ?? Object.assign({}, motion.frame);
+            frame[key] = value;
+        }
+        if (frame)
+            motion.frame = frame;
+        return true;
+    }
+
+    function _dropMotion(keys) {
+        const dropped = keys.filter(key => surfaceMotion[key]);
+        if (!dropped.length)
+            return;
+        const next = Object.assign({}, surfaceMotion);
+        for (const key of dropped) {
+            next[key].destroy();
+            delete next[key];
+        }
+        surfaceMotion = next;
+    }
+
+    function savePopoutMotion(ownerId, screenName, barSide, rect, velocity) {
+        if (!hasSurfaceOwner(screenName, "popout", ownerId))
+            return;
+        popoutMotionHandoff = {
+            "ownerId": ownerId,
+            "screen": screenName,
+            "barSide": barSide,
+            "rect": Qt.rect(rect.x, rect.y, rect.width, rect.height),
+            "velocity": Qt.vector4d(velocity.x, velocity.y, velocity.z, velocity.w)
+        };
+    }
+
+    function takePopoutMotion(screenName, barSide) {
+        const handoff = popoutMotionHandoff;
+        popoutMotionHandoff = null;
+        if (!handoff || handoff.screen !== screenName || handoff.barSide !== barSide || !hasSurfaceOwner(screenName, "popout", handoff.ownerId))
+            return null;
+        return handoff;
+    }
 
     function requestDockRetract(requesterId, screenName, side) {
         if (!requesterId || !screenName || !side)
@@ -390,19 +204,19 @@ Singleton {
         const existing = dockRetractRequests[requesterId];
         if (existing && existing.screenName === screenName && existing.side === side)
             return true;
-        const next = _cloneDict(dockRetractRequests);
-        next[requesterId] = {
-            "screenName": screenName,
-            "side": side
-        };
-        dockRetractRequests = next;
+        dockRetractRequests = Object.assign({}, dockRetractRequests, {
+            [requesterId]: {
+                "screenName": screenName,
+                "side": side
+            }
+        });
         return true;
     }
 
     function releaseDockRetract(requesterId) {
         if (!requesterId || !dockRetractRequests[requesterId])
             return false;
-        const next = _cloneDict(dockRetractRequests);
+        const next = Object.assign({}, dockRetractRequests);
         delete next[requesterId];
         dockRetractRequests = next;
         return true;
@@ -411,71 +225,77 @@ Singleton {
     function dockRetractActiveForSide(screenName, side) {
         if (!screenName || !side)
             return false;
-        for (const k in dockRetractRequests) {
-            const r = dockRetractRequests[k];
-            if (r && r.screenName === screenName && r.side === side)
-                return true;
-        }
-        return false;
+        return Object.values(dockRetractRequests).some(request => request.screenName === screenName && request.side === side);
     }
 
-    // Prune state for screens that are no longer connected. Stale entries
-    // accumulate across hotplug cycles otherwise — Frame's per-screen
-    // FrameInstance doesn't notice when its peer dicts go orphan.
-    function _pruneToLiveScreens() {
-        const live = {};
-        const screens = Quickshell.screens || [];
-        for (let i = 0; i < screens.length; i++) {
-            const s = screens[i];
-            if (s && s.name)
-                live[s.name] = true;
-        }
-
-        function pruneKeyed(dict) {
-            let changed = false;
-            const next = {};
-            for (const k in dict) {
-                if (live[k])
-                    next[k] = dict[k];
-                else
-                    changed = true;
-            }
-            return changed ? next : null;
-        }
-
-        const nextDock = pruneKeyed(dockStates);
-        if (nextDock !== null)
-            dockStates = nextDock;
-        const nextSlides = pruneKeyed(dockSlides);
-        if (nextSlides !== null)
-            dockSlides = nextSlides;
-        const nextNotif = pruneKeyed(notificationStates);
-        if (nextNotif !== null)
-            notificationStates = nextNotif;
-        const nextModal = pruneKeyed(modalStates);
-        if (nextModal !== null)
-            modalStates = nextModal;
-
-        let retractChanged = false;
-        const nextRetract = {};
-        for (const k in dockRetractRequests) {
-            const r = dockRetractRequests[k];
-            if (r && live[r.screenName])
-                nextRetract[k] = r;
+    function _pruneKeyed(dict, keep) {
+        const next = {};
+        let changed = false;
+        for (const key in dict) {
+            if (keep(key, dict[key]))
+                next[key] = dict[key];
             else
-                retractChanged = true;
+                changed = true;
         }
-        if (retractChanged)
-            dockRetractRequests = nextRetract;
+        return changed ? next : null;
+    }
 
-        if (popoutOwnerId && popoutScreen && !live[popoutScreen])
-            releasePopout(popoutOwnerId);
+    function _pruneOrphanDocks() {
+        if (typeof SettingsData === "undefined" || !SettingsData.dockConfigs)
+            return;
+        const validDockIds = new Set((SettingsData.dockConfigs || []).map(config => config?.id).filter(Boolean));
+        for (const screenName of Object.keys(surfaceDescriptors)) {
+            const screen = surfaceDescriptors[screenName];
+            if (!screen)
+                continue;
+            for (const slot of Object.keys(screen)) {
+                if (slot.startsWith("dock:")) {
+                    const dockId = slot.substring(5);
+                    if (!validDockIds.has(dockId))
+                        releaseSurface(screenName, slot, "");
+                } else if (slot === "dock" && !validDockIds.has("")) {
+                    releaseSurface(screenName, slot, "");
+                }
+            }
+        }
+    }
+
+    function _pruneToLiveScreens() {
+        const live = new Set((Quickshell.screens || []).map(screen => screen?.name).filter(Boolean));
+        const descriptors = _pruneKeyed(surfaceDescriptors, name => live.has(name));
+        if (descriptors)
+            surfaceDescriptors = descriptors;
+        const revisions = _pruneKeyed(surfaceRevisions, name => live.has(name));
+        if (revisions)
+            surfaceRevisions = revisions;
+        const retract = _pruneKeyed(dockRetractRequests, (_, request) => live.has(request.screenName));
+        if (retract)
+            dockRetractRequests = retract;
+        _dropMotion(Object.keys(surfaceMotion).filter(key => !live.has(key.split("|")[0])));
+        _pruneOrphanDocks();
     }
 
     Connections {
         target: Quickshell
         function onScreensChanged() {
-            root._pruneToLiveScreens();
+            screenPruneAction.schedule();
         }
+    }
+
+    Connections {
+        target: SettingsData
+        function onDockConfigsChanged() {
+            dockPruneAction.schedule();
+        }
+    }
+
+    DeferredAction {
+        id: screenPruneAction
+        onTriggered: root._pruneToLiveScreens()
+    }
+
+    DeferredAction {
+        id: dockPruneAction
+        onTriggered: root._pruneOrphanDocks()
     }
 }

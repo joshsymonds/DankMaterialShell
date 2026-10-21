@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import qs.Common
@@ -7,10 +9,10 @@ import qs.Modals.Clipboard
 import qs.Modals.Common
 import qs.Modals.Greeter
 import qs.Modals.Settings
-import qs.Modals.DankLauncherV2
+import qs.Modals.DLauncherV2
 import qs.Modules
 import qs.Modules.AppDrawer
-import qs.Modules.DankDash
+import qs.Modules.DDash
 import qs.Modules.ControlCenter
 import qs.Modules.Dock
 import qs.Modules.Lock
@@ -20,9 +22,7 @@ import qs.Widgets
 import qs.Modules.Notifications.Popup
 import qs.Modules.OSD
 import qs.Modules.ProcessList
-import qs.Modules.DankBar
-import qs.Modules.DankBar.Popouts
-import qs.Modules.Frame
+import qs.Modules.DBar.Popouts
 import qs.Modules.WorkspaceOverlays
 import qs.Modules.Settings.DisplayConfig
 import qs.Services
@@ -30,9 +30,26 @@ import qs.Services
 Item {
     id: root
     readonly property var log: Log.scoped("DMSShell")
+    readonly property var _nightModeServiceRef: NightModeService
+    readonly property var _brightnessServiceRef: BrightnessService
+    readonly property var _refreshRateServiceRef: RefreshRateService
 
-    property bool osdSurfacesLoaded: true
+    property var core: null
+
+    property bool osdSurfacesLoaded: false
     property int pendingOsdResumeReloads: 0
+    readonly property var notificationPopupScreens: {
+        const screens = SettingsData.notificationFocusedMonitor ? Quickshell.screens : SettingsData.getFilteredScreens("notifications");
+        if (!SettingsData.dankIslandEnabled)
+            return screens;
+        return screens.filter(screen => !SettingsData.dankIslandHandlesNotifications(screen));
+    }
+    readonly property var legacySystemLevelOsdScreens: {
+        const screens = SettingsData.getFilteredScreens("osd");
+        if (!SettingsData.dankIslandEnabled)
+            return screens;
+        return screens.filter(screen => !SettingsData.dankIslandHandlesSystemOsd(screen));
+    }
 
     function recreateOsdSurfaces() {
         OSDManager.currentOSDsByScreen = ({});
@@ -40,45 +57,13 @@ Item {
         osdSurfaceReloadTimer.restart();
     }
 
-    Instantiator {
-        id: daemonPluginInstantiator
-        asynchronous: true
-        model: Object.keys(PluginService.pluginDaemonComponents)
-
-        delegate: Loader {
-            id: daemonLoader
-            property string pluginId: modelData
-            sourceComponent: PluginService.pluginDaemonComponents[pluginId]
-
-            onLoaded: {
-                if (item) {
-                    item.pluginService = PluginService;
-                    if (item.popoutService !== undefined) {
-                        item.popoutService = PopoutService;
-                    }
-                    item.pluginId = pluginId;
-                    log.info("Daemon plugin loaded:", pluginId);
-                }
-            }
-        }
-    }
-
-    Loader {
-        id: blurredWallpaperBackgroundLoader
-        active: SettingsData.blurredWallpaperLayer && CompositorService.isNiri
-        asynchronous: false
-
-        sourceComponent: BlurredWallpaperBackground {}
-    }
-
-    // WallpaperBackground {}   // image/colour wallpaper — disabled while iterating
-
-    // Shader-driven wallpaper layer. Reads uniforms from
-    // SceneStateService singleton; replaces WallpaperBackground while
-    // we're tuning the look.
-    ShaderWallpaperBackground {}
-
     DesktopWidgetLayer {}
+
+    DesktopWidgetEditor {}
+
+    DesktopContextMenu {
+        Component.onCompleted: PopoutService.desktopContextMenu = this
+    }
 
     Lock {
         id: lock
@@ -90,6 +75,7 @@ Item {
         delegate: Loader {
             id: fadeWindowLoader
             required property var modelData
+            readonly property FadeToLockWindow loadedWindow: item as FadeToLockWindow
             active: SettingsData.fadeToLockEnabled
             asynchronous: false
 
@@ -101,23 +87,29 @@ Item {
                 }
 
                 onFadeCancelled: {
-                    log.debug("Fade to lock cancelled by user on screen:", fadeWindowLoader.modelData.name);
+                    root.log.debug("Fade to lock cancelled by user on screen:", fadeWindowLoader.modelData.name);
                 }
             }
 
             Connections {
                 target: IdleService
-                enabled: fadeWindowLoader.item !== null
+                enabled: fadeWindowLoader.loadedWindow !== null
 
                 function onFadeToLockRequested() {
-                    if (fadeWindowLoader.item) {
-                        fadeWindowLoader.item.startFade();
+                    if (fadeWindowLoader.loadedWindow) {
+                        fadeWindowLoader.loadedWindow.startFade();
                     }
                 }
 
                 function onCancelFadeToLock() {
-                    if (fadeWindowLoader.item) {
-                        fadeWindowLoader.item.cancelFade();
+                    if (fadeWindowLoader.loadedWindow) {
+                        fadeWindowLoader.loadedWindow.cancelFade();
+                    }
+                }
+
+                function onDismissFadeToLock() {
+                    if (fadeWindowLoader.loadedWindow) {
+                        fadeWindowLoader.loadedWindow.dismiss();
                     }
                 }
             }
@@ -130,6 +122,7 @@ Item {
         delegate: Loader {
             id: fadeDpmsWindowLoader
             required property var modelData
+            readonly property FadeToDpmsWindow loadedWindow: item as FadeToDpmsWindow
             active: SettingsData.fadeToDpmsEnabled
             asynchronous: false
 
@@ -141,117 +134,55 @@ Item {
                 }
 
                 onFadeCancelled: {
-                    log.debug("Fade to DPMS cancelled by user on screen:", fadeDpmsWindowLoader.modelData.name);
+                    root.log.debug("Fade to DPMS cancelled by user on screen:", fadeDpmsWindowLoader.modelData.name);
                 }
             }
 
             Connections {
                 target: IdleService
-                enabled: fadeDpmsWindowLoader.item !== null
+                enabled: fadeDpmsWindowLoader.loadedWindow !== null
 
                 function onFadeToDpmsRequested() {
-                    if (fadeDpmsWindowLoader.item) {
-                        fadeDpmsWindowLoader.item.startFade();
+                    if (fadeDpmsWindowLoader.loadedWindow) {
+                        fadeDpmsWindowLoader.loadedWindow.startFade();
                     }
                 }
 
                 function onCancelFadeToDpms() {
-                    if (fadeDpmsWindowLoader.item) {
-                        fadeDpmsWindowLoader.item.cancelFade();
+                    if (fadeDpmsWindowLoader.loadedWindow) {
+                        fadeDpmsWindowLoader.loadedWindow.cancelFade();
                     }
                 }
 
                 function onRequestMonitorOn() {
-                    if (!fadeDpmsWindowLoader.item)
+                    if (!fadeDpmsWindowLoader.loadedWindow)
                         return;
-                    fadeDpmsWindowLoader.item.cancelFade();
+                    fadeDpmsWindowLoader.loadedWindow.cancelFade();
+                }
+
+                function onMonitorsOffChanged() {
+                    if (IdleService.monitorsOff)
+                        return;
+                    if (!fadeDpmsWindowLoader.loadedWindow)
+                        return;
+                    fadeDpmsWindowLoader.loadedWindow.dismiss();
                 }
             }
-        }
-    }
-
-    property bool barSurfacesLoaded: true
-
-    function recreateBarSurfaces() {
-        if (barSurfacesLoaded)
-            barSurfacesLoaded = false;
-        barSurfaceReloadAction.schedule();
-    }
-
-    DeferredAction {
-        id: barSurfaceReloadAction
-        onTriggered: root.barSurfacesLoaded = true
-    }
-
-    property string _barLayoutStateJson: {
-        if (!barSurfacesLoaded)
-            return "[]";
-        const configs = SettingsData.barConfigs;
-        const mapped = configs.map(c => ({
-                    id: c.id,
-                    position: c.position,
-                    autoHide: c.autoHide,
-                    visible: c.visible
-                })).sort((a, b) => {
-            const aVertical = a.position === SettingsData.Position.Left || a.position === SettingsData.Position.Right;
-            const bVertical = b.position === SettingsData.Position.Left || b.position === SettingsData.Position.Right;
-            if (aVertical !== bVertical) {
-                return aVertical - bVertical;
-            }
-            return String(a.id).localeCompare(String(b.id));
-        });
-        return JSON.stringify(mapped);
-    }
-
-    on_BarLayoutStateJsonChanged: {
-        if (typeof dockRecreateDebounce !== "undefined") {
-            dockRecreateDebounce.restart();
         }
     }
 
     Connections {
-        target: SettingsData
-        function onFrameEnabledChanged() {
-            root.recreateBarSurfaces();
-        }
-        function onConnectedFrameModeActiveChanged() {
-            root.recreateBarSurfaces();
-        }
-        function onForceDankBarLayoutRefresh() {
-            root.recreateBarSurfaces();
-        }
-    }
+        target: root.core
 
-    Frame {}
-
-    Repeater {
-        id: dankBarRepeater
-        model: ScriptModel {
-            id: barRepeaterModel
-            values: JSON.parse(root._barLayoutStateJson)
+        function on_BarLayoutStateJsonChanged() {
+            dockRecreateDebounce.restart();
         }
 
-        property var hyprlandOverviewLoaderRef: hyprlandOverviewLoader
-
-        delegate: Loader {
-            id: barLoader
-            required property var modelData
-            property var barConfig: SettingsData.barConfigs.find(cfg => cfg.id === modelData.id) || null
-            active: root.barSurfacesLoaded && (barConfig?.enabled ?? false)
-            asynchronous: false
-
-            sourceComponent: DankBar {
-                barConfig: barLoader.barConfig
-                hyprlandOverviewLoader: dankBarRepeater.hyprlandOverviewLoaderRef
-
-                onColorPickerRequested: {
-                    if (colorPickerModal.shouldBeVisible) {
-                        colorPickerModal.close();
-                    } else {
-                        colorPickerModal.show();
-                    }
-                }
-            }
+        function onSurfaceRecoveryPass() {
+            root.dockEnabled = false;
+            Qt.callLater(() => {
+                root.dockEnabled = true;
+            });
         }
     }
 
@@ -306,22 +237,37 @@ Item {
         onTriggered: root.osdSurfacesLoaded = true
     }
 
+    Timer {
+        id: osdStartupTimer
+        interval: 1000
+        repeat: false
+        onTriggered: root.osdSurfacesLoaded = true
+    }
+
     Component.onCompleted: {
-        dockRecreateDebounce.start();
-        // Force PolkitService singleton to initialize
-        PolkitService.polkitAvailable;
-        // Force DisplayConfigState singleton to initialize so auto-config runs at startup
-        DisplayConfigState.hasOutputBackend;
+        dockEnabled = true;
         loginSoundTimer.start();
+        osdStartupTimer.start();
+        if (SettingsData.controlCenterWidgets.some(widget => widget.id === "diskUsage" && widget.enabled !== false))
+            DgopService.initializeDiskMounts();
+        if (SettingsData.controlCenterWidgets.some(widget => widget.id === "user" && widget.enabled !== false && widget.uptime !== false))
+            DgopService.dgopAvailable;
+
+        // These are dummy references just to trigger the singletons onCompleted to trigger
+        PolkitService.polkitAvailable;
+        DisplayConfigState.hasOutputBackend;
+        PortalService.systemColorScheme;
+        DesktopService.isSystemd;
+        TrashService.count;
+        WallpaperCyclingService.cyclingActive;
+        ThemeAutoService.active;
+        WellbeingService.tracking;
     }
 
     Loader {
         id: dockLoader
         active: root.dockEnabled
         asynchronous: false
-
-        property var currentPosition: SettingsData.dockPosition
-        property bool initialized: false
 
         sourceComponent: Dock {
             contextMenu: dockContextMenuLoader.item ? dockContextMenuLoader.item : null
@@ -331,22 +277,10 @@ Item {
         onLoaded: {
             if (item) {
                 dockContextMenuLoader.active = true;
-                if (SettingsData.dockShowTrash) {
+                if (SettingsData.dockConfigs.some(config => config.showTrash)) {
                     dockTrashContextMenuLoader.active = true;
                 }
             }
-        }
-
-        Component.onCompleted: {
-            initialized = true;
-        }
-
-        onCurrentPositionChanged: {
-            if (!initialized)
-                return;
-            const comp = sourceComponent;
-            sourceComponent = null;
-            sourceComponent = comp;
         }
     }
 
@@ -368,8 +302,10 @@ Item {
         }
 
         sourceComponent: Component {
-            DankDashPopout {
+            DDashPopout {
                 id: dankDashPopout
+
+                onPopoutClosed: PopoutService._scheduleUnload("dankDash")
             }
         }
     }
@@ -394,30 +330,83 @@ Item {
         }
     }
 
+    Binding {
+        target: BarWidgetService
+        property: "dockContextMenu"
+        value: dockContextMenuLoader.item
+    }
+    Binding {
+        target: BarWidgetService
+        property: "dockTrashContextMenu"
+        value: dockTrashContextMenuLoader.item
+    }
+
     Connections {
         target: SettingsData
-        function onDockShowTrashChanged() {
-            if (SettingsData.dockShowTrash) {
+        function onDockConfigsChanged() {
+            if (SettingsData.dockConfigs.some(config => config.showTrash)) {
                 dockTrashContextMenuLoader.active = true;
             }
         }
     }
 
-    ConfirmModal {
-        id: emptyTrashConfirm
+    LazyLoader {
+        id: emptyTrashConfirmLoader
+        active: false
+        readonly property ConfirmModal loadedModal: item as ConfirmModal
+
+        ConfirmModal {
+            id: emptyTrashConfirm
+        }
     }
 
     Connections {
         target: TrashService
         function onEmptyTrashConfirmRequested(itemCount) {
-            emptyTrashConfirm.showWithOptions({
-                title: I18n.tr("Empty Trash?"),
-                message: I18n.tr("Permanently delete %1 item(s)? This cannot be undone.").arg(itemCount),
+            emptyTrashConfirmLoader.active = true;
+            if (!emptyTrashConfirmLoader.loadedModal)
+                return;
+            emptyTrashConfirmLoader.loadedModal.showWithOptions({
+                title: I18n.tr("Empty Trash"),
+                message: I18n.tr("Permanently delete %1 item(s)? This cannot be undone.", "empty trash confirmation message, %1 is a count").arg(itemCount),
                 confirmText: I18n.tr("Empty"),
                 cancelText: I18n.tr("Cancel"),
                 confirmColor: Theme.error,
                 onConfirm: () => TrashService.emptyTrash()
             });
+        }
+    }
+
+    LazyLoader {
+        id: uninstallAppConfirmLoader
+        active: false
+        readonly property ConfirmModal loadedModal: item as ConfirmModal
+
+        ConfirmModal {
+            id: uninstallAppConfirm
+        }
+    }
+
+    Connections {
+        target: AppSearchService
+        function onUninstallAppConfirmRequested(appId, appName, flatpakId) {
+            uninstallAppConfirmLoader.active = true;
+            const showDialog = () => {
+                if (uninstallAppConfirmLoader.loadedModal) {
+                    uninstallAppConfirmLoader.loadedModal.showWithOptions({
+                        title: I18n.tr("Uninstall %1?", "modal title for app uninstallation").arg(appName),
+                        message: I18n.tr("%1 will be removed from your system.", "modal confirmation text for uninstalling an app").arg(appName),
+                        confirmText: I18n.tr("Uninstall", "confirm button label to proceed with uninstallation"),
+                        cancelText: I18n.tr("Cancel"),
+                        confirmColor: Theme.error,
+                        onConfirm: () => AppSearchService.uninstallFlatpak(appId, appName, flatpakId)
+                    });
+                }
+            };
+            if (uninstallAppConfirmLoader.loadedModal)
+                showDialog();
+            else
+                Qt.callLater(showDialog);
         }
     }
 
@@ -441,11 +430,9 @@ Item {
     }
 
     Variants {
-        model: SettingsData.notificationFocusedMonitor ? Quickshell.screens : SettingsData.getFilteredScreens("notifications")
+        model: root.notificationPopupScreens
 
-        delegate: NotificationPopupManager {
-            modelData: item
-        }
+        delegate: NotificationPopupManager {}
     }
 
     LazyLoader {
@@ -479,6 +466,7 @@ Item {
     LazyLoader {
         id: wifiPasswordModalLoader
         active: false
+        readonly property WifiPasswordModal loadedModal: item as WifiPasswordModal
 
         Component.onCompleted: {
             PopoutService.wifiPasswordModalLoader = wifiPasswordModalLoader;
@@ -511,8 +499,26 @@ Item {
     }
 
     LazyLoader {
+        id: qrGeneratorModalLoader
+        active: false
+
+        Component.onCompleted: {
+            PopoutService.qrGeneratorModalLoader = qrGeneratorModalLoader;
+        }
+
+        QRGeneratorModal {
+            id: qrGeneratorModalItem
+
+            Component.onCompleted: {
+                PopoutService.qrGeneratorModal = qrGeneratorModalItem;
+            }
+        }
+    }
+
+    LazyLoader {
         id: polkitAuthModalLoader
         active: false
+        readonly property PolkitAuthModal loadedModal: item as PolkitAuthModal
 
         PolkitAuthModal {
             id: polkitAuthModal
@@ -528,17 +534,26 @@ Item {
         enabled: PolkitService.polkitAvailable
 
         function onAuthenticationRequestStarted() {
+            if (PopoutService.systemUpdatePopout?.shouldBeVisible)
+                return;
             polkitAuthModalLoader.active = true;
-            if (polkitAuthModalLoader.item)
-                polkitAuthModalLoader.item.show();
+            if (polkitAuthModalLoader.loadedModal)
+                polkitAuthModalLoader.loadedModal.show();
         }
     }
 
-    BluetoothPairingModal {
-        id: bluetoothPairingModal
+    LazyLoader {
+        id: bluetoothPairingModalLoader
+        active: false
 
-        Component.onCompleted: {
-            PopoutService.bluetoothPairingModal = bluetoothPairingModal;
+        Component.onCompleted: PopoutService.bluetoothPairingModalLoader = bluetoothPairingModalLoader
+
+        BluetoothPairingModal {
+            id: bluetoothPairingModal
+
+            Component.onCompleted: {
+                PopoutService.bluetoothPairingModal = bluetoothPairingModal;
+            }
         }
     }
 
@@ -549,24 +564,20 @@ Item {
         target: NetworkService
 
         function onCredentialsNeeded(token, ssid, setting, fields, hints, reason, connType, connName, vpnService, fieldsInfo) {
-            const now = Date.now();
-            const timeSinceLastPrompt = now - lastCredentialsTime;
+            const alreadyShown = wifiPasswordModalLoader.loadedModal && wifiPasswordModalLoader.loadedModal.shouldBeVisible;
+            if (alreadyShown && token === root.lastCredentialsToken)
+                return;
 
             wifiPasswordModalLoader.active = true;
-            if (!wifiPasswordModalLoader.item)
+            if (!wifiPasswordModalLoader.loadedModal)
                 return;
 
-            if (wifiPasswordModalLoader.item.visible && timeSinceLastPrompt < 1000) {
-                NetworkService.cancelCredentials(lastCredentialsToken);
-                lastCredentialsToken = token;
-                lastCredentialsTime = now;
-                wifiPasswordModalLoader.item.showFromPrompt(token, ssid, setting, fields, hints, reason, connType, connName, vpnService, fieldsInfo);
-                return;
-            }
+            if (alreadyShown && root.lastCredentialsToken !== "" && root.lastCredentialsToken !== token)
+                NetworkService.cancelCredentials(root.lastCredentialsToken);
 
-            lastCredentialsToken = token;
-            lastCredentialsTime = now;
-            wifiPasswordModalLoader.item.showFromPrompt(token, ssid, setting, fields, hints, reason, connType, connName, vpnService, fieldsInfo);
+            root.lastCredentialsToken = token;
+            root.lastCredentialsTime = Date.now();
+            wifiPasswordModalLoader.loadedModal.showFromPrompt(token, ssid, setting, fields, hints, reason, connType, connName, vpnService, fieldsInfo);
         }
     }
 
@@ -642,6 +653,25 @@ Item {
     }
 
     LazyLoader {
+        id: colorPickerPopoutLoader
+
+        active: false
+
+        Component.onCompleted: {
+            PopoutService.colorPickerPopoutLoader = colorPickerPopoutLoader;
+        }
+
+        ColorPickerPopout {
+            id: colorPickerPopout
+            onPopoutClosed: PopoutService.unloadColorPicker()
+
+            Component.onCompleted: {
+                PopoutService.colorPickerPopout = colorPickerPopout;
+            }
+        }
+    }
+
+    LazyLoader {
         id: processListPopoutLoader
 
         active: false
@@ -684,7 +714,7 @@ Item {
                 if (visible) {
                     wasShown = true;
                 } else if (wasShown) {
-                    PopoutService.unloadSettings();
+                    Qt.callLater(() => PopoutService.unloadSettingsNow());
                 }
             }
         }
@@ -718,12 +748,33 @@ Item {
             PopoutService.dankLauncherV2ModalLoader = dankLauncherV2ModalLoader;
         }
 
-        DankLauncherV2Modal {
+        DLauncherV2Modal {
             id: dankLauncherV2Modal
 
             Component.onCompleted: {
                 PopoutService.dankLauncherV2Modal = dankLauncherV2Modal;
                 PopoutService._onDankLauncherV2ModalLoaded();
+            }
+        }
+    }
+
+    LazyLoader {
+        id: spotlightBarModalLoader
+
+        active: false
+
+        Component.onCompleted: {
+            PopoutService.spotlightBarModalLoader = spotlightBarModalLoader;
+        }
+
+        DLauncherV2ModalHost {
+            id: spotlightBarModal
+            connected: false
+            spotlight: true
+
+            Component.onCompleted: {
+                PopoutService.spotlightBarModal = spotlightBarModal;
+                PopoutService._onSpotlightBarModalLoaded();
             }
         }
     }
@@ -767,56 +818,73 @@ Item {
         }
     }
 
-    BrowserPickerModal {
-        id: browserPickerModal
+    LazyLoader {
+        id: browserPickerModalLoader
+        active: false
+        readonly property BrowserPickerModal loadedModal: item as BrowserPickerModal
+
+        BrowserPickerModal {
+            id: browserPickerModal
+        }
     }
 
-    AppPickerModal {
-        id: filePickerModal
-        title: I18n.tr("Open with...")
-        viewMode: SettingsData.appPickerViewMode || "grid"
+    LazyLoader {
+        id: filePickerModalLoader
+        active: false
+        readonly property AppPickerModal loadedModal: item as AppPickerModal
 
-        onViewModeChanged: {
-            SettingsData.set("appPickerViewMode", viewMode);
-        }
+        AppPickerModal {
+            id: filePickerModal
+            title: I18n.tr("Open with", "app picker title, followed by a list of apps") + "…"
+            viewMode: SettingsData.appPickerViewMode || "grid"
 
-        function shellEscape(str) {
-            return "'" + str.replace(/'/g, "'\\''") + "'";
-        }
-
-        onApplicationSelected: (app, filePath) => {
-            if (!app)
-                return;
-            let cmd = app.exec || "";
-            const escapedPath = shellEscape(filePath);
-            const escapedUri = shellEscape("file://" + filePath);
-
-            let hasField = false;
-            if (cmd.includes("%f")) {
-                cmd = cmd.replace("%f", escapedPath);
-                hasField = true;
-            } else if (cmd.includes("%F")) {
-                cmd = cmd.replace("%F", escapedPath);
-                hasField = true;
-            } else if (cmd.includes("%u")) {
-                cmd = cmd.replace("%u", escapedUri);
-                hasField = true;
-            } else if (cmd.includes("%U")) {
-                cmd = cmd.replace("%U", escapedUri);
-                hasField = true;
+            onViewModeChanged: {
+                SettingsData.set("appPickerViewMode", viewMode);
             }
 
-            cmd = cmd.replace(/%[ikc]/g, "");
-
-            if (!hasField) {
-                cmd += " " + escapedPath;
+            function shellEscape(str) {
+                return "'" + str.replace(/'/g, "'\\''") + "'";
             }
 
-            log.debug("FilePicker: Launching", cmd);
+            onApplicationSelected: (app, filePath) => {
+                if (!app)
+                    return;
+                const entry = SessionService.resolveDesktopId(app.appId);
+                if (entry) {
+                    SessionService.launchDesktopEntry(entry, false, [filePath]);
+                    return;
+                }
+                let cmd = app.exec || "";
+                const escapedPath = shellEscape(filePath);
+                const escapedUri = shellEscape("file://" + filePath);
 
-            Quickshell.execDetached({
-                command: ["sh", "-c", cmd]
-            });
+                let hasField = false;
+                if (cmd.includes("%f")) {
+                    cmd = cmd.replace("%f", escapedPath);
+                    hasField = true;
+                } else if (cmd.includes("%F")) {
+                    cmd = cmd.replace("%F", escapedPath);
+                    hasField = true;
+                } else if (cmd.includes("%u")) {
+                    cmd = cmd.replace("%u", escapedUri);
+                    hasField = true;
+                } else if (cmd.includes("%U")) {
+                    cmd = cmd.replace("%U", escapedUri);
+                    hasField = true;
+                }
+
+                cmd = cmd.replace(/%[ikc]/g, "");
+
+                if (!hasField) {
+                    cmd += " " + escapedPath;
+                }
+
+                log.debug("FilePicker: Launching", cmd);
+
+                Quickshell.execDetached({
+                    command: ["sh", "-c", cmd]
+                });
+            }
         }
     }
 
@@ -824,7 +892,7 @@ Item {
         target: DMSService
         function onOpenUrlRequested(url) {
             if (url.startsWith("dms://theme/install/")) {
-                var themeId = url.replace("dms://theme/install/", "").split(/[?#]/)[0];
+                const themeId = url.replace("dms://theme/install/", "").split(/[?#]/)[0];
                 if (themeId) {
                     PopoutService.pendingThemeInstall = themeId;
                     PopoutService.openSettingsWithTab("theme");
@@ -832,36 +900,48 @@ Item {
                 return;
             }
             if (url.startsWith("dms://plugin/install/")) {
-                var pluginId = url.replace("dms://plugin/install/", "").split(/[?#]/)[0];
+                const pluginId = url.replace("dms://plugin/install/", "").split(/[?#]/)[0];
                 if (pluginId) {
                     PopoutService.pendingPluginInstall = pluginId;
                     PopoutService.openSettingsWithTab("plugins");
                 }
                 return;
             }
-            browserPickerModal.url = url;
-            browserPickerModal.open();
+            if (url.startsWith("dms://wallpaper/install/")) {
+                const payload = url.replace("dms://wallpaper/install/", "").split(/[?#]/)[0];
+                if (payload) {
+                    PopoutService.pendingWallpaperInstall = payload;
+                    PopoutService.openSettingsWithTab("wallpaper");
+                }
+                return;
+            }
+            browserPickerModalLoader.active = true;
+            const picker = browserPickerModalLoader.loadedModal;
+            if (!picker)
+                return;
+            picker.url = url;
+            picker.open();
         }
 
         function onAppPickerRequested(data) {
-            log.debug("App picker requested with data:", JSON.stringify(data));
+            root.log.debug("App picker requested with data:", JSON.stringify(data));
 
             if (!data || !data.target) {
-                log.warn("Invalid app picker request data");
+                root.log.warn("Invalid app picker request data");
                 return;
             }
 
-            filePickerModal.targetData = data.target;
-            filePickerModal.targetDataLabel = data.requestType || "file";
-
-            if (data.categories && data.categories.length > 0) {
-                filePickerModal.categoryFilter = data.categories;
-            } else {
-                filePickerModal.categoryFilter = [];
-            }
-
-            filePickerModal.usageHistoryKey = "filePickerUsageHistory";
-            filePickerModal.open();
+            filePickerModalLoader.active = true;
+            const picker = filePickerModalLoader.loadedModal;
+            if (!picker)
+                return;
+            picker.targetData = data.target;
+            picker.targetDataLabel = data.requestType || "file";
+            picker.mimeType = data.mimeType || "";
+            picker.rememberMimeTypes = [];
+            picker.categoryFilter = data.categories?.length > 0 ? data.categories : [];
+            picker.usageHistoryKey = "filePickerUsageHistory";
+            picker.open();
         }
     }
 
@@ -875,7 +955,7 @@ Item {
         }
     }
 
-    DankColorPickerModal {
+    ColorPickerModal {
         id: colorPickerModal
 
         Component.onCompleted: {
@@ -887,8 +967,6 @@ Item {
         id: workspaceRenameModalLoader
 
         active: false
-
-        Component.onCompleted: PopoutService.workspaceRenameModalLoader = workspaceRenameModalLoader
 
         WorkspaceRenameModal {
             id: workspaceRenameModal
@@ -933,6 +1011,29 @@ Item {
     }
 
     LazyLoader {
+        id: systemUpdateModalLoader
+
+        active: false
+
+        Component.onCompleted: PopoutService.systemUpdateModalLoader = systemUpdateModalLoader
+
+        SystemUpdateModal {
+            id: systemUpdateModal
+            property bool wasShown: false
+
+            Component.onCompleted: PopoutService.systemUpdateModal = systemUpdateModal
+
+            onVisibleChanged: {
+                if (systemUpdateModal.visible) {
+                    wasShown = true;
+                } else if (wasShown) {
+                    PopoutService.unloadSystemUpdateModal();
+                }
+            }
+        }
+    }
+
+    LazyLoader {
         id: systemUpdateLoader
 
         active: false
@@ -960,19 +1061,30 @@ Item {
         id: notepadSlideoutVariants
         model: SettingsData.getFilteredScreens("notepad")
 
-        delegate: DankSlideout {
+        delegate: DSlideout {
             id: notepadSlideout
-            modelData: item
             title: I18n.tr("Notepad")
             slideoutWidth: 480
             expandable: true
             expandedWidthValue: 960
-            customTransparency: SettingsData.notepadTransparencyOverride
+            edgeGap: SettingsData.notepadEffectiveEdgeGap
+            frameSurfaceEnabled: true
+            slideEdge: SettingsData.notepadSlideoutSide
+            customTransparency: Theme.notepadTransparency
+
+            onIsVisibleChanged: {
+                if (isVisible)
+                    PopoutService.notepadPopout?.hide();
+            }
 
             content: Component {
                 Notepad {
                     slideout: notepadSlideout
                     onHideRequested: notepadSlideout.hide()
+                    onPopoutRequested: {
+                        notepadSlideout.hide();
+                        PopoutService.openNotepadPopout();
+                    }
                 }
             }
 
@@ -990,40 +1102,111 @@ Item {
     }
 
     LazyLoader {
+        id: notepadPopoutLoader
+        active: false
+
+        Component.onCompleted: {
+            PopoutService.notepadPopoutLoader = notepadPopoutLoader;
+        }
+
+        onActiveChanged: {
+            if (active && item) {
+                PopoutService.notepadPopout = item;
+                PopoutService._onNotepadPopoutLoaded();
+            }
+        }
+
+        NotepadPopoutWindow {}
+    }
+
+    LazyLoader {
         id: powerMenuModalLoader
 
         active: false
 
+        Component.onCompleted: {
+            PopoutService.powerMenuModalLoader = powerMenuModalLoader;
+        }
+
         PowerMenuModal {
             id: powerMenuModal
 
-            onPowerActionRequested: (action, title, message) => {
-                switch (action) {
-                case "logout":
-                    SessionService.logout();
-                    break;
-                case "suspend":
-                    SessionService.suspend();
-                    break;
-                case "hibernate":
-                    SessionService.hibernate();
-                    break;
-                case "reboot":
-                    SessionService.reboot();
-                    break;
-                case "poweroff":
-                    SessionService.poweroff();
-                    break;
-                }
-            }
-
-            onLockRequested: {
-                lock.activate();
-            }
+            onPowerActionRequested: (action, title, message) => root._executePowerAction(action)
+            onLockRequested: root._lockFromPowerMenu()
+            onSwitchUserRequested: root._switchUserFromPowerMenu()
 
             Component.onCompleted: {
                 PopoutService.powerMenuModal = powerMenuModal;
             }
+        }
+    }
+
+    function _executePowerAction(action) {
+        PopoutService.closeControlCenter();
+        SessionService.executePowerAction(action);
+    }
+
+    function _lockFromPowerMenu() {
+        PopoutService.closeControlCenter();
+        lock.activate();
+    }
+
+    function _switchUserFromPowerMenu() {
+        PopoutService.openSwitchUser();
+    }
+
+    LazyLoader {
+        id: powerMenuPopoutLoader
+
+        active: false
+
+        Component.onCompleted: {
+            PopoutService.powerMenuPopoutLoader = powerMenuPopoutLoader;
+        }
+
+        PowerMenuPopout {
+            id: powerMenuPopout
+
+            onPowerActionRequested: action => root._executePowerAction(action)
+            onLockRequested: root._lockFromPowerMenu()
+            onSwitchUserRequested: root._switchUserFromPowerMenu()
+            onPopoutClosed: PopoutService.unloadPowerMenuPopout()
+
+            Component.onCompleted: {
+                PopoutService.powerMenuPopout = powerMenuPopout;
+            }
+        }
+    }
+
+    LazyLoader {
+        id: durationPopoutLoader
+
+        active: false
+
+        Component.onCompleted: {
+            PopoutService.durationPopoutLoader = durationPopoutLoader;
+        }
+
+        DurationPopout {
+            id: durationPopout
+            onPopoutClosed: PopoutService.unloadDurationPopout()
+
+            Component.onCompleted: {
+                PopoutService.durationPopout = durationPopout;
+            }
+        }
+    }
+
+    LazyLoader {
+        id: switchUserModalLoader
+
+        active: false
+        readonly property SwitchUserModal loadedModal: item as SwitchUserModal
+
+        Component.onCompleted: PopoutService.switchUserModalLoader = switchUserModalLoader
+
+        SwitchUserModal {
+            id: switchUserModal
         }
     }
 
@@ -1032,35 +1215,49 @@ Item {
 
         active: false
 
+        Component.onCompleted: PopoutService.keybindsModalLoader = hyprKeybindsModalLoader
+
         KeybindsModal {
             id: keybindsModal
 
+            Component.onCompleted: PopoutService.keybindsModal = keybindsModal
+        }
+    }
+
+    LazyLoader {
+        id: powerProfileModalLoader
+
+        active: false
+
+        PowerProfileModal {
+            id: powerProfileModal
+
             Component.onCompleted: {
-                PopoutService.hyprKeybindsModal = keybindsModal;
+                PopoutService.powerProfileModal = powerProfileModal;
             }
+        }
+
+        Component.onCompleted: {
+            PopoutService.powerProfileModalLoader = powerProfileModalLoader;
         }
     }
 
     DMSShellIPC {
-        powerMenuModalLoader: powerMenuModalLoader
-        processListModalLoader: processListModalLoader
-        controlCenterLoader: controlCenterLoader
-        dankDashPopoutLoader: dankDashPopoutLoader
-        notepadSlideoutVariants: notepadSlideoutVariants
-        hyprKeybindsModalLoader: hyprKeybindsModalLoader
-        dankBarRepeater: dankBarRepeater
-        hyprlandOverviewLoader: hyprlandOverviewLoader
-        workspaceRenameModalLoader: workspaceRenameModalLoader
-        windowRuleModalLoader: windowRuleModalLoader
+        processListModalLoaderRef: processListModalLoader
+        controlCenterLoaderRef: controlCenterLoader
+        dankDashPopoutLoaderRef: dankDashPopoutLoader
+        notepadSlideoutVariantsRef: notepadSlideoutVariants
+        hyprKeybindsModalLoaderRef: hyprKeybindsModalLoader
+        dankBarRepeater: root.core?.dankBarRepeater ?? null
+        hyprlandOverviewLoader: root.core?.hyprlandOverviewLoader ?? null
+        workspaceRenameModalLoaderRef: workspaceRenameModalLoader
+        windowRuleModalLoaderRef: windowRuleModalLoader
     }
 
     Variants {
         model: SettingsData.getFilteredScreens("toast")
 
-        delegate: Toast {
-            modelData: item
-            visible: ToastService.toastVisible
-        }
+        delegate: Toast {}
     }
 
     Loader {
@@ -1071,85 +1268,71 @@ Item {
         sourceComponent: Component {
             Item {
                 Variants {
-                    model: SettingsData.getFilteredScreens("osd")
+                    model: SettingsData.osdVolumeEnabled ? root.legacySystemLevelOsdScreens : []
 
-                    delegate: VolumeOSD {
-                        modelData: item
-                    }
+                    delegate: VolumeOSD {}
                 }
 
                 Variants {
-                    model: SettingsData.getFilteredScreens("osd")
+                    model: SettingsData.osdMediaVolumeEnabled ? SettingsData.getFilteredScreens("osd") : []
 
-                    delegate: MediaVolumeOSD {
-                        modelData: item
-                    }
+                    delegate: MediaVolumeOSD {}
                 }
 
                 Variants {
-                    model: SettingsData.getFilteredScreens("osd")
+                    model: SettingsData.osdMediaPlaybackEnabled ? SettingsData.getFilteredScreens("osd") : []
 
-                    delegate: MediaPlaybackOSD {
-                        modelData: item
-                    }
+                    delegate: MediaPlaybackOSD {}
                 }
 
                 Variants {
-                    model: SettingsData.getFilteredScreens("osd")
+                    model: (SettingsData.osdMicMuteEnabled || SettingsData.osdMicVolumeEnabled) ? root.legacySystemLevelOsdScreens : []
 
-                    delegate: MicMuteOSD {
-                        modelData: item
-                    }
+                    delegate: MicVolumeOSD {}
                 }
 
                 Variants {
-                    model: SettingsData.getFilteredScreens("osd")
+                    model: SettingsData.osdBrightnessEnabled ? root.legacySystemLevelOsdScreens : []
 
-                    delegate: BrightnessOSD {
-                        modelData: item
-                    }
+                    delegate: BrightnessOSD {}
                 }
 
                 Variants {
-                    model: SettingsData.getFilteredScreens("osd")
+                    model: SettingsData.osdIdleInhibitorEnabled ? root.legacySystemLevelOsdScreens : []
 
-                    delegate: IdleInhibitorOSD {
-                        modelData: item
-                    }
+                    delegate: IdleInhibitorOSD {}
                 }
 
                 Variants {
-                    model: SettingsData.osdPowerProfileEnabled ? SettingsData.getFilteredScreens("osd") : []
+                    model: SettingsData.osdPowerProfileEnabled ? root.legacySystemLevelOsdScreens : []
 
-                    delegate: PowerProfileOSD {
-                        modelData: item
-                    }
+                    delegate: PowerProfileOSD {}
                 }
 
                 Variants {
-                    model: SettingsData.getFilteredScreens("osd")
+                    model: SettingsData.osdCapsLockEnabled ? root.legacySystemLevelOsdScreens : []
 
-                    delegate: CapsLockOSD {
-                        modelData: item
-                    }
+                    delegate: CapsLockOSD {}
                 }
 
                 Variants {
-                    model: SettingsData.getFilteredScreens("osd")
+                    model: (SettingsData.osdTouchpadEnabled && CompositorService.isNiri) ? root.legacySystemLevelOsdScreens : []
 
-                    delegate: AudioOutputOSD {
-                        modelData: item
-                    }
+                    delegate: TouchpadOSD {}
+                }
+
+                Variants {
+                    model: SettingsData.osdAudioOutputEnabled ? SettingsData.getFilteredScreens("osd") : []
+
+                    delegate: AudioOutputOSD {}
+                }
+
+                Variants {
+                    model: SettingsData.osdWorkspaceEnabled ? SettingsData.getFilteredScreens("osd") : []
+
+                    delegate: WorkspaceOSD {}
                 }
             }
-        }
-    }
-
-    LazyLoader {
-        id: hyprlandOverviewLoader
-        active: CompositorService.isHyprland
-        component: HyprlandOverview {
-            id: hyprlandOverview
         }
     }
 
@@ -1164,16 +1347,22 @@ Item {
     Loader {
         id: greeterLoader
         active: false
+        readonly property GreeterModal loadedModal: item as GreeterModal
         sourceComponent: GreeterModal {
             onGreeterCompleted: greeterLoader.active = false
             Component.onCompleted: show()
         }
 
+        Component.onCompleted: {
+            if (FirstLaunchService.shouldShowGreeter)
+                active = true;
+        }
+
         Connections {
             target: FirstLaunchService
             function onGreeterRequested() {
-                if (greeterLoader.active && greeterLoader.item) {
-                    greeterLoader.item.show();
+                if (greeterLoader.active && greeterLoader.loadedModal) {
+                    greeterLoader.loadedModal.show();
                     return;
                 }
                 greeterLoader.active = true;
@@ -1184,16 +1373,22 @@ Item {
     Loader {
         id: changelogLoader
         active: false
+        readonly property ChangelogModal loadedModal: item as ChangelogModal
         sourceComponent: ChangelogModal {
             onChangelogDismissed: changelogLoader.active = false
             Component.onCompleted: show()
         }
 
+        Component.onCompleted: {
+            if (ChangelogService.shouldShowChangelog)
+                active = true;
+        }
+
         Connections {
             target: ChangelogService
             function onChangelogRequested() {
-                if (changelogLoader.active && changelogLoader.item) {
-                    changelogLoader.item.show();
+                if (changelogLoader.active && changelogLoader.loadedModal) {
+                    changelogLoader.loadedModal.show();
                     return;
                 }
                 changelogLoader.active = true;

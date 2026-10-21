@@ -1,8 +1,9 @@
 import QtQuick
+import qs.Modules.Notifications
 import Quickshell
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Item {
     id: root
@@ -10,8 +11,12 @@ Item {
     property string selectedFilterKey: "all"
     property var keyboardController: null
     property bool keyboardActive: false
+    property bool focusAllowed: true
     property int selectedIndex: -1
     property bool showKeyboardHints: false
+    property bool nested: false
+    property real swipeBleed: 0
+    property alias showScrollBar: historyListView.showScrollBar
 
     function getStartOfDay(date) {
         const d = new Date(date);
@@ -104,12 +109,12 @@ Item {
             maxDays: 2
         },
         {
-            label: I18n.tr("7 days", "notification history filter"),
+            label: I18n.duration(7 * 86400),
             key: "7d",
             maxDays: 7
         },
         {
-            label: I18n.tr("30 days", "notification history filter"),
+            label: I18n.duration(30 * 86400),
             key: "30d",
             maxDays: 30
         },
@@ -204,18 +209,23 @@ Item {
     function removeWithScrollPreserve(itemId) {
         historyListView.savedY = historyListView.contentY;
         NotificationService.removeFromHistory(itemId);
-        Qt.callLater(() => {
-            historyListView.forceLayout();
-        });
+        layoutTimer.restart();
+    }
+
+    Timer {
+        id: layoutTimer
+        interval: 0
+        onTriggered: historyListView.forceLayout()
     }
 
     Column {
         anchors.fill: parent
         spacing: Theme.spacingS
 
-        DankFilterChips {
+        DFilterChips {
             id: filterChips
             width: parent.width
+            visible: root.visibleFilters.length > 1
             currentIndex: root.getChipIndex()
             showCounts: true
             model: root.visibleFilters
@@ -226,17 +236,16 @@ Item {
             }
         }
 
-        DankListView {
+        DListView {
             id: historyListView
-            width: parent.width
-            height: parent.height - filterChips.height - Theme.spacingS
+            x: -root.swipeBleed
+            width: parent.width + root.swipeBleed * 2
+            height: parent.height - (filterChips.visible ? filterChips.height + Theme.spacingS : 0)
             clip: true
-            spacing: Theme.spacingS
-            readonly property real horizontalShadowGutter: Theme.snap(Math.max(Theme.spacingXS, 4), 1)
-            readonly property real verticalShadowGutter: Theme.snap(Math.max(Theme.spacingS, 8), 1)
-            readonly property real delegateShadowGutter: Theme.snap(Math.max(Theme.spacingXS, 4), 1)
-            topMargin: verticalShadowGutter
-            bottomMargin: verticalShadowGutter
+            leftMargin: root.swipeBleed
+            rightMargin: root.swipeBleed
+            spacing: Theme.groupedListGap
+            rowFadeEnabled: NotificationMetrics.animationsEnabled
 
             model: ScriptModel {
                 id: historyModel
@@ -245,80 +254,39 @@ Item {
             }
 
             NotificationEmptyState {
+                parent: historyListView
                 visible: historyListView.count === 0
-                y: Theme.spacingL
-                anchors.horizontalCenter: parent.horizontalCenter
             }
 
-            delegate: Item {
+            NotificationSwipeGroup {
+                id: historySwipe
+            }
+
+            delegate: NotificationSwipeRow {
                 id: delegateRoot
                 required property var modelData
-                required property int index
 
-                property real swipeOffset: 0
-                property bool isDismissing: false
-                readonly property real dismissThreshold: width * 0.35
-                property bool __delegateInitialized: false
+                group: historySwipe
+                bleed: root.swipeBleed
+                width: ListView.view.width - root.swipeBleed * 2
+                height: historyCard.height
+                onDismissed: root.removeWithScrollPreserve(modelData?.id || "")
 
-                Component.onCompleted: {
-                    Qt.callLater(() => {
-                        if (delegateRoot)
-                            delegateRoot.__delegateInitialized = true;
-                    });
-                }
-
-                width: ListView.view.width
-                height: historyCard.height + historyListView.delegateShadowGutter
-                clip: false
+                Component.onCompleted: historyListView.fadeIn(delegateRoot, index)
 
                 HistoryNotificationCard {
                     id: historyCard
-                    width: Math.max(0, parent.width - (historyListView.horizontalShadowGutter * 2))
-                    y: historyListView.delegateShadowGutter / 2
-                    x: historyListView.horizontalShadowGutter + delegateRoot.swipeOffset
+                    width: parent.width
+                    x: delegateRoot.offset
                     historyItem: modelData
-                    isSelected: root.keyboardActive && root.selectedIndex === index
-                    keyboardNavigationActive: root.keyboardActive
-                    opacity: 1 - Math.abs(delegateRoot.swipeOffset) / (delegateRoot.width * 0.5)
-
-                    Behavior on x {
-                        enabled: !swipeDragHandler.active && delegateRoot.__delegateInitialized
-                        NumberAnimation {
-                            duration: Theme.notificationExitDuration
-                            easing.type: Theme.standardEasing
-                        }
-                    }
-
-                    Behavior on opacity {
-                        enabled: delegateRoot.__delegateInitialized
-                        NumberAnimation {
-                            duration: delegateRoot.__delegateInitialized ? Theme.notificationExitDuration : 0
-                        }
-                    }
-                }
-
-                DragHandler {
-                    id: swipeDragHandler
-                    target: null
-                    yAxis.enabled: false
-                    xAxis.enabled: true
-
-                    onActiveChanged: {
-                        if (active || delegateRoot.isDismissing)
-                            return;
-                        if (Math.abs(delegateRoot.swipeOffset) > delegateRoot.dismissThreshold) {
-                            delegateRoot.isDismissing = true;
-                            root.removeWithScrollPreserve(delegateRoot.modelData?.id || "");
-                        } else {
-                            delegateRoot.swipeOffset = 0;
-                        }
-                    }
-
-                    onTranslationChanged: {
-                        if (delegateRoot.isDismissing)
-                            return;
-                        delegateRoot.swipeOffset = translation.x;
-                    }
+                    nested: root.nested
+                    firstInGroup: index === 0
+                    lastInGroup: index === historyListView.count - 1
+                    topRoundness: delegateRoot.topRoundness
+                    bottomRoundness: delegateRoot.bottomRoundness
+                    contentOpacity: delegateRoot.contentOpacity
+                    isSelected: root.keyboardActive && root.focusAllowed && root.selectedIndex === index
+                    keyboardNavigationActive: root.keyboardActive && root.focusAllowed
                 }
             }
         }
@@ -329,7 +297,7 @@ Item {
             return;
         keyboardActive = true;
         selectedIndex = Math.min(selectedIndex + 1, historyModel.values.length - 1);
-        historyListView.positionViewAtIndex(selectedIndex, ListView.Contain);
+        historyListView.revealIndex(selectedIndex);
     }
 
     function selectPrevious() {
@@ -341,7 +309,7 @@ Item {
             return;
         }
         selectedIndex = Math.max(selectedIndex - 1, 0);
-        historyListView.positionViewAtIndex(selectedIndex, ListView.Contain);
+        historyListView.revealIndex(selectedIndex);
     }
 
     function clearSelected() {
@@ -358,28 +326,38 @@ Item {
     }
 
     function handleKey(event) {
-        if (event.key === Qt.Key_Down || event.key === 16777237) {
-            if (!keyboardActive) {
-                keyboardActive = true;
-                selectedIndex = 0;
-            } else {
-                selectNext();
-            }
-            event.accepted = true;
-        } else if (event.key === Qt.Key_Up || event.key === 16777235) {
-            if (keyboardActive) {
-                selectPrevious();
-            }
-            event.accepted = true;
-        } else if (keyboardActive && (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace)) {
-            clearSelected();
-            event.accepted = true;
-        } else if ((event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) && (event.modifiers & Qt.ShiftModifier)) {
+        const dismissKey = event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace;
+        if (dismissKey && (event.modifiers & Qt.ShiftModifier)) {
             NotificationService.clearHistory();
             keyboardActive = false;
             selectedIndex = -1;
             event.accepted = true;
-        } else if (event.key === Qt.Key_F10) {
+            return;
+        }
+        switch (event.key) {
+        case Qt.Key_Down:
+            if (!keyboardActive) {
+                keyboardActive = true;
+                selectedIndex = 0;
+                event.accepted = true;
+                return;
+            }
+            selectNext();
+            event.accepted = true;
+            return;
+        case Qt.Key_Up:
+            if (keyboardActive)
+                selectPrevious();
+            event.accepted = true;
+            return;
+        case Qt.Key_Delete:
+        case Qt.Key_Backspace:
+            if (!keyboardActive)
+                return;
+            clearSelected();
+            event.accepted = true;
+            return;
+        case Qt.Key_F10:
             showKeyboardHints = !showKeyboardHints;
             event.accepted = true;
         }

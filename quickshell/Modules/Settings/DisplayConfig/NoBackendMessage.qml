@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
+import qs.Modules.Settings.Widgets
 
 StyledRect {
     id: root
@@ -11,9 +12,9 @@ StyledRect {
     width: parent.width
     height: messageContent.implicitHeight + Theme.spacingL * 2
     radius: Theme.cornerRadius
-    color: Theme.surfaceContainerHigh
-    border.color: Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.2)
-    border.width: 0
+    color: SettingsMetrics.rowColor
+    border.color: Theme.outlineMedium
+    border.width: Theme.layerOutlineWidth
 
     Column {
         id: messageContent
@@ -25,7 +26,7 @@ StyledRect {
             width: parent.width
             spacing: Theme.spacingM
 
-            DankIcon {
+            DIcon {
                 name: "monitor"
                 size: Theme.iconSize
                 color: Theme.surfaceVariantText
@@ -38,9 +39,9 @@ StyledRect {
                 anchors.verticalCenter: parent.verticalCenter
 
                 StyledText {
-                    text: I18n.tr("Monitor Configuration")
+                    text: I18n.tr("Arrangement")
                     font.pixelSize: Theme.fontSizeLarge
-                    font.weight: Font.Medium
+                    font.weight: Theme.fontWeightMedium
                     color: Theme.surfaceText
                     width: parent.width
                     horizontalAlignment: Text.AlignLeft

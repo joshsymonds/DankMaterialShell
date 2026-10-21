@@ -1,24 +1,8 @@
 import QtQuick
 import qs.Common
+import qs.Modules.DDash.Overview as New
 
-Rectangle {
-    id: card
-
-    LayoutMirroring.enabled: I18n.isRtl
-    LayoutMirroring.childrenInherit: true
-
-    property int pad: Theme.spacingM
-
-    radius: Theme.cornerRadius
-    color: Theme.nestedSurface
-    border.color: Theme.outlineMedium
-    border.width: 1
-
-    default property alias content: contentItem.data
-
-    Item {
-        id: contentItem
-        anchors.fill: parent
-        anchors.margins: card.pad
-    }
+New.Card {
+    id: shim
+    Component.onCompleted: Deprecation.module(shim, "Card", "qs.Modules.DankDash.Overview", "qs.Modules.DDash.Overview")
 }

@@ -66,9 +66,18 @@ read_ini_value() {
 }
 
 print_vfs_recovery() {
-    printf 'Generate it by starting the local shell config once, for example:\n' >&2
-    printf '  dms -c %q run\n' "${quickshell_dir}" >&2
+    printf 'Quickshell fills the VFS config in itself, but only into a file that already\n' >&2
+    printf 'exists; it never creates one. The nix develop shell touches it for you, so\n' >&2
+    printf 'outside that shell you have to create it yourself. The VFS also lives under\n' >&2
+    printf 'the XDG runtime directory, so a reboot removes it and leaves the file\n' >&2
+    printf 'dangling, which makes a plain touch fail. Recreate both with:\n' >&2
+    printf '  rm -f %q\n' "${qmlls_config}" >&2
+    printf '  touch %q\n' "${qmlls_config}" >&2
     printf '  qs -p %q\n' "${quickshell_dir}" >&2
+    printf '  # or: dms -c %q run\n' "${quickshell_dir}" >&2
+    printf 'The shell only has to run long enough to write the config, then:\n' >&2
+    printf '  qs kill -p %q\n' "${quickshell_dir}" >&2
+    printf 'Linting itself does not need a running shell.\n' >&2
 }
 
 if [[ -L "${qmlls_config}" && ! -e "${qmlls_config}" ]]; then
@@ -119,7 +128,10 @@ for path in "${import_paths[@]}"; do
     fi
 done
 
+printf 'lint-qml: checking %d entrypoints with %s\n' "${#targets[@]}" "${qmllint_bin}"
+
 if ! output="$("${qmllint_bin}" "${qmllint_args[@]}" "${targets[@]}" 2>&1)"; then
+    printf 'lint-qml: FAIL\n' >&2
     printf '%s\n' "${output}" >&2
     exit 1
 fi
@@ -127,3 +139,5 @@ fi
 if [[ -n "${output}" ]]; then
     printf '%s\n' "${output}"
 fi
+
+printf 'lint-qml: PASS (%d entrypoints)\n' "${#targets[@]}"

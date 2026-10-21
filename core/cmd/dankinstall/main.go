@@ -5,36 +5,42 @@ import (
 	"os"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/headless"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/duxlabs-dev/dux-shell/core/internal/headless"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/tui"
 	"github.com/spf13/cobra"
 )
 
 var Version = "dev"
 
-// Flag variables bound via pflag
 var (
 	compositor        string
 	term              string
+	privescTool       string
+	gitAll            bool
+	gitDeps           []string
+	allFeatures       bool
 	includeDeps       []string
 	excludeDeps       []string
 	replaceConfigs    []string
 	replaceConfigsAll bool
 	yes               bool
+	danksearch        bool
+	dankcalendar      bool
+	dmsGreeter        bool
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "dankinstall",
-	Short: "Install DankMaterialShell and its dependencies",
-	Long: `dankinstall sets up DankMaterialShell with your chosen compositor and terminal.
+	Short: "Install Dux Shell and its dependencies",
+	Long: `dankinstall sets up Dux Shell with your chosen compositor and terminal.
 
 Without flags, it launches an interactive TUI. Providing either --compositor
 or --term activates headless (unattended) mode, which requires both flags.
 
-Headless mode requires cached sudo credentials. Run 'sudo -v' beforehand, or
-configure passwordless sudo for your user.`,
+Headless mode requires cached credentials or a passwordless rule for your
+privilege escalation tool (sudo, doas, or run0).`,
 	Args:          cobra.NoArgs,
 	RunE:          runDankinstall,
 	SilenceErrors: true,
@@ -42,13 +48,20 @@ configure passwordless sudo for your user.`,
 }
 
 func init() {
-	rootCmd.Flags().StringVarP(&compositor, "compositor", "c", "", "Compositor/WM to install: niri or hyprland (enables headless mode)")
+	rootCmd.Flags().StringVarP(&compositor, "compositor", "c", "", "Compositor/WM to install: niri, hyprland, or mango (enables headless mode)")
 	rootCmd.Flags().StringVarP(&term, "term", "t", "", "Terminal emulator to install: ghostty, kitty, or alacritty (enables headless mode)")
+	rootCmd.Flags().StringVar(&privescTool, "privesc", "", "Privilege escalation tool: sudo, doas, or run0 (default: autodetect)")
+	rootCmd.Flags().BoolVar(&gitAll, "git", false, "Install the git version of every dep that has one")
+	rootCmd.Flags().StringSliceVar(&gitDeps, "git-deps", []string{}, "Deps to install the git version of (e.g. niri,quickshell)")
+	rootCmd.Flags().BoolVar(&allFeatures, "all-features", false, "Enable all optional deps (dms-greeter, danksearch, dankcalendar)")
 	rootCmd.Flags().StringSliceVar(&includeDeps, "include-deps", []string{}, "Optional deps to enable (e.g. dms-greeter)")
 	rootCmd.Flags().StringSliceVar(&excludeDeps, "exclude-deps", []string{}, "Deps to skip during installation")
 	rootCmd.Flags().StringSliceVar(&replaceConfigs, "replace-configs", []string{}, "Deploy only named configs (e.g. niri,ghostty)")
 	rootCmd.Flags().BoolVar(&replaceConfigsAll, "replace-configs-all", false, "Deploy and replace all configurations")
 	rootCmd.Flags().BoolVarP(&yes, "yes", "y", false, "Auto-confirm all prompts")
+	rootCmd.Flags().BoolVar(&danksearch, "danksearch", false, "Install danksearch and enable its user indexing service")
+	rootCmd.Flags().BoolVar(&dankcalendar, "dankcalendar", false, "Install dankcalendar")
+	rootCmd.Flags().BoolVar(&dmsGreeter, "dms-greeter", false, "Install dms-greeter")
 }
 
 func main() {
@@ -67,13 +80,19 @@ func runDankinstall(cmd *cobra.Command, args []string) error {
 	headlessMode := compositor != "" || term != ""
 
 	if !headlessMode {
-		// Reject headless-only flags when running in TUI mode.
 		headlessOnly := []string{
+			"privesc",
+			"git",
+			"git-deps",
+			"all-features",
 			"include-deps",
 			"exclude-deps",
 			"replace-configs",
 			"replace-configs-all",
 			"yes",
+			"danksearch",
+			"dankcalendar",
+			"dms-greeter",
 		}
 		var set []string
 		for _, name := range headlessOnly {
@@ -93,9 +112,8 @@ func runDankinstall(cmd *cobra.Command, args []string) error {
 }
 
 func runHeadless() error {
-	// Validate required flags
 	if compositor == "" {
-		return fmt.Errorf("--compositor is required for headless mode (niri or hyprland)")
+		return fmt.Errorf("--compositor is required for headless mode (niri, hyprland, or mango)")
 	}
 	if term == "" {
 		return fmt.Errorf("--term is required for headless mode (ghostty, kitty, or alacritty)")
@@ -104,16 +122,22 @@ func runHeadless() error {
 	cfg := headless.Config{
 		Compositor:        compositor,
 		Terminal:          term,
+		PrivescTool:       privescTool,
+		GitAll:            gitAll,
+		GitDeps:           gitDeps,
+		AllFeatures:       allFeatures,
 		IncludeDeps:       includeDeps,
 		ExcludeDeps:       excludeDeps,
 		ReplaceConfigs:    replaceConfigs,
 		ReplaceConfigsAll: replaceConfigsAll,
 		Yes:               yes,
+		DankSearch:        danksearch,
+		DankCalendar:      dankcalendar,
+		DmsGreeter:        dmsGreeter,
 	}
 
 	runner := headless.NewRunner(cfg)
 
-	// Set up file logging
 	fileLogger, err := log.NewFileLogger()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to create log file: %v\n", err)
@@ -128,10 +152,6 @@ func runHeadless() error {
 			}
 		}()
 	} else {
-		// Drain the log channel to prevent blocking sends from deadlocking
-		// downstream components (distros, config deployer) that write to it.
-		// Use an explicit stop signal because this code does not own the
-		// runner log channel and cannot assume it will be closed.
 		defer drainLogChan(runner.GetLogChan())()
 	}
 
@@ -171,10 +191,6 @@ func runTUI() error {
 	if fileLogger != nil {
 		fileLogger.StartListening(model.GetLogChan())
 	} else {
-		// Drain the log channel to prevent blocking sends from deadlocking
-		// downstream components (distros, config deployer) that write to it.
-		// Use an explicit stop signal because this code does not own the
-		// model log channel and cannot assume it will be closed.
 		defer drainLogChan(model.GetLogChan())()
 	}
 
@@ -192,10 +208,9 @@ func runTUI() error {
 	return nil
 }
 
-// drainLogChan starts a goroutine that discards all messages from logCh,
-// preventing blocking sends from deadlocking downstream components. It returns
-// a cleanup function that signals the goroutine to stop and waits for it to
-// exit. Callers should defer the returned function.
+// drainLogChan discards messages from logCh so blocking sends in downstream
+// components cannot deadlock when no file logger is attached; the returned
+// cleanup stops the drain without assuming the channel will ever close.
 func drainLogChan(logCh <-chan string) func() {
 	drainStop := make(chan struct{})
 	drainDone := make(chan struct{})

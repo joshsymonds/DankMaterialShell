@@ -1,58 +1,51 @@
-pragma ComponentBehavior: Bound
-
 import QtQuick
 import qs.Common
-import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
-DankToggle {
+SettingsRow {
     id: root
 
-    LayoutMirroring.enabled: I18n.isRtl
-    LayoutMirroring.childrenInherit: true
+    property string text: ""
+    property string description: ""
+    property color descriptionColor: Theme.surfaceVariantText
+    property bool checked: false
+    property bool toggling: false
+    property alias accessory: accessorySlot.data
 
-    property string tab: ""
-    property var tags: []
-    property string settingKey: ""
+    signal toggled(bool checked)
 
-    readonly property bool isHighlighted: settingKey !== "" && SettingsSearchService.highlightSection === settingKey
-
-    width: parent?.width ?? 0
-
-    function findParentFlickable() {
-        let p = root.parent;
-        while (p) {
-            if (p.hasOwnProperty("contentY") && p.hasOwnProperty("contentItem"))
-                return p;
-            p = p.parent;
-        }
-        return null;
-    }
-
-    Component.onCompleted: {
-        if (!settingKey)
+    title: text
+    subtitle: description
+    subtitleColor: descriptionColor
+    clickable: true
+    resetKeys: []
+    Accessible.role: Accessible.CheckBox
+    Accessible.checkable: true
+    Accessible.checked: checked
+    Accessible.onToggleAction: root.clicked(true)
+    onClicked: {
+        if (!enabled || toggling)
             return;
-        let flickable = findParentFlickable();
-        if (flickable)
-            SettingsSearchService.registerCard(settingKey, root, flickable);
+        toggled(!checked);
     }
 
-    Component.onDestruction: {
-        if (settingKey)
-            SettingsSearchService.unregisterCard(settingKey);
+    Row {
+        id: accessorySlot
+        spacing: Theme.spacingS
+        visible: children.length > 0
+        anchors.verticalCenter: parent.verticalCenter
     }
 
-    Rectangle {
-        anchors.fill: parent
-        radius: Theme.cornerRadius
-        color: Theme.withAlpha(Theme.primary, root.isHighlighted ? 0.2 : 0)
-        visible: root.isHighlighted
-
-        Behavior on color {
-            ColorAnimation {
-                duration: Theme.shortDuration
-                easing.type: Theme.standardEasing
-            }
-        }
+    DToggle {
+        anchors.verticalCenter: parent.verticalCenter
+        hideText: true
+        text: root.text
+        description: root.description
+        activeFocusOnTab: false
+        Accessible.ignored: true
+        checked: root.checked
+        enabled: root.enabled
+        toggling: root.toggling
+        onToggled: value => root.toggled(value)
     }
 }

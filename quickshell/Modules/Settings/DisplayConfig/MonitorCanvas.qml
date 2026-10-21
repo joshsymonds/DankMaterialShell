@@ -1,15 +1,31 @@
 import QtQuick
 import qs.Common
+import qs.Services
+import qs.DCommon.Widgets
+import qs.Modules.Settings.Widgets
 
 Rectangle {
     id: root
 
+    property string draggingOutput: ""
+    readonly property bool identifyActive: draggingOutput !== "" || identifyButton.pressed
+
     property var filteredOutputs: {
+        void (DisplayConfigState.pendingHyprlandChanges);
+        void (DisplayConfigState.pendingNiriChanges);
         const all = DisplayConfigState.allOutputs || {};
         const keys = Object.keys(all);
-        if (SettingsData.displayShowDisconnected)
-            return keys;
-        return keys.filter(k => all[k]?.connected);
+        return keys.filter(k => {
+            const od = all[k];
+            const isConnected = od?.connected ?? false;
+            if (!isConnected)
+                return SettingsData.displayShowDisconnected;
+            if (CompositorService.isHyprland && DisplayConfigState.getHyprlandSetting(od, k, "disabled", false))
+                return false;
+            if (CompositorService.isNiri && DisplayConfigState.getNiriSetting(od, k, "disabled", false))
+                return false;
+            return true;
+        });
     }
 
     property var filteredBounds: {
@@ -47,9 +63,9 @@ Rectangle {
     width: parent.width
     height: 280
     radius: Theme.cornerRadius
-    color: Theme.surfaceContainerHighest
-    border.color: Theme.outline
-    border.width: 1
+    color: SettingsMetrics.rowColor
+    border.color: Theme.outlineMedium
+    border.width: Theme.layerOutlineWidth
 
     Item {
         id: canvas
@@ -76,7 +92,26 @@ Rectangle {
                 outputData: DisplayConfigState.allOutputs[modelData]
                 canvasScaleFactor: canvas.scaleFactor
                 canvasOffset: canvas.offset
+                onIsDraggingChanged: {
+                    if (isDragging) {
+                        root.draggingOutput = outputName;
+                        return;
+                    }
+                    if (root.draggingOutput === outputName)
+                        root.draggingOutput = "";
+                }
             }
         }
+    }
+
+    DActionButton {
+        id: identifyButton
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: Theme.spacingS
+        iconName: "badge"
+        iconColor: pressed ? Theme.primary : Theme.surfaceVariantText
+        tooltipText: I18n.tr("Identify", "button for identifying monitor positions")
+        z: 200
     }
 }

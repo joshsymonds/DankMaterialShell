@@ -1,7 +1,7 @@
 import QtQuick
 import qs.Common
 import qs.Modules.Plugins
-import qs.Widgets
+import qs.DCommon.Widgets
 
 PluginSettings {
     id: root
@@ -11,7 +11,7 @@ PluginSettings {
         width: parent.width
         text: "Color Demo Settings"
         font.pixelSize: Theme.fontSizeLarge
-        font.weight: Font.Bold
+        font.weight: Theme.fontWeightMedium
         color: Theme.surfaceText
     }
 

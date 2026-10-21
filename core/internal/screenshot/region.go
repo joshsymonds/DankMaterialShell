@@ -2,22 +2,42 @@ package screenshot
 
 import (
 	"fmt"
+	"math"
 	"sync"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/proto/keyboard_shortcuts_inhibit"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/proto/wlr_layer_shell"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/proto/wlr_screencopy"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/proto/wp_viewporter"
-	wlhelpers "github.com/AvengeMedia/DankMaterialShell/core/internal/wayland/client"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/go-wayland/wayland/client"
+	"github.com/duxlabs-dev/dux-go/wayland/client"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/proto/keyboard_shortcuts_inhibit"
+	"github.com/duxlabs-dev/dux-shell/core/internal/proto/wlr_layer_shell"
+	"github.com/duxlabs-dev/dux-shell/core/internal/proto/wlr_screencopy"
+	"github.com/duxlabs-dev/dux-shell/core/internal/proto/wp_cursor_shape"
+	"github.com/duxlabs-dev/dux-shell/core/internal/proto/wp_viewporter"
+	wlhelpers "github.com/duxlabs-dev/dux-shell/core/internal/wayland/client"
+	"github.com/duxlabs-dev/dux-shell/core/internal/wayland/keymap"
+)
+
+type resizeHandle int
+
+const (
+	handleNone resizeHandle = iota
+	handleTopLeft
+	handleTopRight
+	handleBottomLeft
+	handleBottomRight
+)
+
+const (
+	resizeHandleRadius = 12
+	resizeHitRadius    = resizeHandleRadius + 4
 )
 
 type SelectionState struct {
-	hasSelection bool           // There's a selection to display (pre-loaded or user-drawn)
-	dragging     bool           // User is actively drawing a new selection
-	surface      *OutputSurface // Surface where selection was made
-	// Surface-local logical coordinates (from pointer events)
+	hasSelection  bool           // There's a selection to display (pre-loaded or user-drawn)
+	fromPreSelect bool           // hasSelection was set by applyPreSelection, not by user interaction
+	dragging      bool           // User is actively drawing a new selection
+	surface       *OutputSurface // Surface where selection was made
+	// Global logical coordinates. Keeping these independent of the active
+	// surface lets a drag continue across output boundaries.
 	anchorX  float64
 	anchorY  float64
 	currentX float64
@@ -25,10 +45,28 @@ type SelectionState struct {
 }
 
 type RenderSlot struct {
-	shm   *ShmBuffer
-	pool  *client.ShmPool
-	wlBuf *client.Buffer
-	busy  bool
+	shm                   *ShmBuffer
+	pool                  *client.ShmPool
+	wlBuf                 *client.Buffer
+	busy                  bool
+	backgroundInitialized bool
+	backgroundSource      *ShmBuffer
+	backgroundDragging    bool
+	backgroundCursor      bool
+	backgroundPhase       selectorPhase
+	backgroundHandles     bool
+	backgroundShift       bool
+	overlay               *overlay
+}
+
+func (s *RenderSlot) cacheValid(src *ShmBuffer, dragging, cursor bool, phase selectorPhase, handles, shift bool) bool {
+	return s.backgroundInitialized &&
+		s.backgroundSource == src &&
+		s.backgroundDragging == dragging &&
+		s.backgroundCursor == cursor &&
+		s.backgroundPhase == phase &&
+		s.backgroundHandles == handles &&
+		s.backgroundShift == shift
 }
 
 type OutputSurface struct {
@@ -45,8 +83,16 @@ type OutputSurface struct {
 	yInverted         bool
 
 	// Triple-buffered render slots
-	slots      [3]*RenderSlot
-	slotsReady bool
+	slots        [3]*RenderSlot
+	slotsReady   bool
+	slotFormat   uint32
+	slotPrefault sync.WaitGroup
+	captured     bool
+
+	shown           *overlay
+	framePending    bool
+	redrawQueued    bool
+	committedCursor bool
 }
 
 type PreCapture struct {
@@ -54,6 +100,9 @@ type PreCapture struct {
 	screenBufNoCursor *ShmBuffer
 	format            uint32
 	yInverted         bool
+	width             int
+	height            int
+	stride            int
 }
 
 type RegionSelector struct {
@@ -67,10 +116,14 @@ type RegionSelector struct {
 	shm        *client.Shm
 	seat       *client.Seat
 	pointer    *client.Pointer
+	touch      *client.Touch
 	keyboard   *client.Keyboard
+	keymap     *keymap.Keymap
 	layerShell *wlr_layer_shell.ZwlrLayerShellV1
 	screencopy *wlr_screencopy.ZwlrScreencopyManagerV1
 	viewporter *wp_viewporter.WpViewporter
+
+	compositorVersion uint32
 
 	shortcutsInhibitMgr *keyboard_shortcuts_inhibit.ZwpKeyboardShortcutsInhibitManagerV1
 	shortcutsInhibitor  *keyboard_shortcuts_inhibit.ZwpKeyboardShortcutsInhibitorV1
@@ -82,21 +135,42 @@ type RegionSelector struct {
 	surfaces      []*OutputSurface
 	activeSurface *OutputSurface
 
-	// Cursor surface for crosshair
+	// Cursor surface fallback when the compositor lacks cursor shapes.
 	cursorSurface *client.Surface
 	cursorBuffer  *ShmBuffer
+	cursorSerial  uint32
+	cursorShape   *wp_cursor_shape.WpCursorShapeManagerV1
+	cursorDevice  *wp_cursor_shape.WpCursorShapeDeviceV1
 	cursorWlBuf   *client.Buffer
 	cursorPool    *client.ShmPool
 
 	selection          SelectionState
 	pointerX           float64
 	pointerY           float64
+	hasTouchPoint      bool
+	touchPointId       int32
 	preSelect          Region
 	showCapturedCursor bool
 	shiftHeld          bool
+	ctrlHeld           bool
+	altHeld            bool
+	movingSelection    bool
+	moveOffsetX        float64
+	moveOffsetY        float64
+	resizingHandle     resizeHandle
+
+	phase  selectorPhase
+	scroll *scrollSession
+
+	snapTargets   []SnapTarget
+	hoveredTarget *SnapTarget
+	clickedTarget *SnapTarget
+	dragStartX    float64
+	dragStartY    float64
 
 	running   bool
 	cancelled bool
+	copyOnly  bool
 	result    Region
 
 	capturedBuffer *ShmBuffer
@@ -109,6 +183,7 @@ func NewRegionSelector(s *Screenshoter) *RegionSelector {
 		outputs:            make(map[uint32]*WaylandOutput),
 		preCapture:         make(map[*WaylandOutput]*PreCapture),
 		showCapturedCursor: s.config.Cursor == CursorOn,
+		snapTargets:        s.config.SnapTargets,
 	}
 }
 
@@ -151,10 +226,7 @@ func (r *RegionSelector) Run() (*CaptureResult, bool, error) {
 		return nil, false, fmt.Errorf("roundtrip after protocol check: %w", err)
 	}
 
-	if err := r.preCaptureAllOutputs(); err != nil {
-		return nil, false, fmt.Errorf("pre-capture: %w", err)
-	}
-
+	// unmapped until their first buffer, so the configure round trip overlaps the captures
 	if err := r.createSurfaces(); err != nil {
 		return nil, false, fmt.Errorf("create surfaces: %w", err)
 	}
@@ -165,22 +237,56 @@ func (r *RegionSelector) Run() (*CaptureResult, bool, error) {
 		return nil, false, fmt.Errorf("roundtrip after surfaces: %w", err)
 	}
 
+	if err := r.preCaptureAllOutputs(); err != nil {
+		return nil, false, fmt.Errorf("pre-capture: %w", err)
+	}
+
+	for _, os := range r.surfaces {
+		if os.configured && !os.captured {
+			r.captureForSurface(os)
+		}
+	}
+
 	r.running = true
 	for r.running {
-		if err := r.ctx.Dispatch(); err != nil {
+		if err := r.dispatchOrTick(); err != nil {
 			return nil, false, fmt.Errorf("dispatch: %w", err)
 		}
 	}
 
-	if r.cancelled || r.capturedBuffer == nil {
+	if r.scroll != nil && r.scroll.abortErr != nil {
+		return nil, false, r.scroll.abortErr
+	}
+
+	if r.cancelled {
+		return nil, true, nil
+	}
+
+	if r.screenshoter != nil && r.screenshoter.config.Geometry {
+		reg, ok := r.selectedLogicalGeometry()
+		if !ok {
+			return nil, true, nil
+		}
+		return geometryResult(reg), false, nil
+	}
+
+	if r.capturedBuffer == nil {
 		return nil, r.cancelled, nil
 	}
 
 	yInverted := false
 	var format uint32
+	scale := 1.0
 	if r.selection.surface != nil {
 		yInverted = r.selection.surface.yInverted
 		format = r.selection.surface.screenFormat
+		if s := r.selection.surface.output.fractionalScale; s > 0 {
+			scale = s
+		}
+	}
+	if r.scroll != nil {
+		yInverted = false
+		format = uint32(r.scroll.format)
 	}
 
 	return &CaptureResult{
@@ -188,7 +294,45 @@ func (r *RegionSelector) Run() (*CaptureResult, bool, error) {
 		Region:    r.result,
 		YInverted: yInverted,
 		Format:    format,
+		Scale:     scale,
+		CopyOnly:  r.copyOnly,
 	}, false, nil
+}
+
+func (r *RegionSelector) selectedLogicalGeometry() (Region, bool) {
+	ext, ok := r.selectionExtent()
+	if !ok || ext.width() <= 0 || ext.height() <= 0 {
+		return Region{}, false
+	}
+
+	x1, y1, x2, y2 := ext.logical()
+	lx := int(math.Round(x1))
+	ly := int(math.Round(y1))
+	lw := int(math.Round(x2 - x1))
+	lh := int(math.Round(y2 - y1))
+
+	if r.shiftHeld && ext.within(ext.surface) {
+		size := min(lw, lh)
+		lw = size
+		lh = size
+	}
+
+	if lw <= 0 || lh <= 0 {
+		return Region{}, false
+	}
+
+	outputName := ""
+	if ext.within(ext.surface) && ext.surface.output != nil {
+		outputName = ext.surface.output.name
+	}
+
+	return Region{
+		X:      int32(lx),
+		Y:      int32(ly),
+		Width:  int32(lw),
+		Height: int32(lh),
+		Output: outputName,
+	}, true
 }
 
 func (r *RegionSelector) connect() error {
@@ -231,6 +375,7 @@ func (r *RegionSelector) handleGlobal(e client.RegistryGlobalEvent) {
 		comp := client.NewCompositor(r.ctx)
 		if err := r.registry.Bind(e.Name, e.Interface, e.Version, comp); err == nil {
 			r.compositor = comp
+			r.compositorVersion = e.Version
 		}
 
 	case client.ShmInterfaceName:
@@ -248,10 +393,7 @@ func (r *RegionSelector) handleGlobal(e client.RegistryGlobalEvent) {
 
 	case client.OutputInterfaceName:
 		output := client.NewOutput(r.ctx)
-		version := e.Version
-		if version > 4 {
-			version = 4
-		}
+		version := min(e.Version, 4)
 		if err := r.registry.Bind(e.Name, e.Interface, version, output); err == nil {
 			r.outputsMu.Lock()
 			r.outputs[e.Name] = &WaylandOutput{
@@ -266,20 +408,14 @@ func (r *RegionSelector) handleGlobal(e client.RegistryGlobalEvent) {
 
 	case wlr_layer_shell.ZwlrLayerShellV1InterfaceName:
 		ls := wlr_layer_shell.NewZwlrLayerShellV1(r.ctx)
-		version := e.Version
-		if version > 4 {
-			version = 4
-		}
+		version := min(e.Version, 4)
 		if err := r.registry.Bind(e.Name, e.Interface, version, ls); err == nil {
 			r.layerShell = ls
 		}
 
 	case wlr_screencopy.ZwlrScreencopyManagerV1InterfaceName:
 		sc := wlr_screencopy.NewZwlrScreencopyManagerV1(r.ctx)
-		version := e.Version
-		if version > 3 {
-			version = 3
-		}
+		version := min(e.Version, 3)
 		if err := r.registry.Bind(e.Name, e.Interface, version, sc); err == nil {
 			r.screencopy = sc
 		}
@@ -294,6 +430,12 @@ func (r *RegionSelector) handleGlobal(e client.RegistryGlobalEvent) {
 		mgr := keyboard_shortcuts_inhibit.NewZwpKeyboardShortcutsInhibitManagerV1(r.ctx)
 		if err := r.registry.Bind(e.Name, e.Interface, e.Version, mgr); err == nil {
 			r.shortcutsInhibitMgr = mgr
+		}
+
+	case wp_cursor_shape.WpCursorShapeManagerV1InterfaceName:
+		mgr := wp_cursor_shape.NewWpCursorShapeManagerV1(r.ctx)
+		if err := r.registry.Bind(e.Name, e.Interface, 1, mgr); err == nil {
+			r.cursorShape = mgr
 		}
 	}
 }
@@ -394,6 +536,13 @@ func (r *RegionSelector) preCaptureOutput(output *WaylandOutput, pc *PreCapture,
 			log.Error("invalid stride from compositor", "stride", e.Stride, "width", e.Width, "bpp", bpp)
 			return
 		}
+		if pc.width == 0 {
+			pc.width, pc.height, pc.stride = int(e.Width), int(e.Height), int(e.Stride)
+			pc.format = uint32(capturedFormat.To8Bit())
+			if bpp == 4 && output.transform == TransformNormal {
+				r.prepareSlots(output, pc)
+			}
+		}
 		buf, err := CreateShmBuffer(int(e.Width), int(e.Height), int(e.Stride))
 		if err != nil {
 			log.Error("create screen buffer failed", "err", err)
@@ -445,6 +594,12 @@ func (r *RegionSelector) preCaptureOutput(output *WaylandOutput, pc *PreCapture,
 				capturedBuf = converted
 				capturedFormat = newFormat
 			}
+		}
+
+		// Overlay rendering and crop work on 8-bit pixels only
+		if capturedFormat.Is10Bit() {
+			capturedBuf.Convert10To8()
+			capturedFormat = capturedBuf.Format
 		}
 
 		pc.format = uint32(capturedFormat)
@@ -518,8 +673,8 @@ func (r *RegionSelector) createCursor() error {
 
 	// Draw crosshair
 	data := buf.Data()
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
+	for y := range size {
+		for x := range size {
 			off := (y*size + x) * 4
 			// Vertical line
 			if x >= hotspot-1 && x <= hotspot && y >= 2 && y < size-2 {
@@ -568,6 +723,58 @@ func (r *RegionSelector) createCursor() error {
 	}
 
 	return nil
+}
+
+func (r *RegionSelector) refreshCursor() {
+	r.setNativeCursor(r.cursorSerial)
+}
+
+func cursorShapeForHandle(handle resizeHandle) uint32 {
+	switch handle {
+	case handleTopLeft, handleBottomRight:
+		return uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapeNwseResize)
+	case handleTopRight, handleBottomLeft:
+		return uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapeNeswResize)
+	default:
+		return uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapeGrab)
+	}
+}
+
+func (r *RegionSelector) setNativeCursor(serial uint32) {
+	if r.cursorShape == nil || r.pointer == nil || serial == 0 {
+		return
+	}
+	shape := uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapeCrosshair)
+	if r.phase == phaseScroll {
+		switch r.scrollBarHit(r.pointerX, r.pointerY) {
+		case "done", "cancel", "preview":
+			shape = uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapePointer)
+		default:
+			shape = uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapeDefault)
+		}
+	} else if r.resizingHandle != handleNone {
+		shape = cursorShapeForHandle(r.resizingHandle)
+	} else if r.movingSelection && r.selection.dragging {
+		shape = uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapeGrabbing)
+	} else if r.ctrlHeld && r.selection.hasSelection && !r.selection.dragging {
+		if r.activeSurface != nil && r.activeSurface.output != nil {
+			pointerGlobalX := r.pointerX + float64(r.activeSurface.output.x)
+			pointerGlobalY := r.pointerY + float64(r.activeSurface.output.y)
+			shape = cursorShapeForHandle(r.resizeHandleAt(pointerGlobalX, pointerGlobalY))
+		} else {
+			shape = uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapeGrab)
+		}
+	} else if r.ctrlHeld && !r.selection.dragging {
+		shape = uint32(wp_cursor_shape.WpCursorShapeDeviceV1ShapeGrab)
+	}
+	if r.cursorDevice == nil {
+		device, err := r.cursorShape.GetPointer(r.pointer)
+		if err != nil {
+			return
+		}
+		r.cursorDevice = device
+	}
+	_ = r.cursorDevice.SetShape(serial, shape)
 }
 
 func (r *RegionSelector) createOutputSurface(output *WaylandOutput) (*OutputSurface, error) {
@@ -658,25 +865,61 @@ func (r *RegionSelector) captureForSurface(os *OutputSurface) {
 	os.screenBufNoCursor = pc.screenBufNoCursor
 	os.screenFormat = pc.format
 	os.yInverted = pc.yInverted
+	if os.screenBuf == nil {
+		return
+	}
+	os.captured = true
 
-	if os.logicalW > 0 && os.screenBuf != nil {
+	if os.logicalW > 0 {
 		os.output.fractionalScale = float64(os.screenBuf.Width) / float64(os.logicalW)
 	}
 
-	r.initRenderBuffer(os)
+	r.ensureSlots(os, os.screenBuf.Width, os.screenBuf.Height, os.screenBuf.Stride, os.screenFormat)
 	r.applyPreSelection(os)
 	r.redrawSurface(os)
 }
 
-func (r *RegionSelector) initRenderBuffer(os *OutputSurface) {
-	if os.screenBuf == nil {
+// prefaulted while the copy is in flight so the first paint does not stall on page faults
+func (r *RegionSelector) prepareSlots(output *WaylandOutput, pc *PreCapture) {
+	for _, os := range r.surfaces {
+		if os.output == output && os.configured {
+			r.ensureSlots(os, pc.width, pc.height, pc.stride, pc.format)
+		}
+	}
+}
+
+func (r *RegionSelector) releaseSlots(os *OutputSurface) {
+	os.slotPrefault.Wait()
+	os.slotsReady = false
+	for i, slot := range os.slots {
+		if slot == nil {
+			continue
+		}
+		slot.wlBuf.Destroy()
+		slot.pool.Destroy()
+		slot.shm.Close()
+		os.slots[i] = nil
+	}
+}
+
+func prefault(buf *ShmBuffer) {
+	data := buf.Data()
+	for i := 0; i < len(data); i += 4096 {
+		data[i] = 0
+	}
+}
+
+func (r *RegionSelector) ensureSlots(os *OutputSurface, width, height, stride int, format uint32) {
+	if first := os.slots[0]; os.slotsReady && first != nil && first.shm.Width == width && first.shm.Height == height && first.shm.Stride == stride && os.slotFormat == format {
 		return
 	}
+	r.releaseSlots(os)
+	os.slotFormat = format
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		slot := &RenderSlot{}
 
-		buf, err := CreateShmBuffer(os.screenBuf.Width, os.screenBuf.Height, os.screenBuf.Stride)
+		buf, err := CreateShmBuffer(width, height, stride)
 		if err != nil {
 			log.Error("create render slot buffer failed", "err", err)
 			return
@@ -691,7 +934,9 @@ func (r *RegionSelector) initRenderBuffer(os *OutputSurface) {
 		}
 		slot.pool = pool
 
-		wlBuf, err := pool.CreateBuffer(0, int32(buf.Width), int32(buf.Height), int32(buf.Stride), os.screenFormat)
+		// niri latches surface opacity from the first buffer's format
+		// (observed), so slots are ARGB from the start with A=255 when opaque
+		wlBuf, err := pool.CreateBuffer(0, int32(buf.Width), int32(buf.Height), int32(buf.Stride), alphaFormat(format))
 		if err != nil {
 			log.Error("create render slot wl_buffer failed", "err", err)
 			pool.Destroy()
@@ -703,11 +948,21 @@ func (r *RegionSelector) initRenderBuffer(os *OutputSurface) {
 		slotRef := slot
 		wlBuf.SetReleaseHandler(func(e client.BufferReleaseEvent) {
 			slotRef.busy = false
+			if os.redrawQueued && !os.framePending {
+				r.renderSurface(os)
+			}
 		})
 
 		os.slots[i] = slot
 	}
 	os.slotsReady = true
+	os.slotPrefault.Add(1)
+	go func() {
+		defer os.slotPrefault.Done()
+		for _, slot := range os.slots {
+			prefault(slot.shm)
+		}
+	}()
 }
 
 func (os *OutputSurface) acquireFreeSlot() *RenderSlot {
@@ -733,16 +988,18 @@ func (r *RegionSelector) applyPreSelection(os *OutputSurface) {
 
 	x1 := float64(r.preSelect.X-os.output.x) * scaleX
 	y1 := float64(r.preSelect.Y-os.output.y) * scaleY
-	x2 := float64(r.preSelect.X-os.output.x+r.preSelect.Width) * scaleX
-	y2 := float64(r.preSelect.Y-os.output.y+r.preSelect.Height) * scaleY
+	// selection edges are inclusive; the exclusive width edge is one device px past it
+	x2 := float64(r.preSelect.X-os.output.x+r.preSelect.Width)*scaleX - scaleX
+	y2 := float64(r.preSelect.Y-os.output.y+r.preSelect.Height)*scaleY - scaleY
 
 	r.selection.hasSelection = true
+	r.selection.fromPreSelect = true
 	r.selection.dragging = false
 	r.selection.surface = os
-	r.selection.anchorX = x1
-	r.selection.anchorY = y1
-	r.selection.currentX = x2
-	r.selection.currentY = y2
+	r.selection.anchorX = float64(os.output.x) + x1
+	r.selection.anchorY = float64(os.output.y) + y1
+	r.selection.currentX = float64(os.output.x) + x2
+	r.selection.currentY = float64(os.output.y) + y2
 	r.activeSurface = os
 }
 
@@ -753,7 +1010,16 @@ func (r *RegionSelector) getSourceBuffer(os *OutputSurface) *ShmBuffer {
 	return os.screenBuf
 }
 
+// redrawSurface coalesces redraws to one per compositor frame.
 func (r *RegionSelector) redrawSurface(os *OutputSurface) {
+	os.redrawQueued = true
+	if os.framePending {
+		return
+	}
+	r.renderSurface(os)
+}
+
+func (r *RegionSelector) renderSurface(os *OutputSurface) {
 	srcBuf := r.getSourceBuffer(os)
 	if srcBuf == nil || !os.slotsReady {
 		return
@@ -763,11 +1029,51 @@ func (r *RegionSelector) redrawSurface(os *OutputSurface) {
 	if slot == nil {
 		return
 	}
+	os.redrawQueued = false
+	os.slotPrefault.Wait()
 
-	slot.shm.CopyFrom(srcBuf)
-
-	// Draw overlay (dimming + selection) into this slot
-	r.drawOverlay(os, slot.shm)
+	fullDamage := true
+	var damage []dirtyRect
+	switch r.phase {
+	case phaseScroll:
+		r.drawScrollOverlay(os, slot.shm)
+		slot.backgroundInitialized = false
+		slot.backgroundSource = nil
+		slot.overlay, os.shown = nil, nil
+	default:
+		cur := r.overlayFor(os, slot.shm)
+		handles := (r.resizingHandle != handleNone || (r.ctrlHeld && !r.selection.dragging)) && r.selection.hasSelection && r.phase != phaseScroll
+		shift := r.shiftHeld && r.selection.hasSelection
+		switch {
+		case !slot.cacheValid(srcBuf, r.selection.dragging, r.showCapturedCursor, r.phase, handles, shift):
+			paintDimmedFrame(slot.shm, srcBuf)
+			effectiveScale := 1.0
+			if os.output != nil {
+				effectiveScale = os.output.effectiveScale()
+			}
+			hudScale := r.hudScale(effectiveScale)
+			r.drawHUD(slot.shm.Data(), slot.shm.Stride, slot.shm.Width, slot.shm.Height, os.screenFormat, hudScale)
+			slot.backgroundInitialized = true
+			slot.backgroundSource = srcBuf
+			slot.backgroundDragging = r.selection.dragging
+			slot.backgroundCursor = r.showCapturedCursor
+			slot.backgroundPhase = r.phase
+			slot.backgroundHandles = handles
+			slot.backgroundShift = shift
+			slot.overlay = nil
+		case r.compositorVersion >= 4:
+			fullDamage = false
+			damage = overlayDamage(os.shown, cur)
+			if os.committedCursor != r.showCapturedCursor {
+				fullDamage = true
+				damage = nil
+			} else if len(damage) == 0 {
+				return
+			}
+		}
+		r.drawOverlay(os, slot.shm, slot.overlay, cur)
+		slot.overlay, os.shown = cur, cur
+	}
 
 	if os.viewport != nil {
 		_ = os.wlSurface.SetBufferScale(1)
@@ -782,8 +1088,30 @@ func (r *RegionSelector) redrawSurface(os *OutputSurface) {
 	}
 
 	_ = os.wlSurface.Attach(slot.wlBuf, 0, 0)
-	_ = os.wlSurface.Damage(0, 0, int32(os.logicalW), int32(os.logicalH))
+	switch {
+	case fullDamage:
+		_ = os.wlSurface.Damage(0, 0, int32(os.logicalW), int32(os.logicalH))
+	default:
+		for _, d := range damage {
+			d = d.clampTo(slot.shm.Width, slot.shm.Height)
+			if d.empty() {
+				continue
+			}
+			_ = os.wlSurface.DamageBuffer(int32(d.x1), int32(d.y1), int32(d.x2-d.x1), int32(d.y2-d.y1))
+		}
+	}
+	if cb, err := os.wlSurface.Frame(); err == nil {
+		os.framePending = true
+		cb.SetDoneHandler(func(client.CallbackDoneEvent) {
+			_ = cb.Destroy()
+			os.framePending = false
+			if os.redrawQueued {
+				r.renderSurface(os)
+			}
+		})
+	}
 	_ = os.wlSurface.Commit()
+	os.committedCursor = r.showCapturedCursor
 
 	// Mark this slot as busy until compositor releases it
 	slot.busy = true
@@ -802,6 +1130,14 @@ func (r *RegionSelector) cleanup() {
 	if r.cursorBuffer != nil {
 		r.cursorBuffer.Close()
 	}
+	if r.cursorDevice != nil {
+		_ = r.cursorDevice.Destroy()
+	}
+	if r.cursorShape != nil {
+		_ = r.cursorShape.Destroy()
+	}
+
+	r.cleanupScroll()
 
 	for _, os := range r.surfaces {
 		for _, slot := range os.slots {
@@ -849,6 +1185,9 @@ func (r *RegionSelector) cleanup() {
 	}
 	if r.pointer != nil {
 		r.pointer.Release()
+	}
+	if r.touch != nil {
+		_ = r.touch.Release()
 	}
 	if r.keyboard != nil {
 		r.keyboard.Release()

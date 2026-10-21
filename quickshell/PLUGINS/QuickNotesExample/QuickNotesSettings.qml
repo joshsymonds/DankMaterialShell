@@ -1,5 +1,6 @@
 import QtQuick
-import qs.Widgets
+import qs.Common
+import qs.DCommon.Widgets
 
 FocusScope {
     id: root
@@ -13,12 +14,12 @@ FocusScope {
         id: settingsColumn
         anchors.fill: parent
         anchors.margins: 16
-        spacing: 16
+        spacing: Theme.spacingL
 
         Text {
             text: "Quick Notes Settings"
             font.pixelSize: 18
-            font.weight: Font.Bold
+            font.weight: Theme.fontWeightMedium
             color: "#FFFFFF"
         }
 
@@ -37,18 +38,18 @@ FocusScope {
         }
 
         Column {
-            spacing: 12
+            spacing: Theme.spacingM
             width: parent.width - 32
 
             Text {
                 text: "Trigger Configuration"
                 font.pixelSize: 16
-                font.weight: Font.Medium
+                font.weight: Theme.fontWeightMedium
                 color: "#FFFFFF"
             }
 
             Row {
-                spacing: 12
+                spacing: Theme.spacingM
                 anchors.left: parent.left
                 anchors.right: parent.right
 
@@ -59,7 +60,7 @@ FocusScope {
                     anchors.verticalCenter: parent.verticalCenter
                 }
 
-                DankTextField {
+                DTextField {
                     id: triggerField
                     width: 100
                     height: 40
@@ -82,18 +83,18 @@ FocusScope {
         }
 
         Column {
-            spacing: 12
+            spacing: Theme.spacingM
             width: parent.width - 32
 
             Text {
                 text: "Storage"
                 font.pixelSize: 16
-                font.weight: Font.Medium
+                font.weight: Theme.fontWeightMedium
                 color: "#FFFFFF"
             }
 
             Row {
-                spacing: 12
+                spacing: Theme.spacingM
 
                 Text {
                     text: "Max notes:"
@@ -102,7 +103,7 @@ FocusScope {
                     anchors.verticalCenter: parent.verticalCenter
                 }
 
-                DankTextField {
+                DTextField {
                     id: maxNotesField
                     width: 80
                     height: 40
@@ -137,7 +138,7 @@ FocusScope {
                 Row {
                     id: clearRow
                     anchors.centerIn: parent
-                    spacing: 8
+                    spacing: Theme.spacingS
 
                     Text {
                         text: "🗑"
@@ -174,18 +175,18 @@ FocusScope {
         }
 
         Column {
-            spacing: 8
+            spacing: Theme.spacingS
             width: parent.width - 32
 
             Text {
                 text: "API Usage (for plugin developers):"
                 font.pixelSize: 14
-                font.weight: Font.Medium
+                font.weight: Theme.fontWeightMedium
                 color: "#FFFFFF"
             }
 
             Column {
-                spacing: 4
+                spacing: Theme.spacingXS
                 leftPadding: 16
                 bottomPadding: 24
 

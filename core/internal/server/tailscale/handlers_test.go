@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"tailscale.com/ipn"
@@ -46,12 +48,12 @@ func TestHandleGetStatus(t *testing.T) {
 	defer m.Close()
 
 	buf := &bytes.Buffer{}
-	conn := &mockConn{Buffer: buf}
+	conn := ipc.NewConnWriter(&mockConn{Buffer: buf})
 
-	req := models.Request{ID: 1, Method: "tailscale.getStatus"}
+	req := ipc.Request{ID: 1, Method: "tailscale.getStatus"}
 	handleGetStatus(conn, req, m)
 
-	var resp models.Response[TailscaleState]
+	var resp ipc.Response[TailscaleState]
 	err := json.NewDecoder(buf).Decode(&resp)
 	require.NoError(t, err)
 	assert.Equal(t, 1, resp.ID)
@@ -60,22 +62,60 @@ func TestHandleGetStatus(t *testing.T) {
 	assert.Equal(t, "cachyos", resp.Result.Self.Hostname)
 }
 
-func TestHandleRefresh(t *testing.T) {
-	m := handlerTestManager()
+func TestHandleActions(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		params map[string]any
+	}{
+		{"connect", "tailscale.connect", nil},
+		{"disconnect", "tailscale.disconnect", nil},
+		{"setExitNode", "tailscale.setExitNode", map[string]any{"id": "nABC123"}},
+		{"setAllowLanAccess", "tailscale.setAllowLanAccess", map[string]any{"enabled": true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := handlerTestManager()
+			defer m.Close()
+
+			buf := &bytes.Buffer{}
+			conn := ipc.NewConnWriter(&mockConn{Buffer: buf})
+
+			req := ipc.Request{ID: 1, Method: tc.method, Params: tc.params}
+			HandleRequest(conn, req, m)
+
+			var resp ipc.Response[models.SuccessResult]
+			require.NoError(t, json.NewDecoder(buf).Decode(&resp))
+			assert.Equal(t, 1, resp.ID)
+			assert.Empty(t, resp.Error)
+			require.NotNil(t, resp.Result)
+			assert.True(t, resp.Result.Success)
+		})
+	}
+}
+
+func TestHandleAction_BackendError(t *testing.T) {
+	client := &mockClient{
+		watchFn:  blockingWatch,
+		statusFn: func(ctx context.Context) (*ipnstate.Status, error) { return runningStatus(), nil },
+		editPrefsFn: func(ctx context.Context, mp *ipn.MaskedPrefs) (*ipn.Prefs, error) {
+			return nil, fmt.Errorf("backend rejected edit")
+		},
+	}
+	m := newManager(client)
 	defer m.Close()
 
 	buf := &bytes.Buffer{}
-	conn := &mockConn{Buffer: buf}
+	conn := ipc.NewConnWriter(&mockConn{Buffer: buf})
 
-	req := models.Request{ID: 1, Method: "tailscale.refresh"}
-	handleRefresh(conn, req, m)
+	req := ipc.Request{ID: 1, Method: "tailscale.connect"}
+	HandleRequest(conn, req, m)
 
-	var resp models.Response[models.SuccessResult]
-	err := json.NewDecoder(buf).Decode(&resp)
-	require.NoError(t, err)
-	assert.Equal(t, 1, resp.ID)
-	assert.NotNil(t, resp.Result)
-	assert.True(t, resp.Result.Success)
+	var resp ipc.Response[models.SuccessResult]
+	require.NoError(t, json.NewDecoder(buf).Decode(&resp))
+	assert.Nil(t, resp.Result)
+	assert.Contains(t, resp.Error, "backend rejected edit")
 }
 
 func TestHandleRequest_UnknownMethod(t *testing.T) {
@@ -83,12 +123,12 @@ func TestHandleRequest_UnknownMethod(t *testing.T) {
 	defer m.Close()
 
 	buf := &bytes.Buffer{}
-	conn := &mockConn{Buffer: buf}
+	conn := ipc.NewConnWriter(&mockConn{Buffer: buf})
 
-	req := models.Request{ID: 1, Method: "tailscale.unknownMethod"}
+	req := ipc.Request{ID: 1, Method: "tailscale.unknownMethod"}
 	HandleRequest(conn, req, m)
 
-	var resp models.Response[any]
+	var resp ipc.Response[any]
 	err := json.NewDecoder(buf).Decode(&resp)
 	require.NoError(t, err)
 	assert.Nil(t, resp.Result)

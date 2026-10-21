@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/dbusutil"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/dbusutil"
+	"github.com/duxlabs-dev/dux-go/syncmap"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -34,6 +34,7 @@ const (
 type GeoClueClient struct {
 	currLocation  *Location
 	locationMutex sync.RWMutex
+	seedOnce      sync.Once
 
 	dbusConn   *dbus.Conn
 	clientPath dbus.ObjectPath
@@ -46,7 +47,7 @@ type GeoClueClient struct {
 }
 
 func newGeoClueClient() (*GeoClueClient, error) {
-	dbusConn, err := dbus.ConnectSystemBus()
+	dbusConn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("system bus connection failed: %w", err)
 	}
@@ -63,7 +64,6 @@ func newGeoClueClient() (*GeoClueClient, error) {
 	}
 
 	if err := c.setupClient(); err != nil {
-		dbusConn.Close()
 		return nil, err
 	}
 
@@ -89,10 +89,6 @@ func (c *GeoClueClient) Close() {
 		c.subscribers.Delete(key)
 		return true
 	})
-
-	if c.dbusConn != nil {
-		c.dbusConn.Close()
-	}
 }
 
 func (c *GeoClueClient) Subscribe(id string) chan Location {
@@ -132,14 +128,12 @@ func (c *GeoClueClient) startSignalPump() error {
 	if err := c.dbusConn.AddMatchSignal(
 		dbus.WithMatchObjectPath(c.clientPath),
 		dbus.WithMatchInterface(dbusGeoClueClientInterface),
-		dbus.WithMatchSender(dbusGeoClueClientLocationUpdated),
+		dbus.WithMatchMember("LocationUpdated"),
 	); err != nil {
 		return err
 	}
 
-	c.sigWG.Add(1)
-	go func() {
-		defer c.sigWG.Done()
+	c.sigWG.Go(func() {
 
 		clientObj := c.dbusConn.Object(dbusGeoClueService, c.clientPath)
 		clientObj.Call(dbusGeoClueClientTimeStart, 0)
@@ -160,7 +154,7 @@ func (c *GeoClueClient) startSignalPump() error {
 				c.handleSignal(sig)
 			}
 		}
-	}()
+	})
 
 	return nil
 }
@@ -230,14 +224,29 @@ func (c *GeoClueClient) SeedLocation(loc Location) {
 }
 
 func (c *GeoClueClient) GetLocation() (Location, error) {
+	loc := c.currentLocation()
+	if loc.Latitude != 0 || loc.Longitude != 0 {
+		return loc, nil
+	}
+
+	c.seedOnce.Do(func() {
+		ipLoc, err := fetchIPLocation()
+		if err != nil {
+			log.Warnf("GeoClue2 has no fix, IP location seed failed: %v", err)
+			return
+		}
+		log.Info("Seeded GeoClue2 with IP location")
+		c.SeedLocation(Location{Latitude: ipLoc.Latitude, Longitude: ipLoc.Longitude})
+	})
+
+	return c.currentLocation(), nil
+}
+
+func (c *GeoClueClient) currentLocation() Location {
 	c.locationMutex.RLock()
 	defer c.locationMutex.RUnlock()
 	if c.currLocation == nil {
-		return Location{
-			Latitude:  0.0,
-			Longitude: 0.0,
-		}, nil
+		return Location{}
 	}
-	stateCopy := *c.currLocation
-	return stateCopy, nil
+	return *c.currLocation
 }

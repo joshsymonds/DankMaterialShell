@@ -7,6 +7,7 @@ import Quickshell.Io
 import Quickshell.Services.Notifications
 import qs.Common
 import qs.Services
+import "../Common/Format.js" as Format
 import "../Common/markdown2html.js" as Markdown2Html
 
 Singleton {
@@ -16,6 +17,23 @@ Singleton {
     readonly property list<NotifWrapper> notifications: []
     readonly property list<NotifWrapper> allWrappers: []
     readonly property list<NotifWrapper> popups: allWrappers.filter(n => n && n.popup)
+
+    property var seenNotifications: []
+    readonly property int unreadCount: {
+        const seen = root.seenNotifications;
+        if (seen.length === 0)
+            return root.notifications.length;
+        let count = 0;
+        for (const wrapper of root.notifications) {
+            if (seen.indexOf(wrapper) === -1)
+                count++;
+        }
+        return count;
+    }
+
+    function markNotificationsSeen() {
+        root.seenNotifications = root.notifications.slice();
+    }
 
     property var historyList: []
     readonly property string historyFile: Paths.strip(Paths.cache) + "/notification_history.json"
@@ -35,6 +53,10 @@ Singleton {
     property int maxIngressPerSecond: 20
     property double _lastIngressSec: 0
     property int _ingressCountThisSec: 0
+    readonly property int notificationDedupBurstMs: 5000
+    property var _recentDedupKeys: []
+
+    signal notificationDeduplicated(var wrapper)
 
     property var _dismissQueue: []
     property int _dismissBatchSize: 8
@@ -48,13 +70,12 @@ Singleton {
 
     Component.onCompleted: {
         _recomputeGroups();
-        Quickshell.execDetached(["mkdir", "-p", Paths.strip(Paths.cache)]);
-        Quickshell.execDetached(["mkdir", "-p", imageCacheDir]);
+        Quickshell.execDetached(["mkdir", "-p", Paths.strip(Paths.cache), imageCacheDir]);
     }
 
     FileView {
         id: historyFileView
-        path: root.historyFile
+        path: SettingsData.notificationHistoryEnabled ? root.historyFile : ""
         printErrors: false
         onLoaded: root.loadHistory()
         onLoadFailed: error => {
@@ -151,6 +172,8 @@ Singleton {
     }
 
     function performSaveHistory() {
+        if (historyFileView.path === "")
+            return;
         try {
             historyAdapter.notifications = historyList;
             historyFileView.writeAdapter();
@@ -257,52 +280,62 @@ Singleton {
         return historyList.filter(n => getHistoryTimeRange(n.timestamp) === range).length;
     }
 
-    function formatHistoryTime(timestamp) {
-        root.timeUpdateTick;
-        root.clockFormatChanged;
-        const now = new Date();
-        const date = new Date(timestamp);
-        const diff = now.getTime() - timestamp;
-        const minutes = Math.floor(diff / 60000);
-        const hours = Math.floor(minutes / 60);
-        if (hours < 1) {
-            if (minutes < 1)
-                return I18n.tr("now");
-            return I18n.tr("%1m ago").arg(minutes);
-        }
-        const nowDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        const itemDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-        const daysDiff = Math.floor((nowDate - itemDate) / (1000 * 60 * 60 * 24));
-        const timeStr = SettingsData.use24HourClock ? date.toLocaleTimeString(Qt.locale(), "HH:mm") : date.toLocaleTimeString(Qt.locale(), "h:mm AP");
-        if (daysDiff === 0)
-            return timeStr;
-        try {
-            const localeName = (typeof I18n !== "undefined" && I18n.locale) ? I18n.locale().name : "en-US";
-            const weekday = date.toLocaleDateString(localeName, {
-                weekday: "long"
-            });
-            return weekday + ", " + timeStr;
-        } catch (e) {
-            return timeStr;
-        }
-    }
-
     function _nowSec() {
         return Date.now() / 1000.0;
+    }
+
+    function _normalizeDedupText(text) {
+        if (!text)
+            return "";
+        let normalized = text.toString();
+        normalized = normalized.replace(/<img\b[^>]*>/gi, "");
+        normalized = normalized.replace(/<[^>]+>/g, "");
+        normalized = normalized.replace(/\s+/g, " ").trim();
+        return normalized.toLowerCase();
+    }
+
+    function _dedupAppId(source) {
+        if (!source)
+            return "";
+        const desktopEntry = (source.desktopEntry || "").toString().trim().toLowerCase();
+        if (desktopEntry)
+            return desktopEntry;
+        return (source.appName || "").toString().trim().toLowerCase();
     }
 
     function _notificationDedupKey(source) {
         if (!source)
             return "";
-        const app = (source.appName || source.desktopEntry || "").toString();
-        const summary = (source.summary || "").toString();
-        const body = (source.body || "").toString();
+        const app = _dedupAppId(source);
+        const summary = _normalizeDedupText(source.summary);
+        const body = _normalizeDedupText(source.body);
         const urgency = typeof source.urgency === "number" ? source.urgency : NotificationUrgency.Normal;
-        const icon = (source.appIcon || "").toString();
         if (!app && !summary && !body)
             return "";
         const sep = "";
-        return app + sep + summary + sep + body + sep + urgency + sep + icon;
+        return app + sep + summary + sep + body + sep + urgency;
+    }
+
+    function _pruneRecentDedupKeys() {
+        const cutoff = Date.now() - notificationDedupBurstMs;
+        _recentDedupKeys = _recentDedupKeys.filter(entry => entry && entry.atMs >= cutoff);
+    }
+
+    function _hasRecentDuplicate(key) {
+        if (!key)
+            return false;
+        _pruneRecentDedupKeys();
+        return _recentDedupKeys.some(entry => entry && entry.key === key);
+    }
+
+    function _recordDedupKey(key) {
+        if (!key)
+            return;
+        _pruneRecentDedupKeys();
+        _recentDedupKeys.push({
+            "key": key,
+            "atMs": Date.now()
+        });
     }
 
     function _findActiveDuplicate(notif) {
@@ -310,17 +343,14 @@ Singleton {
         if (!key)
             return null;
 
-        for (const w of visibleNotifications) {
+        for (const w of allWrappers) {
             if (!w || !w.notification || !w.popup)
                 continue;
-            if (_notificationDedupKey(w.notification) === key)
-                return w;
-        }
-
-        for (const w of notificationQueue) {
-            if (!w || !w.notification)
+            if (_notificationDedupKey(w.notification) !== key)
                 continue;
-            if (_notificationDedupKey(w.notification) === key)
+            if (visibleNotifications.indexOf(w) !== -1 || notificationQueue.indexOf(w) !== -1)
+                return w;
+            if (w.timer && w.timer.running)
                 return w;
         }
 
@@ -428,25 +458,31 @@ Singleton {
         if (rule.enabled === false)
             return false;
 
-        const pattern = (rule.pattern || "").toString();
-        if (!pattern.trim())
-            return false;
-
-        const value = (_ruleFieldValue(rule.field, info) || "").toString();
-        const matchType = (rule.matchType || "contains").toString().toLowerCase();
-
-        if (matchType === "exact")
-            return value.toLowerCase() === pattern.toLowerCase();
-        if (matchType === "regex") {
-            try {
-                return new RegExp(pattern, "i").test(value);
-            } catch (e) {
-                log.warn("invalid notification rule regex:", pattern);
+        return [rule, ...(rule.conditions || [])].every(condition => {
+            const pattern = (condition.pattern || "").toString();
+            if (!pattern.trim())
                 return false;
-            }
-        }
 
-        return value.toLowerCase().includes(pattern.toLowerCase());
+            const value = (_ruleFieldValue(condition.field, info) || "").toString();
+            const matchType = (condition.matchType || "contains").toString().toLowerCase();
+
+            if (matchType === "exact")
+                return value.toLowerCase() === pattern.toLowerCase();
+            if (matchType === "regex") {
+                try {
+                    return new RegExp(pattern, "i").test(value);
+                } catch (e) {
+                    log.warn("invalid notification rule regex:", pattern);
+                    return false;
+                }
+            }
+
+            return value.toLowerCase().includes(pattern.toLowerCase());
+        });
+    }
+
+    function _allowedInDnd(urgency, bypassDnd) {
+        return bypassDnd || (SettingsData.notificationDndAllowCritical && urgency === NotificationUrgency.Critical);
     }
 
     function _evaluateNotificationPolicy(notif) {
@@ -456,6 +492,7 @@ Singleton {
             "disablePopup": false,
             "hideFromCenter": false,
             "disableHistory": false,
+            "bypassDnd": false,
             "urgency": baseUrgency
         };
 
@@ -470,6 +507,9 @@ Singleton {
             "body": notif.body || ""
         };
 
+        policy.bypassDnd = rules.some(rule => rule.bypassDnd === true && _matchesNotificationRule(rule, info));
+        policy.disablePopup = rules.some(rule => (rule.action || "default").toString().toLowerCase() === "mute" && !SettingsData.isNotificationRuleExpired(rule) && _matchesNotificationRule(rule, info));
+
         for (const rule of rules) {
             if (!_matchesNotificationRule(rule, info))
                 continue;
@@ -478,9 +518,6 @@ Singleton {
             switch (action) {
             case "ignore":
                 policy.drop = true;
-                break;
-            case "mute":
-                policy.disablePopup = true;
                 break;
             case "popup_only":
                 policy.hideFromCenter = true;
@@ -525,11 +562,19 @@ Singleton {
         }
         historyList = [];
         historyAdapter.notifications = [];
+        if (historyFileView.path === "") {
+            Quickshell.execDetached(["rm", "-f", root.historyFile]);
+            return;
+        }
         historyFileView.writeAdapter();
     }
 
+    property bool overlayOpen: false
+
     function onOverlayOpen() {
+        overlayOpen = true;
         popupsDisabled = true;
+        markNotificationsSeen();
         addGate.stop();
         addGateBusy = false;
 
@@ -545,7 +590,9 @@ Singleton {
     }
 
     function onOverlayClose() {
+        overlayOpen = false;
         popupsDisabled = false;
+        markNotificationsSeen();
         processQueue();
     }
 
@@ -564,11 +611,47 @@ Singleton {
         id: timeUpdateTimer
         interval: 30000
         repeat: true
-        running: root.allWrappers.length > 0 || visibleNotifications.length > 0
+        running: root.overlayOpen && (root.allWrappers.length > 0 || visibleNotifications.length > 0)
         triggeredOnStart: false
         onTriggered: {
             root.timeUpdateTick = !root.timeUpdateTick;
         }
+    }
+
+    // Date.now() inside a QML binding is not reactive, so anything counting
+    // down to a rule's expiresAt needs a ticking time source. Minute
+    // precision matches the countdown granularity, and the clock only runs
+    // while timed rules exist, so shells without them pay nothing.
+    SystemClock {
+        id: ruleExpiryClock
+        precision: SystemClock.Minutes
+        enabled: SettingsData.hasTimedNotificationRules
+    }
+
+    // Current time in ms for rule-expiry bindings. Reads 0 while the clock is
+    // off, which is safe: the clock is off exactly when no rule carries an
+    // expiry, so no binding can depend on the value moving.
+    readonly property double notificationRuleNowMs: ruleExpiryClock.enabled ? ruleExpiryClock.date.getTime() : 0
+
+    // Formatted remaining time for a rule's expiresAt, driven by the ticking
+    // clock above so bindings calling this refresh every minute. Single home
+    // for the translated duration strings; "" once the timestamp passes.
+    function formatRuleRemaining(expiresAt) {
+        return Format.formatRemaining(expiresAt - notificationRuleNowMs, "", I18n.tr("%1 min", "timed duration, %1 is a number of minutes"), I18n.tr("%1 h", "timed duration, %1 is a number of hours"), I18n.tr("%1 h %2 m", "timed duration, %1 is a number of hours, %2 is a number of minutes"));
+    }
+
+    // Clears lapsed timed mutes (SettingsData.addMuteRuleForApp with
+    // expiresAt) from the persisted rules. Matching already ignores them;
+    // this keeps the stored list and the settings UI truthful. Runs only
+    // while timed rules exist, and fires on start so mutes that lapsed while
+    // the shell was offline are cleared at launch.
+    Timer {
+        id: expiredRuleSweeper
+        interval: 60000
+        repeat: true
+        running: SettingsData.hasTimedNotificationRules
+        triggeredOnStart: true
+        onTriggered: SettingsData.pruneExpiredNotificationRules()
     }
 
     Timer {
@@ -637,14 +720,20 @@ Singleton {
                 return;
             }
 
-            const duplicate = _findActiveDuplicate(notif);
-            if (duplicate) {
-                if (duplicate.timer && duplicate.timer.running)
-                    duplicate.timer.restart();
-                try {
-                    notif.dismiss();
-                } catch (e) {}
-                return;
+            if (SettingsData.notificationDedupeEnabled) {
+                const dedupKey = _notificationDedupKey(notif);
+                const duplicate = _findActiveDuplicate(notif);
+                if (duplicate || _hasRecentDuplicate(dedupKey)) {
+                    if (duplicate) {
+                        if (duplicate.timer && duplicate.timer.running)
+                            duplicate.timer.restart();
+                        root.notificationDeduplicated(duplicate);
+                    }
+                    try {
+                        notif.dismiss();
+                    } catch (e) {}
+                    return;
+                }
             }
 
             if (!_ingressAllowed(policy.urgency)) {
@@ -656,15 +745,8 @@ Singleton {
                 }
             }
 
-            if (SettingsData.soundsEnabled && SettingsData.soundNewNotification) {
-                if (policy.urgency === NotificationUrgency.Critical) {
-                    AudioService.playCriticalNotificationSound();
-                } else {
-                    AudioService.playNormalNotificationSound();
-                }
-            }
-
-            const shouldShowPopup = !root.popupsDisabled && !SessionData.doNotDisturb && !policy.disablePopup;
+            const dndBlocked = SessionData.doNotDisturb && !_allowedInDnd(policy.urgency, policy.bypassDnd);
+            const shouldShowPopup = !root.popupsDisabled && !dndBlocked && !policy.disablePopup;
             const isTransient = notif.transient;
             const shouldKeepInCenter = !isTransient && !policy.hideFromCenter;
 
@@ -675,13 +757,33 @@ Singleton {
                 return;
             }
 
+            // Honor the freedesktop "suppress-sound" hint: the sender
+            // plays its own audio for this notification and asks the
+            // server not to double up. "sound-name" is the opposite — an
+            // explicit request for audio — so it plays even when the
+            // global new-notification sound is off.
+            const soundHints = notif.hints || {};
+            const suppressSound = !!soundHints["suppress-sound"];
+            const requestsSound = !!soundHints["sound-name"];
+            if (!dndBlocked && !policy.disablePopup && SettingsData.soundsEnabled && (SettingsData.soundNewNotification || requestsSound) && !suppressSound) {
+                if (policy.urgency === NotificationUrgency.Critical) {
+                    AudioService.playCriticalNotificationSound();
+                } else {
+                    AudioService.playNormalNotificationSound();
+                }
+            }
+
             const wrapper = notifComponent.createObject(root, {
                 "popup": shouldShowPopup,
                 "notification": notif,
-                "urgencyOverride": policy.urgency
+                "urgencyOverride": policy.urgency,
+                "bypassDnd": policy.bypassDnd
             });
 
             if (wrapper) {
+                if (SettingsData.notificationDedupeEnabled)
+                    _recordDedupKey(_notificationDedupKey(notif));
+
                 root.allWrappers.push(wrapper);
                 if (shouldKeepInCenter) {
                     root.notifications.push(wrapper);
@@ -703,12 +805,95 @@ Singleton {
         }
     }
 
+    function isFocusedScreen(screen) {
+        if (!SettingsData.notificationFocusedMonitor)
+            return true;
+        const focused = CompositorService.getFocusedScreen();
+        return !!focused && !!screen && focused.name === screen.name;
+    }
+
+    function notificationIconFromImage(image) {
+        image = image || "";
+        return image.startsWith("image://icon/") ? image.substring(13) : "";
+    }
+
+    function notificationImageHasSpecialPrefix(image) {
+        return /^(material|svg|unicode|image):/.test(notificationIconFromImage(image));
+    }
+
+    function notificationHasImage(image) {
+        image = image || "";
+        return image !== "" && (!image.startsWith("image://icon/") || notificationIconFromImage(image).startsWith("/"));
+    }
+
+    function notificationCleanImage(image) {
+        image = image || "";
+        if (!image)
+            return "";
+        if (image.startsWith("image://icon/")) {
+            const payload = image.substring(13);
+            if (payload.startsWith("/"))
+                return "file://" + payload;
+        }
+        return Paths.strip(image);
+    }
+
+    // Apps like kitty send app_icon as their bundled logo path; the themed icon wins when the basename resolves (#2746).
+    function notificationThemedAppIcon(appIcon) {
+        if (/^https?:\/\//.test(appIcon))
+            return "";
+        const path = appIcon.startsWith("file://") ? appIcon.substring(7) : appIcon;
+        if (!path.startsWith("/"))
+            return "";
+        const file = path.substring(path.lastIndexOf("/") + 1);
+        const dot = file.lastIndexOf(".");
+        const base = dot > 0 ? file.substring(0, dot) : file;
+        if (!base)
+            return "";
+        return Paths.themedIconPath(base) ? base : "";
+    }
+
+    function notificationImageSource(image, appIcon) {
+        image = image || "";
+        appIcon = appIcon || "";
+        if (notificationHasImage(image))
+            return notificationCleanImage(image);
+        if (notificationImageHasSpecialPrefix(image))
+            return "";
+        if (!appIcon)
+            return "";
+        if (notificationThemedAppIcon(appIcon))
+            return "";
+        return /^(file|https?):\/\//.test(appIcon) || appIcon.includes("/") ? appIcon : "";
+    }
+
+    function notificationAppIcon(appIcon, desktopEntry) {
+        if (appIcon)
+            return appIcon;
+        if (!desktopEntry)
+            return "";
+        return DesktopEntries.heuristicLookup(desktopEntry)?.icon || "";
+    }
+
+    function notificationFallbackIcon(image, appIcon) {
+        image = image || "";
+        appIcon = appIcon || "";
+        const fromImage = notificationIconFromImage(image);
+        if (notificationImageHasSpecialPrefix(image))
+            return fromImage;
+        const themed = notificationThemedAppIcon(appIcon);
+        if (themed)
+            return themed;
+        return appIcon || fromImage || "";
+    }
+
     component NotifWrapper: QtObject {
         id: wrapper
 
         property bool popup: false
         property bool removedByLimit: false
         property bool isPersistent: true
+        property bool bypassDnd: false
         property int seq: 0
         property string persistedImagePath: ""
 
@@ -722,6 +907,10 @@ Singleton {
             interval: {
                 if (!wrapper.notification)
                     return 5000;
+                // expireTimeout is in milliseconds; -1 defers to our settings.
+                const appTimeout = wrapper.notification.expireTimeout;
+                if (appTimeout >= 0 && !SettingsData.notificationIgnoreAppTimeout)
+                    return Math.round(appTimeout);
                 switch (wrapper.urgency) {
                 case NotificationUrgency.Low:
                     return SettingsData.notificationTimeoutLow;
@@ -810,11 +999,10 @@ Singleton {
         }
         readonly property string desktopEntry: notification?.desktopEntry ?? ""
         readonly property string image: notification?.image ?? ""
-        readonly property string cleanImage: {
-            if (!image)
-                return "";
-            return Paths.strip(image);
-        }
+        readonly property string cleanImage: root.notificationCleanImage(image)
+        readonly property bool hasDisplayImage: root.notificationHasImage(image)
+        readonly property string displayImage: root.notificationImageSource(image, appIcon)
+        readonly property string fallbackIconName: root.notificationFallbackIcon(image, appIcon)
         property int urgencyOverride: notification?.urgency ?? NotificationUrgency.Normal
         readonly property int urgency: urgencyOverride
         readonly property list<NotificationAction> actions: notification?.actions ?? []
@@ -829,6 +1017,11 @@ Singleton {
                 if (root.bulkDismissing) {
                     return;
                 }
+
+                // Dismiss visible popup when sender closes the notification
+                // (e.g. YubiKey sends CloseNotification after touch).
+                // Without this, expireTimeout=0 popups stay visible forever.
+                wrapper.popup = false;
 
                 const groupKey = getGroupKey(wrapper);
                 const remainingInGroup = root.notifications.filter(n => getGroupKey(n) === groupKey);
@@ -852,6 +1045,23 @@ Singleton {
         NotifWrapper {}
     }
 
+    function dismissLastNotification() {
+        const w = visibleNotifications[visibleNotifications.length - 1];
+        if (w)
+            dismissNotification(w);
+    }
+
+    function invokeLastNotification() {
+        const w = notifications[notifications.length - 1];
+        const actions = w?.actions || [];
+        const action = actions.find(a => a.identifier === "default") || actions[0];
+        if (!action?.invoke)
+            return false;
+        action.invoke();
+        dismissNotification(w);
+        return true;
+    }
+
     function dismissAllPopups() {
         for (const w of visibleNotifications) {
             if (w) {
@@ -860,6 +1070,56 @@ Singleton {
         }
         visibleNotifications = [];
         notificationQueue = [];
+    }
+
+    Connections {
+        target: SettingsData
+
+        function onNotificationPopupsInvalidated() {
+            root.dismissAllPopups();
+        }
+    }
+
+    function sendTestNotifications() {
+        dismissAllPopups();
+        sendTestNotification(0);
+        testNotifTimer1.start();
+        testNotifTimer2.start();
+    }
+
+    function sendTestNotification(index) {
+        const notifications = [["Notification Position Test", "dms test notification 1 of 3 ~ Hi there!", "preferences-system"], ["Second Test", "dms notification 2 of 3 ~ Check it out!", "applications-graphics"], ["Third Test", "DMS notification 3 of 3 ~ Enjoy!", "face-smile"]];
+
+        if (index < 0 || index >= notifications.length) {
+            return;
+        }
+
+        const notif = notifications[index];
+        testNotificationProcess.command = ["notify-send", "-h", "int:transient:1", "-a", "DMS", "-i", notif[2], notif[0], notif[1]];
+        testNotificationProcess.running = true;
+    }
+
+    property Process testNotificationProcess
+
+    testNotificationProcess: Process {
+        command: []
+        running: false
+    }
+
+    property Timer testNotifTimer1
+
+    testNotifTimer1: Timer {
+        interval: 400
+        repeat: false
+        onTriggered: root.sendTestNotification(1)
+    }
+
+    property Timer testNotifTimer2
+
+    testNotifTimer2: Timer {
+        interval: 800
+        repeat: false
+        onTriggered: root.sendTestNotification(2)
     }
 
     function clearAllNotifications() {
@@ -893,6 +1153,17 @@ Singleton {
         }
     }
 
+    function permanentlyDismissNotification(wrapper) {
+        if (!wrapper?.notification)
+            return;
+        const sourceId = wrapper.notification.id.toString();
+        const timestamp = wrapper.time.getTime();
+        const historyEntry = historyList.find(item => item.sourceNotificationId === sourceId && item.timestamp === timestamp);
+        if (historyEntry)
+            removeFromHistory(historyEntry.id);
+        dismissNotification(wrapper);
+    }
+
     function dismissNotification(wrapper) {
         if (!wrapper || !wrapper.notification) {
             return;
@@ -919,19 +1190,13 @@ Singleton {
             return;
         if (popupsDisabled)
             return;
-        if (SessionData.doNotDisturb)
-            return;
-        if (notificationQueue.length === 0)
+        const nextIndex = notificationQueue.findIndex(w => w && (!SessionData.doNotDisturb || _allowedInDnd(w.urgency, w.bypassDnd)));
+        if (nextIndex === -1)
             return;
 
         _processingQueue = true;
 
-        const next = notificationQueue.shift();
-        if (!next) {
-            _processingQueue = false;
-            return;
-        }
-
+        const next = notificationQueue.splice(nextIndex, 1)[0];
         next.seq = ++seqCounter;
 
         const activePopups = visibleNotifications.filter(n => n && n.popup);
@@ -1252,19 +1517,23 @@ Singleton {
     }
 
     Connections {
+        target: SettingsData.notificationDndWhileScreenSharing ? PrivacyService : null
+        function onScreensharingActiveChanged() {
+            SessionData.syncScreenShareDnd();
+        }
+    }
+
+    Connections {
         target: SessionData
         function onDoNotDisturbChanged() {
             if (SessionData.doNotDisturb) {
-                // Hide all current popups when DND is enabled
+                notificationQueue = notificationQueue.filter(w => w && _allowedInDnd(w.urgency, w.bypassDnd));
                 for (const notif of visibleNotifications) {
-                    notif.popup = false;
+                    if (!_allowedInDnd(notif.urgency, notif.bypassDnd))
+                        notif.popup = false;
                 }
-                visibleNotifications = [];
-                notificationQueue = [];
-            } else {
-                // Re-enable popup processing when DND is disabled
-                processQueue();
             }
+            processQueue();
         }
     }
 

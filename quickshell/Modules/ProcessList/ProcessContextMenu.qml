@@ -3,7 +3,8 @@ import QtQuick.Controls
 import Quickshell
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
+import qs.Modals.Common
 
 Popup {
     id: processContextMenu
@@ -12,9 +13,25 @@ Popup {
     property int selectedIndex: -1
     property bool keyboardNavigation: false
     property var parentFocusItem: null
+    property var transientSurfaceTracker: null
+
+    readonly property alias confirmationOpen: confirmation.visible
 
     signal menuClosed
     signal processKilled
+
+    onVisibleChanged: transientSurfaceTracker?.setActive(processContextMenu, visible || confirmationOpen, null)
+    onConfirmationOpenChanged: transientSurfaceTracker?.setActive(processContextMenu, visible || confirmationOpen, null)
+    Component.onDestruction: transientSurfaceTracker?.unregister(processContextMenu)
+
+    Connections {
+        target: processContextMenu.transientSurfaceTracker
+        ignoreUnknownSignals: true
+
+        function onCloseRequested() {
+            processContextMenu.dismiss();
+        }
+    }
 
     readonly property var menuItems: [
         {
@@ -140,20 +157,93 @@ Popup {
     }
 
     function killProcess() {
-        if (processData)
-            Quickshell.execDetached(["kill", processData.pid.toString()]);
-        processKilled();
-        close();
+        requestKill(false);
     }
 
     function forceKillProcess() {
-        if (processData)
-            Quickshell.execDetached(["kill", "-9", processData.pid.toString()]);
-        processKilled();
-        close();
+        requestKill(true);
     }
 
-    width: 200
+    function requestKill(force) {
+        if (!processData || processData.pid <= 0 || (force && processData.pid <= 1000))
+            return;
+        confirmation.process = Object.assign({}, processData);
+        confirmation.forceKill = force;
+        close();
+        confirmation.open();
+    }
+
+    function dismiss() {
+        close();
+        confirmation.close();
+    }
+
+    Popup {
+        id: confirmation
+        property var process: null
+        property bool forceKill: false
+        parent: processContextMenu.parent
+        width: Math.min(ProcessListMetrics.dialogWidth, parent.width - Theme.spacingL * 2)
+        height: confirmationContent.implicitHeight + Theme.spacingL * 2
+        x: (parent.width - width) / 2
+        y: (parent.height - height) / 2
+        padding: Theme.spacingL
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onOpened: {
+            confirmationContent.reset();
+            confirmationContent.selectedButton = 0;
+            confirmationContent.keyboardNavigation = true;
+            confirmationContent.forceActiveFocus();
+        }
+        onClosed: focusRestore.restart()
+
+        background: Rectangle {
+            color: Theme.isFloatingWindow(processContextMenu) ? Theme.floatingWindowSurface : Theme.readableSurface
+            border.width: Theme.layerOutlineWidth
+            border.color: Theme.outlineMedium
+            radius: Theme.windowRadius
+        }
+
+        contentItem: ConfirmDialogContent {
+            id: confirmationContent
+            confirmTitle: confirmation.forceKill ? I18n.tr("Force Kill (SIGKILL)") : I18n.tr("Kill Process")
+            confirmMessage: (confirmation.process?.command ?? "") + " (" + I18n.tr("PID") + " " + (confirmation.process?.pid ?? 0) + ")"
+            confirmButtonText: I18n.tr("Kill Process")
+            confirmButtonColor: Theme.error
+            Keys.onPressed: event => {
+                if (event.key === Qt.Key_Backtab) {
+                    keyboardNavigation = true;
+                    selectedButton = selectedButton === 0 ? 1 : 0;
+                    event.accepted = true;
+                    return;
+                }
+                handleKey(event);
+            }
+            onCancelled: confirmation.close()
+            onButtonActivated: button => {
+                const pid = confirmation.process?.pid ?? 0;
+                const force = confirmation.forceKill;
+                confirmation.close();
+                if (button !== 1 || pid <= 0)
+                    return;
+                const args = force ? ["kill", "-9", pid.toString()] : ["kill", pid.toString()];
+                Quickshell.execDetached(args);
+                processContextMenu.processKilled();
+            }
+        }
+    }
+
+    DeferredAction {
+        id: focusRestore
+        onTriggered: {
+            if (!processContextMenu.confirmationOpen && processContextMenu.parentFocusItem?.visible)
+                processContextMenu.parentFocusItem.forceActiveFocus();
+        }
+    }
+
+    width: ProcessListMetrics.menuWidth
     height: menuColumn.implicitHeight + Theme.spacingS * 2
     padding: 0
     modal: false
@@ -164,8 +254,7 @@ Popup {
         keyboardNavigation = false;
         selectedIndex = -1;
         menuClosed();
-        if (parentFocusItem)
-            Qt.callLater(() => parentFocusItem.forceActiveFocus());
+        focusRestore.restart();
     }
 
     onOpened: {
@@ -185,10 +274,10 @@ Popup {
     }
 
     contentItem: Rectangle {
-        color: Theme.floatingSurface
-        radius: Theme.cornerRadius
-        border.color: BlurService.enabled ? BlurService.borderColor : Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.08)
-        border.width: BlurService.enabled ? BlurService.borderWidth : 1
+        color: Theme.foregroundColor(Theme.chipSurfaceNested, Theme.isFloatingWindow(processContextMenu))
+        radius: Theme.windowRadius
+        border.color: Theme.outlineMedium
+        border.width: Theme.layerOutlineWidth
 
         Item {
             id: keyboardHandler
@@ -229,14 +318,14 @@ Popup {
             id: menuColumn
             anchors.fill: parent
             anchors.margins: Theme.spacingS
-            spacing: 1
+            spacing: Theme.groupedListGap
 
             Repeater {
                 model: menuItems
 
                 Item {
                     width: parent.width
-                    height: modelData.type === "separator" ? 5 : 32
+                    height: modelData.type === "separator" ? Theme.spacingS : Theme.menuItemHeight
                     visible: modelData.type !== "separator" || index > 0
 
                     property int itemVisibleIndex: {
@@ -251,45 +340,46 @@ Popup {
                     Rectangle {
                         visible: modelData.type === "separator"
                         width: parent.width - Theme.spacingS * 2
-                        height: 1
+                        height: Theme.dividerWidth
                         anchors.horizontalCenter: parent.horizontalCenter
                         anchors.verticalCenter: parent.verticalCenter
-                        color: Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.15)
+                        color: Theme.outlineStrong
                     }
 
                     Rectangle {
                         id: menuItem
                         visible: modelData.type !== "separator"
                         width: parent.width
-                        height: 32
-                        radius: Theme.cornerRadius
+                        height: Theme.menuItemHeight
+                        radius: Theme.cornerRadiusM
                         color: {
                             if (!modelData.enabled)
                                 return "transparent";
                             const isSelected = keyboardNavigation && selectedIndex === index;
                             if (modelData.dangerous) {
                                 if (isSelected)
-                                    return Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.2);
-                                return menuItemArea.containsMouse ? Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.12) : "transparent";
+                                    return Theme.errorPressed;
+                                return menuItemArea.containsMouse ? Theme.errorHover : Theme.withAlpha(Theme.errorHover, 0);
                             }
                             if (isSelected)
-                                return Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.2);
-                            return menuItemArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : "transparent";
+                                return Theme.primaryPressed;
+                            return menuItemArea.containsMouse ? BlurService.hoverColor(Theme.widgetBaseHoverColor) : Theme.withAlpha(BlurService.hoverColor(Theme.widgetBaseHoverColor), 0);
                         }
-                        opacity: modelData.enabled ? 1 : 0.5
 
                         Row {
                             anchors.left: parent.left
                             anchors.leftMargin: Theme.spacingS
+                            anchors.right: parent.right
+                            anchors.rightMargin: Theme.spacingS
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: Theme.spacingS
 
-                            DankIcon {
+                            DIcon {
                                 name: modelData.icon || ""
-                                size: 16
+                                size: Theme.iconSizeSmall
                                 color: {
                                     if (!modelData.enabled)
-                                        return Theme.surfaceVariantText;
+                                        return Theme.onSurface_38;
                                     const isSelected = keyboardNavigation && selectedIndex === index;
                                     if (modelData.dangerous && (menuItemArea.containsMouse || isSelected))
                                         return Theme.error;
@@ -301,20 +391,22 @@ Popup {
                             StyledText {
                                 text: modelData.text || ""
                                 font.pixelSize: Theme.fontSizeSmall
-                                font.weight: Font.Normal
+                                font.weight: Theme.fontWeight
                                 color: {
                                     if (!modelData.enabled)
-                                        return Theme.surfaceVariantText;
+                                        return Theme.onSurface_38;
                                     const isSelected = keyboardNavigation && selectedIndex === index;
                                     if (modelData.dangerous && (menuItemArea.containsMouse || isSelected))
                                         return Theme.error;
                                     return Theme.surfaceText;
                                 }
                                 anchors.verticalCenter: parent.verticalCenter
+                                elide: Text.ElideRight
+                                width: parent.width - Theme.iconSizeSmall - Theme.spacingS
                             }
                         }
 
-                        DankRipple {
+                        DRipple {
                             id: menuItemRipple
                             rippleColor: modelData.dangerous ? Theme.error : Theme.surfaceText
                             cornerRadius: menuItem.radius

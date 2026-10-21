@@ -1,9 +1,7 @@
 import QtQuick
-import QtQuick.Controls
-import Quickshell
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginComponent {
@@ -16,17 +14,17 @@ PluginComponent {
     ccWidgetPrimaryText: "Detail Example"
     ccWidgetSecondaryText: {
         if (isEnabled) {
-            const selected = pluginData.selectedOption || "Option A"
-            return selected
+            const selected = pluginData.selectedOption || "Option A";
+            return selected;
         }
-        return "Disabled"
+        return "Disabled";
     }
     ccWidgetIsActive: isEnabled
 
     onCcWidgetToggled: {
-        isEnabled = !isEnabled
+        isEnabled = !isEnabled;
         if (pluginService) {
-            pluginService.savePluginData("controlCenterDetailExample", "isEnabled", isEnabled)
+            pluginService.savePluginData("controlCenterDetailExample", "isEnabled", isEnabled);
         }
     }
 
@@ -35,7 +33,7 @@ PluginComponent {
             id: detailRoot
             implicitHeight: detailColumn.implicitHeight + Theme.spacingM * 2
             radius: Theme.cornerRadius
-            color: Theme.surfaceContainerHigh
+            color: Theme.cardSurface
             border.width: 0
             visible: true
 
@@ -52,7 +50,7 @@ PluginComponent {
                     text: "Detail Example Settings"
                     font.pixelSize: Theme.fontSizeLarge
                     color: Theme.surfaceText
-                    font.weight: Font.Medium
+                    font.weight: Theme.fontWeightMedium
                 }
 
                 StyledText {
@@ -68,8 +66,8 @@ PluginComponent {
                         width: parent.width
                         height: 40
                         radius: Theme.cornerRadius
-                        color: optionMouseArea.containsMouse ? Theme.surfaceContainerHighest : "transparent"
-                        border.color: detailRoot.currentSelection === modelData ? Theme.primary : "transparent"
+                        color: optionMouseArea.containsMouse ? Theme.chipSurface : Theme.withAlpha(Theme.chipSurface, 0)
+                        border.color: detailRoot.currentSelection === modelData ? Theme.primary : Theme.withAlpha(Theme.primary, 0)
                         border.width: detailRoot.currentSelection === modelData ? 2 : 0
 
                         MouseArea {
@@ -79,10 +77,10 @@ PluginComponent {
                             cursorShape: Qt.PointingHandCursor
                             z: 100
                             onClicked: {
-                                SettingsData.setPluginSetting("controlCenterDetailExample", "selectedOption", modelData)
-                                detailRoot.currentSelection = modelData
-                                PluginService.pluginDataChanged("controlCenterDetailExample")
-                                ToastService.showInfo("Option Selected", modelData)
+                                SettingsData.setPluginSetting("controlCenterDetailExample", "selectedOption", modelData);
+                                detailRoot.currentSelection = modelData;
+                                PluginService.pluginDataChanged("controlCenterDetailExample");
+                                ToastService.showInfo("Option Selected", modelData);
                             }
                         }
 
@@ -93,7 +91,7 @@ PluginComponent {
                             spacing: Theme.spacingS
                             enabled: false
 
-                            DankIcon {
+                            DIcon {
                                 name: detailRoot.currentSelection === modelData ? "radio_button_checked" : "radio_button_unchecked"
                                 color: detailRoot.currentSelection === modelData ? Theme.primary : Theme.surfaceVariantText
                                 size: Theme.iconSize
@@ -117,20 +115,20 @@ PluginComponent {
         Row {
             spacing: Theme.spacingXS
 
-            DankIcon {
+            DIcon {
                 name: root.isEnabled ? "settings" : "settings_off"
                 color: root.isEnabled ? Theme.primary : Theme.surfaceVariantText
-                font.pixelSize: Theme.iconSize - 4
+                size: root.iconSize
                 anchors.verticalCenter: parent.verticalCenter
             }
 
             StyledText {
                 text: {
-                    const selected = root.pluginData.selectedOption || "Option A"
-                    return selected.substring(0, 1)
+                    const selected = root.pluginData.selectedOption || "Option A";
+                    return selected.substring(0, 1);
                 }
                 color: root.isEnabled ? Theme.primary : Theme.surfaceVariantText
-                font.pixelSize: Theme.fontSizeMedium
+                font.pixelSize: root.textSize
                 anchors.verticalCenter: parent.verticalCenter
             }
         }

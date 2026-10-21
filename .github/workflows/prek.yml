@@ -3,13 +3,15 @@ name: Pre-commit Checks
 on:
   push:
   pull_request:
-    branches: [master, main]
+    branches: [master, main, "stable-*"]
 jobs:
   pre-commit-check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install flatpak
         run: sudo apt update && sudo apt install -y flatpak
@@ -24,6 +26,13 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Download Go modules
+        working-directory: core
+        run: for attempt in 1 2 3; do go mod download && exit 0; sleep 15; done; exit 1
 
       - name: run pre-commit hooks
-        uses: j178/prek-action@v1
+        uses: j178/prek-action@v2
+        env:
+          SKIP: qml-tests

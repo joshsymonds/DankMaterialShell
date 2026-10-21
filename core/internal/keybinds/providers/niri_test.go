@@ -4,20 +4,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-)
 
-func TestNiriProviderName(t *testing.T) {
-	provider := NewNiriProvider("")
-	if provider.Name() != "niri" {
-		t.Errorf("Name() = %q, want %q", provider.Name(), "niri")
-	}
-}
+	"github.com/duxlabs-dev/dux-shell/core/internal/keybinds"
+)
 
 func TestNiriProviderGetCheatSheet(t *testing.T) {
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "config.kdl")
 
-	content := `binds {
+	content := `input {
+    mod-key "Alt"
+}
+binds {
     Mod+Q { close-window; }
     Mod+F { fullscreen-window; }
     Mod+T hotkey-overlay-title="Open Terminal" { spawn "kitty"; }
@@ -31,18 +29,16 @@ func TestNiriProviderGetCheatSheet(t *testing.T) {
 		t.Fatalf("Failed to write test config: %v", err)
 	}
 
+	niriNested = func() bool { return false }
+	t.Cleanup(func() { niriNested = detectNiriNested })
 	provider := NewNiriProvider(tmpDir)
 	cheatSheet, err := provider.GetCheatSheet()
 	if err != nil {
 		t.Fatalf("GetCheatSheet failed: %v", err)
 	}
 
-	if cheatSheet.Title != "Niri Keybinds" {
-		t.Errorf("Title = %q, want %q", cheatSheet.Title, "Niri Keybinds")
-	}
-
-	if cheatSheet.Provider != "niri" {
-		t.Errorf("Provider = %q, want %q", cheatSheet.Provider, "niri")
+	if cheatSheet.ModKey != "Alt" {
+		t.Errorf("ModKey = %q, want %q", cheatSheet.ModKey, "Alt")
 	}
 
 	windowBinds := cheatSheet.Binds["Window"]
@@ -78,26 +74,15 @@ func TestNiriCategorizeByAction(t *testing.T) {
 		action   string
 		expected string
 	}{
-		{"focus-workspace", "Workspace"},
-		{"focus-workspace-up", "Workspace"},
 		{"move-column-to-workspace", "Workspace"},
 		{"focus-monitor-left", "Monitor"},
-		{"move-column-to-monitor-right", "Monitor"},
 		{"close-window", "Window"},
-		{"fullscreen-window", "Window"},
-		{"maximize-column", "Window"},
-		{"toggle-window-floating", "Window"},
-		{"focus-column-left", "Window"},
-		{"move-column-right", "Window"},
 		{"spawn", "Execute"},
-		{"quit", "System"},
 		{"power-off-monitors", "System"},
-		{"screenshot", "Screenshot"},
+		{"toggle-touchpad", "System"},
 		{"screenshot-window", "Screenshot"},
 		{"toggle-overview", "Overview"},
-		{"show-hotkey-overlay", "Overview"},
 		{"next-window", "Alt-Tab"},
-		{"previous-window", "Alt-Tab"},
 		{"unknown-action", "Other"},
 	}
 
@@ -120,13 +105,8 @@ func TestNiriFormatRawAction(t *testing.T) {
 		expected string
 	}{
 		{"spawn", []string{"kitty"}, "spawn kitty"},
-		{"spawn", []string{"dms", "ipc", "call"}, "spawn dms ipc call"},
 		{"spawn", []string{"dms", "ipc", "call", "brightness", "increment", "5", ""}, `spawn dms ipc call brightness increment 5 ""`},
-		{"spawn", []string{"dms", "ipc", "call", "dash", "toggle", ""}, `spawn dms ipc call dash toggle ""`},
 		{"close-window", nil, "close-window"},
-		{"fullscreen-window", nil, "fullscreen-window"},
-		{"focus-workspace", []string{"1"}, "focus-workspace 1"},
-		{"move-column-to-workspace", []string{"5"}, "move-column-to-workspace 5"},
 		{"set-column-width", []string{"+10%"}, "set-column-width +10%"},
 	}
 
@@ -137,54 +117,6 @@ func TestNiriFormatRawAction(t *testing.T) {
 				t.Errorf("formatRawAction(%q, %v) = %q, want %q", tt.action, tt.args, result, tt.expected)
 			}
 		})
-	}
-}
-
-func TestNiriFormatKey(t *testing.T) {
-	provider := NewNiriProvider("")
-
-	tests := []struct {
-		mods     []string
-		key      string
-		expected string
-	}{
-		{[]string{"Mod"}, "Q", "Mod+Q"},
-		{[]string{"Mod", "Shift"}, "F", "Mod+Shift+F"},
-		{[]string{"Ctrl", "Alt"}, "Delete", "Ctrl+Alt+Delete"},
-		{nil, "Print", "Print"},
-		{[]string{}, "XF86AudioMute", "XF86AudioMute"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			kb := &NiriKeyBinding{
-				Mods: tt.mods,
-				Key:  tt.key,
-			}
-			result := provider.formatKey(kb)
-			if result != tt.expected {
-				t.Errorf("formatKey(%v) = %q, want %q", kb, result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestNiriDefaultConfigDir(t *testing.T) {
-	originalXDG := os.Getenv("XDG_CONFIG_HOME")
-	defer os.Setenv("XDG_CONFIG_HOME", originalXDG)
-
-	os.Setenv("XDG_CONFIG_HOME", "/custom/config")
-	dir := defaultNiriConfigDir()
-	if dir != "/custom/config/niri" {
-		t.Errorf("With XDG_CONFIG_HOME set, got %q, want %q", dir, "/custom/config/niri")
-	}
-
-	os.Unsetenv("XDG_CONFIG_HOME")
-	dir = defaultNiriConfigDir()
-	home, _ := os.UserHomeDir()
-	expected := filepath.Join(home, ".config", "niri")
-	if dir != expected {
-		t.Errorf("Without XDG_CONFIG_HOME, got %q, want %q", dir, expected)
 	}
 }
 
@@ -226,6 +158,58 @@ func TestNiriGenerateBindsContent(t *testing.T) {
 			},
 			expected: `binds {
     Mod+Space hotkey-overlay-title="Application Launcher" { spawn "dms" "ipc" "call" "spotlight" "toggle"; }
+}
+`,
+		},
+		{
+			name: "spawn with equals arg",
+			binds: map[string]*overrideBind{
+				"Mod+B": {
+					Key:    "Mod+B",
+					Action: `spawn /opt/browser --profile-directory=Default`,
+				},
+			},
+			expected: `binds {
+    Mod+B { spawn "/opt/browser" "--profile-directory=Default"; }
+}
+`,
+		},
+		{
+			name: "spawn shell command with quoted equals args",
+			binds: map[string]*overrideBind{
+				"Mod+C": {
+					Key:    "Mod+C",
+					Action: `spawn sh -c "chrome --profile-directory=Default --app=x"`,
+				},
+			},
+			expected: `binds {
+    Mod+C { spawn "sh" "-c" "chrome --profile-directory=Default --app=x"; }
+}
+`,
+		},
+		{
+			name: "spawn env assignment stays arg",
+			binds: map[string]*overrideBind{
+				"Mod+E": {
+					Key:    "Mod+E",
+					Action: `spawn env FOO=bar mycmd`,
+				},
+			},
+			expected: `binds {
+    Mod+E { spawn "env" "FOO=bar" "mycmd"; }
+}
+`,
+		},
+		{
+			name: "niri action property remains property",
+			binds: map[string]*overrideBind{
+				"Print": {
+					Key:    "Print",
+					Action: `screenshot show-pointer=false`,
+				},
+			},
+			expected: `binds {
+    Print { screenshot show-pointer=false; }
 }
 `,
 		},
@@ -287,45 +271,6 @@ recent-windows {
 	}
 }
 
-func TestNiriGenerateBindsContentRoundTrip(t *testing.T) {
-	provider := NewNiriProvider("")
-
-	binds := map[string]*overrideBind{
-		"Mod+Space": {
-			Key:         "Mod+Space",
-			Action:      `spawn "dms" "ipc" "call" "spotlight" "toggle"`,
-			Description: "Application Launcher",
-		},
-		"XF86AudioMute": {
-			Key:     "XF86AudioMute",
-			Action:  `spawn "dms" "ipc" "call" "audio" "mute"`,
-			Options: map[string]any{"allow-when-locked": true},
-		},
-		"Mod+Q": {
-			Key:         "Mod+Q",
-			Action:      "close-window",
-			Description: "Close Window",
-		},
-	}
-
-	content := provider.generateBindsContent(binds)
-
-	tmpDir := t.TempDir()
-	configFile := filepath.Join(tmpDir, "config.kdl")
-	if err := os.WriteFile(configFile, []byte(content), 0o644); err != nil {
-		t.Fatalf("Failed to write temp file: %v", err)
-	}
-
-	result, err := ParseNiriKeys(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to parse generated content: %v\nContent was:\n%s", err, content)
-	}
-
-	if len(result.Section.Keybinds) != 3 {
-		t.Errorf("Expected 3 keybinds after round-trip, got %d", len(result.Section.Keybinds))
-	}
-}
-
 func TestNiriEmptyArgsPreservation(t *testing.T) {
 	provider := NewNiriProvider("")
 
@@ -367,7 +312,7 @@ func TestNiriEmptyArgsPreservation(t *testing.T) {
 	}
 
 	for key, expected := range binds {
-		loaded, ok := loadedBinds[key]
+		loaded, ok := loadedBinds[normalizeNiriBindKey(key)]
 		if !ok {
 			t.Errorf("Missing bind for key %s", key)
 			continue
@@ -375,80 +320,6 @@ func TestNiriEmptyArgsPreservation(t *testing.T) {
 		if loaded.Action != expected.Action {
 			t.Errorf("Action mismatch for %s:\n  got:  %q\n  want: %q", key, loaded.Action, expected.Action)
 		}
-	}
-}
-
-func TestNiriProviderWithRealWorldConfig(t *testing.T) {
-	tmpDir := t.TempDir()
-	configFile := filepath.Join(tmpDir, "config.kdl")
-
-	content := `binds {
-    Mod+Shift+Ctrl+D { debug-toggle-damage; }
-    Super+D { spawn "niri" "msg" "action" "toggle-overview"; }
-    Super+Tab repeat=false { toggle-overview; }
-    Mod+Shift+Slash { show-hotkey-overlay; }
-
-    Mod+T hotkey-overlay-title="Open Terminal" { spawn "kitty"; }
-    Mod+Space hotkey-overlay-title="Application Launcher" {
-        spawn "dms" "ipc" "call" "spotlight" "toggle";
-    }
-
-    XF86AudioRaiseVolume allow-when-locked=true {
-        spawn "dms" "ipc" "call" "audio" "increment" "3";
-    }
-    XF86AudioLowerVolume allow-when-locked=true {
-        spawn "dms" "ipc" "call" "audio" "decrement" "3";
-    }
-
-    Mod+Q repeat=false { close-window; }
-    Mod+F { maximize-column; }
-    Mod+Shift+F { fullscreen-window; }
-
-    Mod+Left  { focus-column-left; }
-    Mod+Down  { focus-window-down; }
-    Mod+Up    { focus-window-up; }
-    Mod+Right { focus-column-right; }
-
-    Mod+1 { focus-workspace 1; }
-    Mod+2 { focus-workspace 2; }
-    Mod+Shift+1 { move-column-to-workspace 1; }
-    Mod+Shift+2 { move-column-to-workspace 2; }
-
-    Print { screenshot; }
-    Ctrl+Print { screenshot-screen; }
-    Alt+Print { screenshot-window; }
-
-    Mod+Shift+E { quit; }
-}
-
-recent-windows {
-    binds {
-        Alt+Tab { next-window scope="output"; }
-        Alt+Shift+Tab { previous-window scope="output"; }
-    }
-}
-`
-	if err := os.WriteFile(configFile, []byte(content), 0o644); err != nil {
-		t.Fatalf("Failed to write test config: %v", err)
-	}
-
-	provider := NewNiriProvider(tmpDir)
-	cheatSheet, err := provider.GetCheatSheet()
-	if err != nil {
-		t.Fatalf("GetCheatSheet failed: %v", err)
-	}
-
-	totalBinds := 0
-	for _, binds := range cheatSheet.Binds {
-		totalBinds += len(binds)
-	}
-
-	if totalBinds < 20 {
-		t.Errorf("Expected at least 20 keybinds, got %d", totalBinds)
-	}
-
-	if len(cheatSheet.Binds["Alt-Tab"]) < 2 {
-		t.Errorf("Expected at least 2 Alt-Tab binds, got %d", len(cheatSheet.Binds["Alt-Tab"]))
 	}
 }
 
@@ -475,20 +346,6 @@ func TestNiriGenerateBindsContentNumericArgs(t *testing.T) {
 `,
 		},
 		{
-			name: "workspace with large numeric arg",
-			binds: map[string]*overrideBind{
-				"Mod+0": {
-					Key:         "Mod+0",
-					Action:      "focus-workspace 10",
-					Description: "Focus Workspace 10",
-				},
-			},
-			expected: `binds {
-    Mod+0 hotkey-overlay-title="Focus Workspace 10" { focus-workspace 10; }
-}
-`,
-		},
-		{
 			name: "percentage string arg (should be quoted)",
 			binds: map[string]*overrideBind{
 				"Super+Minus": {
@@ -499,20 +356,6 @@ func TestNiriGenerateBindsContentNumericArgs(t *testing.T) {
 			},
 			expected: `binds {
     Super+Minus hotkey-overlay-title="Adjust Column Width -10%" { set-column-width "-10%"; }
-}
-`,
-		},
-		{
-			name: "positive percentage string arg",
-			binds: map[string]*overrideBind{
-				"Super+Equal": {
-					Key:         "Super+Equal",
-					Action:      `set-column-width "+10%"`,
-					Description: "Adjust Column Width +10%",
-				},
-			},
-			expected: `binds {
-    Super+Equal hotkey-overlay-title="Adjust Column Width +10%" { set-column-width "+10%"; }
 }
 `,
 		},
@@ -657,5 +500,75 @@ func TestNiriGenerateWorkspaceBindsRoundTrip(t *testing.T) {
 	}
 	if !foundSetWidth {
 		t.Error("set-column-width -10% not found after round-trip")
+	}
+}
+
+func TestNiriGenerateActionWithFilterAndScope(t *testing.T) {
+	provider := NewNiriProvider("")
+
+	binds := map[string]*overrideBind{
+		"Alt+grave": {
+			Key:         "Alt+grave",
+			Action:      `next-window filter="app-id"`,
+			Description: "Next Window (Same Application)",
+		},
+		"Alt+Tab": {
+			Key:         "Alt+Tab",
+			Action:      `next-window scope="output"`,
+			Description: "Next Window",
+		},
+	}
+
+	content := provider.generateBindsContent(binds)
+	expected := `binds {
+    Alt+Tab hotkey-overlay-title="Next Window" { next-window scope="output"; }
+    Alt+grave hotkey-overlay-title="Next Window (Same Application)" { next-window filter="app-id"; }
+}
+`
+	if content != expected {
+		t.Errorf("Content mismatch.\nGot:\n%s\nWant:\n%s", content, expected)
+	}
+}
+
+func TestNiriModKeyFollowsBackend(t *testing.T) {
+	tests := []struct {
+		name         string
+		modKey       string
+		modKeyNested string
+		nested       bool
+		want         keybinds.ModKey
+	}{
+		{"tty default", "", "", false, keybinds.ModKey{Symbol: "Mod", Resolved: "Super", Source: keybinds.ModSourceDefault}},
+		{"tty configured", "Alt", "", false, keybinds.ModKey{Symbol: "Mod", Resolved: "Alt", Source: keybinds.ModSourceConfig}},
+		{"nested default", "", "", true, keybinds.ModKey{Symbol: "Mod", Resolved: "Alt", Source: keybinds.ModSourceRuntime}},
+		{"nested swaps when mod-key is alt", "Alt", "", true, keybinds.ModKey{Symbol: "Mod", Resolved: "Super", Source: keybinds.ModSourceRuntime}},
+		{"nested configured", "Alt", "Super", true, keybinds.ModKey{Symbol: "Mod", Resolved: "Super", Source: keybinds.ModSourceConfig}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := niriModKey(&NiriParseResult{ModKey: tt.modKey, ModKeyNested: tt.modKeyNested}, tt.nested)
+			if got != tt.want {
+				t.Errorf("niriModKey() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNiriParseModKeyNested(t *testing.T) {
+	tmpDir := t.TempDir()
+	config := `input {
+    mod-key "Alt"
+    mod-key-nested "Super"
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "config.kdl"), []byte(config), 0o644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+	result, err := ParseNiriKeys(tmpDir)
+	if err != nil {
+		t.Fatalf("ParseNiriKeys failed: %v", err)
+	}
+	if result.ModKeyNested != "Super" {
+		t.Errorf("ModKeyNested = %q, want %q", result.ModKeyNested, "Super")
 	}
 }

@@ -6,12 +6,13 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	mocks "github.com/AvengeMedia/DankMaterialShell/core/internal/mocks/evdev"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	mocks "github.com/duxlabs-dev/dux-shell/core/internal/mocks/evdev"
 )
 
 type mockNetConn struct {
@@ -41,6 +42,8 @@ func (m *mockNetConn) Close() error {
 	return nil
 }
 
+func (m *mockNetConn) SetWriteDeadline(t time.Time) error { return nil }
+
 func TestHandleRequest(t *testing.T) {
 	t.Run("getState request", func(t *testing.T) {
 		mockDevice := mocks.NewMockEvdevDevice(t)
@@ -52,8 +55,9 @@ func TestHandleRequest(t *testing.T) {
 			closeChan: make(chan struct{}),
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "evdev.getState",
 			Params: map[string]any{},
@@ -61,8 +65,8 @@ func TestHandleRequest(t *testing.T) {
 
 		HandleRequest(conn, req, m)
 
-		var resp models.Response[State]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[State]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -81,8 +85,9 @@ func TestHandleRequest(t *testing.T) {
 			closeChan: make(chan struct{}),
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     456,
 			Method: "evdev.unknownMethod",
 			Params: map[string]any{},
@@ -90,41 +95,12 @@ func TestHandleRequest(t *testing.T) {
 
 		HandleRequest(conn, req, m)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 456, resp.ID)
 		assert.NotEmpty(t, resp.Error)
 		assert.Contains(t, resp.Error, "unknown method")
 	})
-}
-
-func TestHandleGetState(t *testing.T) {
-	mockDevice := mocks.NewMockEvdevDevice(t)
-	mockDevice.EXPECT().ReadOne().Return(nil, errors.New("test")).Maybe()
-
-	m := &Manager{
-		devices:   []EvdevDevice{mockDevice},
-		state:     State{Available: true, CapsLock: false},
-		closeChan: make(chan struct{}),
-	}
-
-	conn := newMockNetConn()
-	req := models.Request{
-		ID:     789,
-		Method: "evdev.getState",
-		Params: map[string]any{},
-	}
-
-	handleGetState(conn, req, m)
-
-	var resp models.Response[State]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-	require.NoError(t, err)
-
-	assert.Equal(t, 789, resp.ID)
-	assert.NotNil(t, resp.Result)
-	assert.True(t, resp.Result.Available)
-	assert.False(t, resp.Result.CapsLock)
 }

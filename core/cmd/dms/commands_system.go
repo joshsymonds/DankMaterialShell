@@ -6,13 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/sysupdate"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/lowprio"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/sysupdate"
 	"github.com/spf13/cobra"
 )
 
@@ -34,6 +36,7 @@ Examples:
   dms system update --check                  # list available updates
   dms system update                          # apply updates (interactive prompt)
   dms system update --noconfirm              # apply updates without prompting
+  dms system update --interactive            # let the package manager ask its own questions
   dms system update --dry                    # simulate without changing anything
   dms system update --no-flatpak --noconfirm # apply system updates only
   dms system update --interval 3600          # set the server poll interval to 1h`,
@@ -41,37 +44,46 @@ Examples:
 }
 
 var (
-	sysUpdateCheck      bool
-	sysUpdateNoConfirm  bool
-	sysUpdateDry        bool
-	sysUpdateJSON       bool
-	sysUpdateNoFlatpak  bool
-	sysUpdateNoAUR      bool
-	sysUpdateIntervalS  int
-	sysUpdateListPmTime = 5 * time.Minute
+	sysUpdateCheck       bool
+	sysUpdateNoConfirm   bool
+	sysUpdateInteractive bool
+	sysUpdateDry         bool
+	sysUpdateJSON        bool
+	sysUpdateNoFlatpak   bool
+	sysUpdateNoAUR       bool
+	sysUpdateIgnore      []string
+	sysUpdateIntervalS   int
+	sysUpdateListPmTime  = 5 * time.Minute
 )
 
 func init() {
 	systemUpdateCmd.Flags().BoolVar(&sysUpdateCheck, "check", false, "List available updates without applying")
 	systemUpdateCmd.Flags().BoolVarP(&sysUpdateNoConfirm, "noconfirm", "y", false, "Apply updates without prompting")
+	systemUpdateCmd.Flags().BoolVar(&sysUpdateInteractive, "interactive", false, "Let the package manager ask its own questions instead of answering yes")
 	systemUpdateCmd.Flags().BoolVar(&sysUpdateDry, "dry", false, "Simulate the upgrade without applying changes")
 	systemUpdateCmd.Flags().BoolVar(&sysUpdateJSON, "json", false, "Output as JSON (with --check)")
 	systemUpdateCmd.Flags().BoolVar(&sysUpdateNoFlatpak, "no-flatpak", false, "Skip the Flatpak overlay")
-	systemUpdateCmd.Flags().BoolVar(&sysUpdateNoAUR, "no-aur", false, "Skip the AUR (paru/yay only)")
+	systemUpdateCmd.Flags().BoolVar(&sysUpdateNoAUR, "no-aur", false, "Skip AUR updates")
+	systemUpdateCmd.Flags().StringSliceVar(&sysUpdateIgnore, "ignore", nil, "Skip specific packages (repeatable or comma-separated)")
 	systemUpdateCmd.Flags().IntVar(&sysUpdateIntervalS, "interval", -1, "Set the DMS server poll interval in seconds and exit (requires running server)")
 
 	systemCmd.AddCommand(systemUpdateCmd)
 }
 
 func runSystemUpdate(cmd *cobra.Command, args []string) {
-	switch {
-	case sysUpdateIntervalS >= 0:
+	if sysUpdateIntervalS >= 0 {
 		runSystemUpdateSetInterval(sysUpdateIntervalS)
-	case sysUpdateCheck:
-		runSystemUpdateCheck()
-	default:
-		runSystemUpdateApply()
+		return
 	}
+
+	// Package managers started from this thread inherit its priority.
+	runtime.LockOSThread()
+	lowprio.LowerThreadPriority()
+	if sysUpdateCheck {
+		runSystemUpdateCheck()
+		return
+	}
+	runSystemUpdateApply()
 }
 
 func selectBackends(ctx context.Context) []sysupdate.Backend {
@@ -100,29 +112,13 @@ func runSystemUpdateCheck() {
 	}
 
 	stopSpin := startSpinner("Checking for updates… ")
-
-	type backendResult struct {
-		ID       string              `json:"id"`
-		Display  string              `json:"displayName"`
-		Packages []sysupdate.Package `json:"packages"`
-	}
-	var results []backendResult
-	var allPkgs []sysupdate.Package
-	var firstErr error
-
-	for _, b := range backends {
-		pkgs, err := b.CheckUpdates(ctx)
-		if err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("%s: %w", b.ID(), err)
-		}
-		results = append(results, backendResult{ID: b.ID(), Display: b.DisplayName(), Packages: pkgs})
-		allPkgs = append(allPkgs, pkgs...)
-	}
+	allPkgs, firstErr := collectUpdates(ctx, backends)
 	stopSpin()
+	allPkgs = filterUpdateTargets(allPkgs)
 
 	if sysUpdateJSON {
 		out, _ := json.MarshalIndent(map[string]any{
-			"backends": results,
+			"backends": backendResults(backends, allPkgs),
 			"packages": allPkgs,
 			"error":    errOrEmpty(firstErr),
 			"count":    len(allPkgs),
@@ -145,6 +141,26 @@ func runSystemUpdateCheck() {
 	}
 }
 
+type backendResult struct {
+	ID       string              `json:"id"`
+	Display  string              `json:"displayName"`
+	Packages []sysupdate.Package `json:"packages"`
+}
+
+func backendResults(backends []sysupdate.Backend, pkgs []sysupdate.Package) []backendResult {
+	results := make([]backendResult, 0, len(backends))
+	for _, b := range backends {
+		var backendPkgs []sysupdate.Package
+		for _, p := range pkgs {
+			if sysupdate.BackendHasTargets(b, []sysupdate.Package{p}, true, true) {
+				backendPkgs = append(backendPkgs, p)
+			}
+		}
+		results = append(results, backendResult{ID: b.ID(), Display: b.DisplayName(), Packages: backendPkgs})
+	}
+	return results
+}
+
 func runSystemUpdateApply() {
 	checkCtx, checkCancel := context.WithTimeout(context.Background(), sysUpdateListPmTime)
 	defer checkCancel()
@@ -157,6 +173,7 @@ func runSystemUpdateApply() {
 	stopSpin := startSpinner("Checking for updates…")
 	pkgs, firstErr := collectUpdates(checkCtx, backends)
 	stopSpin()
+	pkgs = filterUpdateTargets(pkgs)
 	if firstErr != nil {
 		fmt.Printf("Warning: %v\n\n", firstErr)
 	}
@@ -173,7 +190,7 @@ func runSystemUpdateApply() {
 	}
 	fmt.Println()
 
-	if !sysUpdateNoConfirm && !sysUpdateDry {
+	if !sysUpdateNoConfirm && !sysUpdateInteractive && !sysUpdateDry {
 		if !promptYesNo("Proceed with upgrade? [Y/n]: ") {
 			fmt.Println("Aborted.")
 			return
@@ -187,16 +204,28 @@ func runSystemUpdateApply() {
 		Targets:        pkgs,
 		IncludeFlatpak: !sysUpdateNoFlatpak,
 		IncludeAUR:     !sysUpdateNoAUR,
+		Ignored:        sysUpdateIgnore,
 		DryRun:         sysUpdateDry,
 		UseSudo:        true,
 	}
+	opts.AttachStdio = sysupdate.UpgradeNeedsPrivilege(backends, pkgs, opts)
+	opts.Interactive = sysUpdateInteractive && opts.AttachStdio
 
 	onLine := func(line string) { fmt.Println(line) }
+	ran := false
 	for _, b := range backends {
+		if !sysupdate.BackendHasTargets(b, pkgs, opts.IncludeAUR, opts.IncludeFlatpak) {
+			continue
+		}
+		ran = true
 		fmt.Printf("\n== %s ==\n", b.DisplayName())
 		if err := b.Upgrade(ctx, opts, onLine); err != nil {
 			log.Fatalf("%s upgrade failed: %v", b.ID(), err)
 		}
+	}
+	if !ran {
+		fmt.Println("Nothing to upgrade.")
+		return
 	}
 	if sysUpdateDry {
 		fmt.Println("\nDry run complete (no changes applied).")
@@ -218,8 +247,25 @@ func collectUpdates(ctx context.Context, backends []sysupdate.Backend) ([]sysupd
 	return all, firstErr
 }
 
+func filterUpdateTargets(pkgs []sysupdate.Package) []sysupdate.Package {
+	if !sysUpdateNoAUR && len(sysUpdateIgnore) == 0 {
+		return pkgs
+	}
+	out := pkgs[:0]
+	for _, p := range pkgs {
+		if sysUpdateNoAUR && p.Repo == sysupdate.RepoAUR {
+			continue
+		}
+		if sysupdate.IsPackageIgnored(p.Name, sysUpdateIgnore) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 func runSystemUpdateSetInterval(seconds int) {
-	resp, err := sendServerRequest(models.Request{
+	resp, err := sendServerRequest(ipc.Request{
 		ID:     1,
 		Method: "sysupdate.setInterval",
 		Params: map[string]any{"seconds": float64(seconds)},

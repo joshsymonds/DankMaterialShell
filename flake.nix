@@ -1,14 +1,14 @@
 {
-  description = "Dank Material Shell";
+  description = "Dux Shell";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    quickshell = {
-      url = "git+https://git.outfoxxed.me/quickshell/quickshell?rev=783c953987dc56ff0601abe6845ed96f1d00495a";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     flake-compat = {
       url = "github:NixOS/flake-compat";
+      flake = false;
+    };
+    dank-qml-common = {
+      url = "github:duxlabs-dev/dux-qml-common";
       flake = false;
     };
   };
@@ -17,7 +17,7 @@
     {
       self,
       nixpkgs,
-      quickshell,
+      dank-qml-common,
       ...
     }:
     let
@@ -111,7 +111,7 @@
               inherit version;
               pname = "dms-shell";
               src = ./core;
-              vendorHash = "sha256-nvxFHQhOfBGl3h51fgYDb39K0NCj+H8mAEyKr1qOwJQ=";
+              vendorHash = "sha256-fN7v7DuWaqhtD28cTr0FZUIyW7nUqhQoVuatsL2fuo4=";
 
               subPackages = [ "cmd/dms" ];
 
@@ -128,19 +128,30 @@
 
               postInstall = ''
                 mkdir -p $out/share/quickshell/dms
-                cp -r ${rootSrc}/quickshell/. $out/share/quickshell/dms/
+                tar -C ${rootSrc}/quickshell --mode=u+w --exclude-from=${rootSrc}/scripts/shell-test-excludes.txt -cf - . \
+                  | tar -C $out/share/quickshell/dms -xf -
 
-                chmod u+w $out/share/quickshell/dms/VERSION
+                rm -f $out/share/quickshell/dms/DCommon
+                tar -C ${dank-qml-common} --mode=u+w --exclude-from=${rootSrc}/scripts/shell-test-excludes.txt -cf - DCommon \
+                  | tar -C $out/share/quickshell/dms -xf -
+
                 echo "${version}" > $out/share/quickshell/dms/VERSION
 
                 # Install desktop file and icon
                 install -D ${rootSrc}/assets/dms-open.desktop \
                   $out/share/applications/dms-open.desktop
-                install -D ${rootSrc}/core/assets/danklogo.svg \
-                  $out/share/hicolor/scalable/apps/danklogo.svg
+                install -D ${rootSrc}/assets/dev.duxlabs.shell.desktop \
+                  $out/share/applications/dev.duxlabs.shell.desktop
+                install -D ${rootSrc}/assets/dev.duxlabs.shell.notepad.desktop \
+                  $out/share/applications/dev.duxlabs.shell.notepad.desktop
+                install -D ${rootSrc}/assets/dev.duxlabs.shell.svg \
+                  $out/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg
 
+                # Snapshot pre-wrap Qt paths so launched apps get their own, not DMS's pins.
                 wrapProgram $out/bin/dms \
                   --add-flags "-c $out/share/quickshell/dms" \
+                  --run 'export DMS_ORIG_NIXPKGS_QT6_QML_IMPORT_PATH="''${NIXPKGS_QT6_QML_IMPORT_PATH:-}"' \
+                  --run 'export DMS_ORIG_QT_PLUGIN_PATH="''${QT_PLUGIN_PATH:-}"' \
                   --prefix "NIXPKGS_QT6_QML_IMPORT_PATH" ":" "${mkQmlImportPath pkgs qtPackages}" \
                   --prefix "QT_PLUGIN_PATH" ":" "${mkQtPluginPath pkgs qtPackages}"
 
@@ -149,16 +160,20 @@
 
                 substituteInPlace $out/lib/systemd/user/dms.service \
                   --replace-fail /usr/bin/dms $out/bin/dms \
-                  --replace-fail /usr/bin/pkill ${pkgs.procps}/bin/pkill
-
-                substituteInPlace $out/share/quickshell/dms/Modules/Greetd/assets/dms-greeter \
-                  --replace-fail /bin/bash ${pkgs.bashInteractive}/bin/bash
+                  --replace-fail /bin/kill ${pkgs.coreutils}/bin/kill
 
                 substituteInPlace $out/share/quickshell/dms/assets/pam/fprint \
-                  --replace-fail pam_fprintd.so ${pkgs.fprintd}/lib/security/pam_fprintd.so
+                  --replace-fail pam_fprintd.so ${pkgs.fprintd}/lib/security/pam_fprintd.so \
+                  --replace-fail pam_deny.so ${pkgs.pam}/lib/security/pam_deny.so \
+                  --replace-fail pam_permit.so ${pkgs.pam}/lib/security/pam_permit.so
 
                 substituteInPlace $out/share/quickshell/dms/assets/pam/u2f \
-                  --replace-fail pam_u2f.so ${pkgs.pam_u2f}/lib/security/pam_u2f.so
+                  --replace-fail pam_u2f.so ${pkgs.pam_u2f}/lib/security/pam_u2f.so \
+                  --replace-fail pam_deny.so ${pkgs.pam}/lib/security/pam_deny.so \
+                  --replace-fail pam_permit.so ${pkgs.pam}/lib/security/pam_permit.so
+
+                substituteInPlace $out/share/quickshell/dms/assets/pam/other \
+                  --replace-fail pam_deny.so ${pkgs.pam}/lib/security/pam_deny.so
 
                 installShellCompletion --cmd dms \
                   --bash <($out/bin/dms completion bash) \
@@ -168,8 +183,8 @@
 
               meta = {
                 description = "Desktop shell for wayland compositors built with Quickshell & GO";
-                homepage = "https://danklinux.com";
-                changelog = "https://github.com/AvengeMedia/DankMaterialShell/releases/tag/v${version}";
+                homepage = "https://duxlabs.dev";
+                changelog = "https://github.com/duxlabs-dev/dux-shell/releases/tag/v${version}";
                 license = pkgs.lib.licenses.mit;
                 mainProgram = "dms";
                 platforms = pkgs.lib.platforms.linux;
@@ -180,17 +195,18 @@
 
       buildDmsPkgs = pkgs: {
         dms-shell = mkDmsShell pkgs;
-        quickshell = quickshell.packages.${pkgs.stdenv.hostPlatform.system}.default;
       };
     in
     {
       packages = forEachSystem (
         system: pkgs: {
           dms-shell = mkDmsShell pkgs;
-          quickshell = quickshell.packages.${system}.default;
           default = self.packages.${system}.dms-shell;
+          quickshell = builtins.warn "dank-material-shell: the package Quickshell is not included in the DMS flake anymore. We recommend you to use the one from nixos-unstable branch of Nixpkgs or the upstream flake." pkgs.quickshell;
         }
       );
+
+      lib = { inherit mkDmsShell buildDmsPkgs; };
 
       homeModules.dank-material-shell = mkModuleWithDmsPkgs ./distro/nix/home.nix;
 
@@ -206,16 +222,17 @@
 
       nixosModules.default = self.nixosModules.dank-material-shell;
 
-      nixosModules.greeter = mkModuleWithDmsPkgs ./distro/nix/greeter.nix;
+      nixosModules.greeter = builtins.warn "dank-material-shell: the greeter moved to the dux-greeter repo; use `inputs.dank-greeter.nixosModules.default` and `programs.dms-greeter` (https://github.com/duxlabs-dev/dux-greeter)" { };
 
       nixosModules.dankMaterialShell = builtins.warn "dank-material-shell: flake output `nixosModules.dankMaterialShell` has been renamed to `nixosModules.dank-material-shell`" self.nixosModules.dank-material-shell;
 
       devShells = forEachSystem (
         system: pkgs:
         let
-          devQmlPkgs = [
-            quickshell.packages.${system}.default
-            pkgs.kdePackages.qtdeclarative
+          devQmlPkgs = with pkgs;
+          [
+            quickshell
+            kdePackages.qtdeclarative
           ]
           ++ (qmlPkgs pkgs);
         in
@@ -225,11 +242,15 @@
               with pkgs;
               [
                 (goForPkgs pkgs)
-                go-mockery_2
+                go-mockery
                 gopls
                 delve
                 go-tools
                 gnumake
+                nodejs
+                lua
+                python3
+                matugen
 
                 prek
                 uv # for prek

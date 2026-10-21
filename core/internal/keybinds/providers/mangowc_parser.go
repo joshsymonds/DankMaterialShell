@@ -1,12 +1,14 @@
 package providers
 
 import (
+	"github.com/duxlabs-dev/dux-shell/core/internal/configfrag"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/utils"
+	"github.com/duxlabs-dev/dux-shell/core/internal/utils"
 )
 
 const (
@@ -14,6 +16,10 @@ const (
 )
 
 var MangoWCModSeparators = []rune{'+', ' '}
+
+func isMangoWCSectionComment(comment string) bool {
+	return strings.HasPrefix(strings.TrimSpace(comment), "===")
+}
 
 type MangoWCKeyBinding struct {
 	Mods    []string `json:"mods"`
@@ -30,9 +36,7 @@ type MangoWCParser struct {
 	configDir          string
 	currentSource      string
 	dmsBindsExists     bool
-	dmsBindsIncluded   bool
-	includeCount       int
-	dmsIncludePos      int
+	walker             *configfrag.Walker
 	bindsAfterDMS      int
 	dmsBindKeys        map[string]bool
 	configBindKeys     map[string]bool
@@ -48,7 +52,7 @@ func NewMangoWCParser(configDir string) *MangoWCParser {
 		contentLines:       []string{},
 		readingLine:        0,
 		configDir:          configDir,
-		dmsIncludePos:      -1,
+		walker:             configfrag.NewWalker(isDMSMangoBindsSourcePath),
 		dmsBindKeys:        make(map[string]bool),
 		configBindKeys:     make(map[string]bool),
 		conflictingConfigs: make(map[string]*MangoWCKeyBinding),
@@ -142,6 +146,14 @@ func mangowcAutogenerateComment(command, params string) string {
 			return "Swap window " + dir
 		}
 		return "Swap window " + params
+	case "move_client":
+		return "Move window " + params
+	case "scroller_stack":
+		return "Stack window " + params
+	case "togglejump":
+		return "Jump to window"
+	case "dwindle_toggle_split_direction":
+		return "Toggle split direction"
 	case "togglefloating":
 		return "Float/unfloat window"
 	case "togglefullscreen":
@@ -216,101 +228,40 @@ func mangowcAutogenerateComment(command, params string) string {
 	}
 }
 
-func (p *MangoWCParser) getKeybindAtLine(lineNumber int) *MangoWCKeyBinding {
+func (p *MangoWCParser) getKeybindAtLine(lineNumber int, precedingComment string) *MangoWCKeyBinding {
 	if lineNumber >= len(p.contentLines) {
 		return nil
 	}
-
-	line := p.contentLines[lineNumber]
-
-	bindMatch := regexp.MustCompile(`^(bind[lsr]*)\s*=\s*(.+)$`)
-	matches := bindMatch.FindStringSubmatch(line)
-	if len(matches) < 3 {
-		return nil
-	}
-
-	bindType := matches[1]
-	content := matches[2]
-
-	parts := strings.SplitN(content, "#", 2)
-	keys := parts[0]
-
-	var comment string
-	if len(parts) > 1 {
-		comment = strings.TrimSpace(parts[1])
-	}
-
-	if strings.HasPrefix(comment, MangoWCHideComment) {
-		return nil
-	}
-
-	keyFields := strings.SplitN(keys, ",", 4)
-	if len(keyFields) < 3 {
-		return nil
-	}
-
-	mods := strings.TrimSpace(keyFields[0])
-	key := strings.TrimSpace(keyFields[1])
-	command := strings.TrimSpace(keyFields[2])
-
-	var params string
-	if len(keyFields) > 3 {
-		params = strings.TrimSpace(keyFields[3])
-	}
-
-	if comment == "" {
-		comment = mangowcAutogenerateComment(command, params)
-	}
-
-	var modList []string
-	if mods != "" && !strings.EqualFold(mods, "none") {
-		modstring := mods + string(MangoWCModSeparators[0])
-		p := 0
-		for index, char := range modstring {
-			isModSep := false
-			for _, sep := range MangoWCModSeparators {
-				if char == sep {
-					isModSep = true
-					break
-				}
-			}
-			if isModSep {
-				if index-p > 1 {
-					modList = append(modList, modstring[p:index])
-				}
-				p = index + 1
-			}
-		}
-	}
-
-	_ = bindType
-
-	return &MangoWCKeyBinding{
-		Mods:    modList,
-		Key:     key,
-		Command: command,
-		Params:  params,
-		Comment: comment,
-	}
+	return p.getKeybindAtLineContent(p.contentLines[lineNumber], precedingComment)
 }
 
 func (p *MangoWCParser) ParseKeys() []MangoWCKeyBinding {
 	var keybinds []MangoWCKeyBinding
+	var pendingComment string
 
 	for lineNumber := 0; lineNumber < len(p.contentLines); lineNumber++ {
-		line := p.contentLines[lineNumber]
-		if line == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+		trimmed := strings.TrimSpace(p.contentLines[lineNumber])
+		if trimmed == "" {
+			pendingComment = ""
+			continue
+		}
+		if after, ok := strings.CutPrefix(trimmed, "#"); ok {
+			pendingComment = strings.TrimSpace(after)
+			if isMangoWCSectionComment(pendingComment) {
+				pendingComment = ""
+			}
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "bind") && !strings.HasPrefix(trimmed, mangowcAxisBindPrefix) {
+			pendingComment = ""
 			continue
 		}
 
-		if !strings.HasPrefix(strings.TrimSpace(line), "bind") {
-			continue
-		}
-
-		keybind := p.getKeybindAtLine(lineNumber)
+		keybind := p.getKeybindAtLine(lineNumber, pendingComment)
 		if keybind != nil {
 			keybinds = append(keybinds, *keybind)
 		}
+		pendingComment = ""
 	}
 
 	return keybinds
@@ -327,47 +278,20 @@ func ParseMangoWCKeys(path string) ([]MangoWCKeyBinding, error) {
 type MangoWCParseResult struct {
 	Keybinds           []MangoWCKeyBinding
 	DMSBindsIncluded   bool
-	DMSStatus          *MangoWCDMSStatus
+	DMSStatus          *configfrag.Status
 	ConflictingConfigs map[string]*MangoWCKeyBinding
 }
 
-type MangoWCDMSStatus struct {
-	Exists          bool
-	Included        bool
-	IncludePosition int
-	TotalIncludes   int
-	BindsAfterDMS   int
-	Effective       bool
-	OverriddenBy    int
-	StatusMessage   string
+var mangowcBindsMessages = configfrag.Messages{
+	Missing:     "dms/binds.conf does not exist",
+	NotIncluded: "dms/binds.conf is not sourced in config",
+	Overridden:  "Some DMS binds may be overridden by config binds",
+	Active:      "DMS binds are active",
 }
 
-func (p *MangoWCParser) buildDMSStatus() *MangoWCDMSStatus {
-	status := &MangoWCDMSStatus{
-		Exists:          p.dmsBindsExists,
-		Included:        p.dmsBindsIncluded,
-		IncludePosition: p.dmsIncludePos,
-		TotalIncludes:   p.includeCount,
-		BindsAfterDMS:   p.bindsAfterDMS,
-	}
-
-	switch {
-	case !p.dmsBindsExists:
-		status.Effective = false
-		status.StatusMessage = "dms/binds.conf does not exist"
-	case !p.dmsBindsIncluded:
-		status.Effective = false
-		status.StatusMessage = "dms/binds.conf is not sourced in config"
-	case p.bindsAfterDMS > 0:
-		status.Effective = true
-		status.OverriddenBy = p.bindsAfterDMS
-		status.StatusMessage = "Some DMS binds may be overridden by config binds"
-	default:
-		status.Effective = true
-		status.StatusMessage = "DMS binds are active"
-	}
-
-	return status
+func (p *MangoWCParser) buildDMSStatus() *configfrag.Status {
+	status := configfrag.BuildStatus(p.walker.Scan(), p.dmsBindsExists, p.bindsAfterDMS, "", false, mangowcBindsMessages)
+	return &status
 }
 
 func (p *MangoWCParser) formatBindKey(kb *MangoWCKeyBinding) string {
@@ -386,20 +310,25 @@ func (p *MangoWCParser) addBind(kb *MangoWCKeyBinding) {
 	normalizedKey := p.normalizeKey(key)
 	isDMSBind := strings.Contains(kb.Source, "dms/binds.conf") || strings.Contains(kb.Source, "dms"+string(os.PathSeparator)+"binds.conf")
 
-	if isDMSBind {
-		p.dmsBindKeys[normalizedKey] = true
-	} else if p.dmsBindKeys[normalizedKey] {
-		p.bindsAfterDMS++
-		p.conflictingConfigs[normalizedKey] = kb
-		p.configBindKeys[normalizedKey] = true
-		return
-	} else {
-		p.configBindKeys[normalizedKey] = true
-	}
-
-	if _, exists := p.bindMap[normalizedKey]; !exists {
+	// Mango (>= 0.15.5) applies the first matching bind and ignores later ones.
+	existing, exists := p.bindMap[normalizedKey]
+	if !exists {
 		p.bindOrder = append(p.bindOrder, key)
+		p.bindMap[normalizedKey] = kb
+		if isDMSBind {
+			p.dmsBindKeys[normalizedKey] = true
+		} else {
+			p.configBindKeys[normalizedKey] = true
+		}
+		return
 	}
+	if !isDMSBind || p.dmsBindKeys[normalizedKey] {
+		return
+	}
+	// A config bind sourced earlier shadows this DMS bind; list the DMS bind with it as the conflict.
+	p.bindsAfterDMS++
+	p.conflictingConfigs[normalizedKey] = existing
+	p.dmsBindKeys[normalizedKey] = true
 	p.bindMap[normalizedKey] = kb
 }
 
@@ -459,21 +388,38 @@ func (p *MangoWCParser) parseFileWithSource(filePath string) ([]MangoWCKeyBindin
 	p.currentSource = absPath
 
 	var keybinds []MangoWCKeyBinding
-	lines := strings.Split(string(data), "\n")
+	var pendingComment string
+	lines := strings.SplitSeq(string(data), "\n")
 
-	for lineNum, line := range lines {
+	for line := range lines {
 		trimmed := strings.TrimSpace(line)
+
+		if trimmed == "" {
+			pendingComment = ""
+			continue
+		}
 
 		if strings.HasPrefix(trimmed, "source") {
 			p.handleSource(trimmed, filepath.Dir(absPath), &keybinds)
+			pendingComment = ""
 			continue
 		}
 
-		if !strings.HasPrefix(trimmed, "bind") {
+		if after, ok := strings.CutPrefix(trimmed, "#"); ok {
+			pendingComment = strings.TrimSpace(after)
+			if isMangoWCSectionComment(pendingComment) {
+				pendingComment = ""
+			}
 			continue
 		}
 
-		kb := p.getKeybindAtLineContent(line, lineNum)
+		if !strings.HasPrefix(trimmed, "bind") && !strings.HasPrefix(trimmed, mangowcAxisBindPrefix) {
+			pendingComment = ""
+			continue
+		}
+
+		kb := p.getKeybindAtLineContent(line, pendingComment)
+		pendingComment = ""
 		if kb == nil {
 			continue
 		}
@@ -486,38 +432,22 @@ func (p *MangoWCParser) parseFileWithSource(filePath string) ([]MangoWCKeyBindin
 	return keybinds, nil
 }
 
+func isDMSMangoBindsSourcePath(sourcePath string) bool {
+	return sourcePath == "dms/binds.conf" || sourcePath == "./dms/binds.conf" || strings.HasSuffix(sourcePath, "/dms/binds.conf")
+}
+
 func (p *MangoWCParser) handleSource(line, baseDir string, keybinds *[]MangoWCKeyBinding) {
-	parts := strings.SplitN(line, "=", 2)
-	if len(parts) < 2 {
-		return
-	}
-
-	sourcePath := strings.TrimSpace(parts[1])
-	isDMSSource := sourcePath == "dms/binds.conf" || sourcePath == "./dms/binds.conf" || strings.HasSuffix(sourcePath, "/dms/binds.conf")
-
-	p.includeCount++
-	if isDMSSource {
-		p.dmsBindsIncluded = true
-		p.dmsIncludePos = p.includeCount
+	matched := p.walker.IncludeAssignment(baseDir, line, func(absPath string) error {
+		includedBinds, err := p.parseFileWithSource(absPath)
+		if err != nil {
+			return err
+		}
+		*keybinds = append(*keybinds, includedBinds...)
+		return nil
+	})
+	if matched {
 		p.dmsProcessed = true
 	}
-
-	expanded, err := utils.ExpandPath(sourcePath)
-	if err != nil {
-		return
-	}
-
-	fullPath := expanded
-	if !filepath.IsAbs(expanded) {
-		fullPath = filepath.Join(baseDir, expanded)
-	}
-
-	includedBinds, err := p.parseFileWithSource(fullPath)
-	if err != nil {
-		return
-	}
-
-	*keybinds = append(*keybinds, includedBinds...)
 }
 
 func (p *MangoWCParser) parseDMSBindsDirectly(dmsBindsPath string) []MangoWCKeyBinding {
@@ -529,8 +459,11 @@ func (p *MangoWCParser) parseDMSBindsDirectly(dmsBindsPath string) []MangoWCKeyB
 	return keybinds
 }
 
-func (p *MangoWCParser) getKeybindAtLineContent(line string, _ int) *MangoWCKeyBinding {
-	bindMatch := regexp.MustCompile(`^(bind[lsr]*)\s*=\s*(.+)$`)
+// getKeybindAtLineContent parses one `bind=` line. precedingComment (a `# ...`
+// line directly above) is the description: mango feeds inline comments to spawn
+// as argv, so DMS keeps descriptions on the line above; inline `#` is a fallback.
+func (p *MangoWCParser) getKeybindAtLineContent(line string, precedingComment string) *MangoWCKeyBinding {
+	bindMatch := regexp.MustCompile(`^(bind[lsrp]*|axisbind)\s*=\s*(.+)$`)
 	matches := bindMatch.FindStringSubmatch(line)
 	if len(matches) < 3 {
 		return nil
@@ -543,6 +476,12 @@ func (p *MangoWCParser) getKeybindAtLineContent(line string, _ int) *MangoWCKeyB
 	var comment string
 	if len(parts) > 1 {
 		comment = strings.TrimSpace(parts[1])
+	}
+	if comment == "" {
+		comment = strings.TrimSpace(precedingComment)
+		if isMangoWCSectionComment(comment) {
+			comment = ""
+		}
 	}
 
 	if strings.HasPrefix(comment, MangoWCHideComment) {
@@ -558,6 +497,12 @@ func (p *MangoWCParser) getKeybindAtLineContent(line string, _ int) *MangoWCKeyB
 	key := strings.TrimSpace(keyFields[1])
 	command := strings.TrimSpace(keyFields[2])
 
+	if matches[1] == mangowcAxisBindPrefix {
+		if canonical, ok := mangowcDirectionToScroll(key); ok {
+			key = canonical
+		}
+	}
+
 	var params string
 	if len(keyFields) > 3 {
 		params = strings.TrimSpace(keyFields[3])
@@ -572,13 +517,7 @@ func (p *MangoWCParser) getKeybindAtLineContent(line string, _ int) *MangoWCKeyB
 		modstring := mods + string(MangoWCModSeparators[0])
 		idx := 0
 		for index, char := range modstring {
-			isModSep := false
-			for _, sep := range MangoWCModSeparators {
-				if char == sep {
-					isModSep = true
-					break
-				}
-			}
+			isModSep := slices.Contains(MangoWCModSeparators, char)
 			if isModSep {
 				if index-idx > 1 {
 					modList = append(modList, modstring[idx:index])
@@ -606,7 +545,7 @@ func ParseMangoWCKeysWithDMS(path string) (*MangoWCParseResult, error) {
 
 	return &MangoWCParseResult{
 		Keybinds:           keybinds,
-		DMSBindsIncluded:   parser.dmsBindsIncluded,
+		DMSBindsIncluded:   parser.walker.Included(),
 		DMSStatus:          parser.buildDMSStatus(),
 		ConflictingConfigs: parser.conflictingConfigs,
 	}, nil

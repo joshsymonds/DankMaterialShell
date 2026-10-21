@@ -1,60 +1,55 @@
-pragma ComponentBehavior: Bound
-
 import QtQuick
 import qs.Common
-import qs.Services
+import qs.DCommon.Widgets
 import qs.Widgets
 
-DankDropdown {
+SettingsRow {
     id: root
 
-    LayoutMirroring.enabled: I18n.isRtl
-    LayoutMirroring.childrenInherit: true
+    property string text: ""
+    property string description: ""
+    property string currentValue: ""
+    property alias options: dropdown.options
+    property alias optionIcons: dropdown.optionIcons
+    property alias optionImages: dropdown.optionImages
+    property alias optionIconMap: dropdown.optionIconMap
+    property alias optionColorMap: dropdown.optionColorMap
+    property alias enableFuzzySearch: dropdown.enableFuzzySearch
+    property alias popupWidthOffset: dropdown.popupWidthOffset
+    property alias maxPopupHeight: dropdown.maxPopupHeight
+    property alias openUpwards: dropdown.openUpwards
+    property alias popupWidth: dropdown.popupWidth
+    property alias alignPopupRight: dropdown.alignPopupRight
+    property alias dropdownWidth: dropdown.dropdownWidth
+    property alias emptyText: dropdown.emptyText
+    property alias menuBlurEnabled: dropdown.menuBlurEnabled
+    property alias transientSurfaceTracker: dropdown.transientSurfaceTracker
+    property alias menuOpen: dropdown.menuOpen
+    property bool addHorizontalPadding: true
 
-    property string tab: ""
-    property var tags: []
-    property string settingKey: ""
+    signal valueChanged(string value)
 
-    readonly property bool isHighlighted: settingKey !== "" && SettingsSearchService.highlightSection === settingKey
-
-    width: parent?.width ?? 0
-    addHorizontalPadding: true
-    usePopupTransparency: false
-
-    Rectangle {
-        anchors.fill: parent
-        radius: Theme.cornerRadius
-        color: Theme.withAlpha(Theme.primary, root.isHighlighted ? 0.2 : 0)
-        visible: root.isHighlighted
-
-        Behavior on color {
-            ColorAnimation {
-                duration: Theme.shortDuration
-                easing.type: Theme.standardEasing
-            }
-        }
+    function openDropdownMenu() {
+        dropdown.openDropdownMenu();
     }
 
-    function findParentFlickable() {
-        let p = root.parent;
-        while (p) {
-            if (p.hasOwnProperty("contentY") && p.hasOwnProperty("contentItem"))
-                return p;
-            p = p.parent;
-        }
-        return null;
+    function closeDropdownMenu() {
+        dropdown.closeDropdownMenu();
     }
 
-    Component.onCompleted: {
-        if (!settingKey)
-            return;
-        let flickable = findParentFlickable();
-        if (flickable)
-            SettingsSearchService.registerCard(settingKey, root, flickable);
-    }
+    title: text
+    subtitle: description
+    onCurrentValueChanged: dropdown.currentValue = currentValue
 
-    Component.onDestruction: {
-        if (settingKey)
-            SettingsSearchService.unregisterCard(settingKey);
+    DDropdown {
+        id: dropdown
+        downKeyOpens: false
+        backgroundColor: SettingsMetrics.controlSurface
+        enabled: root.enabled
+        Accessible.name: root.text
+        Accessible.description: root.description + (root.description ? " · " : "") + currentValue
+        width: Math.min(dropdownWidth, root.width - SettingsMetrics.rowPaddingH * 2)
+        Component.onCompleted: currentValue = root.currentValue
+        onValueChanged: value => root.valueChanged(value)
     }
 }

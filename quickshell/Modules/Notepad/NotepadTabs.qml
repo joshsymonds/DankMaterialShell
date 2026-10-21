@@ -3,7 +3,7 @@ import QtQuick
 import QtQuick.Controls
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Column {
     id: root
@@ -13,11 +13,18 @@ Column {
     property int draggedIndex: -1
     property int dropTargetIndex: -1
     property bool suppressShiftAnimation: false
-    readonly property real tabItemSize: 128 + Theme.spacingXS
+    property int editingIndex: -1
+    readonly property real tabItemSize: tabRow.dynamicTabWidth + Theme.spacingXS
 
     signal tabSwitched(int tabIndex)
     signal tabClosed(int tabIndex)
     signal newTabRequested
+
+    function commitRename(index, newTitle) {
+        if (index >= 0)
+            NotepadStorageService.renameTab(index, newTitle);
+        editingIndex = -1;
+    }
 
     function hasUnsavedChangesForTab(tab) {
         if (!tab)
@@ -32,11 +39,19 @@ Column {
     spacing: Theme.spacingXS
 
     Row {
+        id: tabRow
         width: parent.width
         height: 36
         spacing: Theme.spacingXS
 
+        readonly property real dynamicTabWidth: {
+            var count = Math.max(1, NotepadStorageService.tabs.length);
+            var raw = (tabScroll.width - (count - 1) * Theme.spacingXS) / count;
+            return Math.max(128, Math.min(300, raw));
+        }
+
         ScrollView {
+            id: tabScroll
             width: parent.width - newTabButton.width - Theme.spacingXS
             height: parent.height
             clip: true
@@ -57,7 +72,8 @@ Column {
 
                         readonly property bool isActive: NotepadStorageService.currentTabIndex === index
                         readonly property bool isHovered: tabMouseArea.containsMouse && !closeMouseArea.containsMouse
-                        readonly property real tabWidth: 128
+                        readonly property bool editing: root.editingIndex === index
+                        readonly property real tabWidth: tabRow.dynamicTabWidth
                         property bool longPressing: false
                         property bool dragging: false
                         property point dragStartPos: Qt.point(0, 0)
@@ -71,27 +87,27 @@ Column {
                             repeat: false
                             onTriggered: {
                                 if (NotepadStorageService.tabs.length > 1) {
-                                    delegateItem.longPressing = true
+                                    delegateItem.longPressing = true;
                                 }
                             }
                         }
 
                         readonly property real shiftOffset: {
                             if (root.draggedIndex < 0)
-                                return 0
+                                return 0;
                             if (index === root.draggedIndex)
-                                return 0
-                            var dragIdx = root.draggedIndex
-                            var dropIdx = root.dropTargetIndex
-                            var myIdx = index
-                            var shiftAmount = root.tabItemSize
+                                return 0;
+                            var dragIdx = root.draggedIndex;
+                            var dropIdx = root.dropTargetIndex;
+                            var myIdx = index;
+                            var shiftAmount = root.tabItemSize;
                             if (dropIdx < 0)
-                                return 0
+                                return 0;
                             if (dragIdx < dropIdx && myIdx > dragIdx && myIdx <= dropIdx)
-                                return -shiftAmount
+                                return -shiftAmount;
                             if (dragIdx > dropIdx && myIdx >= dropIdx && myIdx < dragIdx)
-                                return shiftAmount
-                            return 0
+                                return shiftAmount;
+                            return 0;
                         }
 
                         width: tabWidth
@@ -124,7 +140,7 @@ Column {
                                 id: tabRect
                                 anchors.fill: parent
                                 radius: Theme.cornerRadius
-                                color: isActive ? Theme.primaryPressed : isHovered ? Theme.primaryHoverLight : Theme.withAlpha(Theme.primaryPressed, 0)
+                                color: isActive ? Theme.selectedContainer : isHovered ? Theme.primaryHoverLight : Theme.withAlpha(Theme.primaryPressed, 0)
                                 border.width: isActive || dragging ? 0 : 1
                                 border.color: dragging ? Theme.primary : Theme.outlineMedium
                                 clip: true
@@ -138,33 +154,84 @@ Column {
 
                                     StyledText {
                                         id: tabText
+                                        visible: !delegateItem.editing
                                         width: parent.width - (tabCloseButton.visible ? tabCloseButton.width + Theme.spacingXS : 0)
                                         text: {
-                                            var prefix = ""
+                                            var prefix = "";
                                             if (hasUnsavedChangesForTab(modelData)) {
-                                                prefix = "● "
+                                                prefix = "● ";
                                             }
-                                            return prefix + (modelData.title || "Untitled")
+                                            return prefix + (modelData.title || "Untitled");
                                         }
                                         font.pixelSize: Theme.fontSizeSmall
-                                        color: isActive ? Theme.primary : Theme.surfaceText
-                                        font.weight: isActive ? Font.Medium : Font.Normal
+                                        color: isActive ? Theme.onSelectedContainer : Theme.surfaceText
+                                        font.weight: Theme.fontWeightMedium
                                         elide: Text.ElideMiddle
                                         maximumLineCount: 1
                                         wrapMode: Text.NoWrap
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
 
+                                    DTextField {
+                                        id: renameField
+                                        visible: delegateItem.editing
+                                        enabled: delegateItem.editing
+                                        width: parent.width
+                                        height: parent.height
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.weight: Theme.fontWeightMedium
+                                        textColor: Theme.primary
+                                        backgroundColor: "transparent"
+                                        borderWidth: 0
+                                        focusedBorderWidth: 0
+                                        topPadding: 0
+                                        bottomPadding: 0
+                                        keyForwardTargets: [renameKeyHandler]
+
+                                        onEditingFinished: root.commitRename(index, text)
+
+                                        Item {
+                                            id: renameKeyHandler
+
+                                            Keys.onEscapePressed: event => {
+                                                renameField.text = modelData.title || "Untitled";
+                                                root.editingIndex = -1;
+                                                event.accepted = true;
+                                            }
+                                        }
+
+                                        // A tab switch re-focuses the editor via Qt.callLater; the
+                                        // timer fires afterwards so the field keeps focus + selection.
+                                        Timer {
+                                            id: renameFocusTimer
+                                            interval: 20
+                                            repeat: false
+                                            onTriggered: {
+                                                renameField.forceActiveFocus();
+                                                renameField.selectAll();
+                                            }
+                                        }
+
+                                        onVisibleChanged: {
+                                            if (!visible)
+                                                return;
+                                            text = modelData.title || "Untitled";
+                                            renameFocusTimer.restart();
+                                        }
+                                    }
+
                                     Rectangle {
                                         id: tabCloseButton
+                                        Accessible.role: Accessible.Button
+                                        Accessible.name: I18n.tr("Close")
                                         width: 20
                                         height: 20
                                         radius: Theme.cornerRadius
                                         color: closeMouseArea.containsMouse ? Theme.surfaceTextHover : Theme.withAlpha(Theme.surfaceTextHover, 0)
-                                        visible: NotepadStorageService.tabs.length > 1
+                                        visible: NotepadStorageService.tabs.length > 1 && !delegateItem.editing
                                         anchors.verticalCenter: parent.verticalCenter
 
-                                        DankIcon {
+                                        DIcon {
                                             name: "close"
                                             size: 14
                                             color: Theme.surfaceTextMedium
@@ -195,88 +262,98 @@ Column {
                         MouseArea {
                             id: tabMouseArea
                             anchors.fill: parent
+                            enabled: !delegateItem.editing
                             hoverEnabled: true
                             preventStealing: dragging || longPressing
                             cursorShape: dragging || longPressing ? Qt.ClosedHandCursor : Qt.PointingHandCursor
                             acceptedButtons: Qt.LeftButton
 
+                            onDoubleClicked: {
+                                root.tabSwitched(index);
+                                root.editingIndex = index;
+                            }
+
                             onPressed: mouse => {
                                 if (mouse.button === Qt.LeftButton && NotepadStorageService.tabs.length > 1) {
-                                    delegateItem.dragStartPos = Qt.point(mouse.x, mouse.y)
-                                    longPressTimer.start()
+                                    delegateItem.dragStartPos = Qt.point(mouse.x, mouse.y);
+                                    longPressTimer.start();
                                 }
                             }
 
                             onReleased: mouse => {
-                                longPressTimer.stop()
-                                var wasDragging = delegateItem.dragging
-                                var didReorder = wasDragging && delegateItem.targetIndex >= 0 && delegateItem.targetIndex !== delegateItem.originalIndex
+                                longPressTimer.stop();
+                                var wasDragging = delegateItem.dragging;
+                                var didReorder = wasDragging && delegateItem.targetIndex >= 0 && delegateItem.targetIndex !== delegateItem.originalIndex;
 
                                 if (didReorder) {
-                                    root.suppressShiftAnimation = true
-                                    NotepadStorageService.reorderTab(delegateItem.originalIndex, delegateItem.targetIndex)
+                                    root.suppressShiftAnimation = true;
+                                    NotepadStorageService.reorderTab(delegateItem.originalIndex, delegateItem.targetIndex);
                                 }
 
-                                delegateItem.longPressing = false
-                                delegateItem.dragging = false
-                                delegateItem.dragAxisOffset = 0
-                                delegateItem.targetIndex = -1
-                                delegateItem.originalIndex = -1
-                                root.draggedIndex = -1
-                                root.dropTargetIndex = -1
+                                delegateItem.longPressing = false;
+                                delegateItem.dragging = false;
+                                delegateItem.dragAxisOffset = 0;
+                                delegateItem.targetIndex = -1;
+                                delegateItem.originalIndex = -1;
+                                root.draggedIndex = -1;
+                                root.dropTargetIndex = -1;
                                 if (didReorder) {
                                     Qt.callLater(() => {
-                                        root.suppressShiftAnimation = false
-                                    })
+                                        root.suppressShiftAnimation = false;
+                                    });
                                 }
 
                                 if (wasDragging || mouse.button !== Qt.LeftButton)
-                                    return
-                                root.tabSwitched(index)
+                                    return;
+                                root.tabSwitched(index);
                             }
 
                             onPositionChanged: mouse => {
                                 if (delegateItem.longPressing && !delegateItem.dragging) {
-                                    var distance = Math.sqrt(Math.pow(mouse.x - delegateItem.dragStartPos.x, 2) + Math.pow(mouse.y - delegateItem.dragStartPos.y, 2))
+                                    var distance = Math.sqrt(Math.pow(mouse.x - delegateItem.dragStartPos.x, 2) + Math.pow(mouse.y - delegateItem.dragStartPos.y, 2));
                                     if (distance > 5) {
-                                        delegateItem.dragging = true
-                                        delegateItem.targetIndex = index
-                                        delegateItem.originalIndex = index
-                                        root.draggedIndex = index
-                                        root.dropTargetIndex = index
+                                        delegateItem.dragging = true;
+                                        delegateItem.targetIndex = index;
+                                        delegateItem.originalIndex = index;
+                                        root.draggedIndex = index;
+                                        root.dropTargetIndex = index;
                                     }
                                 }
 
                                 if (!delegateItem.dragging)
-                                    return
+                                    return;
+                                var axisOffset = mouse.x - delegateItem.dragStartPos.x;
+                                delegateItem.dragAxisOffset = axisOffset;
 
-                                var axisOffset = mouse.x - delegateItem.dragStartPos.x
-                                delegateItem.dragAxisOffset = axisOffset
-
-                                var itemSize = root.tabItemSize
-                                var rawSlot = axisOffset / itemSize
-                                var slotOffset = rawSlot >= 0
-                                    ? Math.floor(rawSlot + 0.4)
-                                    : Math.ceil(rawSlot - 0.4)
-                                var tabCount = NotepadStorageService.tabs.length
-                                var newTargetIndex = Math.max(0, Math.min(tabCount - 1, delegateItem.originalIndex + slotOffset))
+                                var itemSize = root.tabItemSize;
+                                var rawSlot = axisOffset / itemSize;
+                                var slotOffset = rawSlot >= 0 ? Math.floor(rawSlot + 0.4) : Math.ceil(rawSlot - 0.4);
+                                var tabCount = NotepadStorageService.tabs.length;
+                                var newTargetIndex = Math.max(0, Math.min(tabCount - 1, delegateItem.originalIndex + slotOffset));
 
                                 if (newTargetIndex !== delegateItem.targetIndex) {
-                                    delegateItem.targetIndex = newTargetIndex
-                                    root.dropTargetIndex = newTargetIndex
+                                    delegateItem.targetIndex = newTargetIndex;
+                                    root.dropTargetIndex = newTargetIndex;
                                 }
                             }
+                        }
+
+                        DTooltipHost {
+                            text: tabText.truncated ? (delegateItem.modelData.title || "Untitled") : ""
+                            target: delegateItem
+                            hoverArea: tabMouseArea
                         }
                     }
                 }
             }
         }
 
-        DankActionButton {
+        DActionButton {
             id: newTabButton
             width: 32
             height: 32
             iconName: "add"
+            tooltipText: I18n.tr("New tab")
             iconSize: Theme.iconSize - 4
             iconColor: Theme.surfaceText
             onClicked: root.newTabRequested()

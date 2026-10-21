@@ -2,118 +2,112 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import qs.Common
-import qs.Widgets
 
-StyledRect {
+Item {
     id: root
 
     LayoutMirroring.enabled: I18n.isRtl
     LayoutMirroring.childrenInherit: true
 
+    readonly property bool isSettingsRow: true
+
     property string tab: ""
     property var tags: []
+    property string settingKey: ""
 
     property string title: ""
     property string description: ""
     property string iconName: ""
     property bool checked: false
+    property bool userToggled: false
 
-    default property alias content: expandedContent.children
-    readonly property bool hasContent: expandedContent.children.length > 0
+    default property alias content: expandedContent.data
+    readonly property bool hasContent: expandedContent.height > 0
+    readonly property bool standalone: !(parent?.isSettingsGroupHost ?? false)
+    readonly property bool firstInGroup: standalone || parent.isEdge(root, true)
+    readonly property bool lastInGroup: standalone || parent.isEdge(root, false)
+    readonly property bool expanded: checked && hasContent
 
     signal toggled(bool checked)
 
     width: parent?.width ?? 0
-    height: Theme.spacingL * 2 + mainColumn.height
-    radius: Theme.cornerRadius
-    color: Theme.surfaceContainerHigh
+    height: column.height
+
+    Rectangle {
+        anchors.fill: parent
+        radius: Theme.groupedListOuterRadius
+        color: SettingsMetrics.rowColor
+        border.width: Theme.layerOutlineWidth
+        border.color: Theme.outlineMedium
+        visible: root.standalone
+    }
 
     Column {
-        id: mainColumn
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        anchors.leftMargin: Theme.spacingL
-        anchors.rightMargin: Theme.spacingL
-        spacing: Theme.spacingM
+        id: column
+        width: parent.width
+        spacing: 0
 
-        Item {
+        SettingsToggleRow {
+            id: header
             width: parent.width
-            height: headerColumn.height
-
-            Column {
-                id: headerColumn
-                anchors.left: parent.left
-                anchors.right: toggleSwitch.left
-                anchors.rightMargin: Theme.spacingM
-                spacing: Theme.spacingXS
-
-                Row {
-                    spacing: Theme.spacingM
-                    width: parent.width
-
-                    DankIcon {
-                        id: headerIcon
-                        name: root.iconName
-                        size: Theme.iconSize
-                        color: Theme.primary
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: root.iconName !== ""
-                    }
-
-                    StyledText {
-                        id: headerText
-                        text: root.title
-                        font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Medium
-                        color: Theme.surfaceText
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: root.title !== ""
-                        width: parent.width - (headerIcon.visible ? headerIcon.width + parent.spacing : 0)
-                        horizontalAlignment: Text.AlignLeft
-                    }
-                }
-
-                StyledText {
-                    id: descriptionText
-                    text: root.description
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.surfaceVariantText
-                    wrapMode: Text.WordWrap
-                    width: parent.width
-                    horizontalAlignment: Text.AlignLeft
-                    visible: root.description !== ""
-                }
-            }
-
-            DankToggle {
-                id: toggleSwitch
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                hideText: true
-                checked: root.checked
-                enabled: root.enabled
-                onToggled: checked => root.toggled(checked)
-            }
-
-            StateLayer {
-                anchors.fill: parent
-                disabled: !root.enabled
-                stateColor: Theme.primary
-                cornerRadius: root.radius
-                onClicked: {
-                    if (!root.enabled)
-                        return;
-                    root.toggled(!root.checked);
-                }
+            topRadius: root.firstInGroup ? Theme.groupedListOuterRadius : Theme.groupedListInnerRadius
+            bottomRadius: root.lastInGroup && !root.expanded ? Theme.groupedListOuterRadius : Theme.groupedListInnerRadius
+            tab: root.tab
+            tags: root.tags
+            settingKey: root.settingKey
+            text: root.title
+            description: root.description
+            iconName: root.iconName
+            checked: root.checked
+            enabled: root.enabled
+            paintBackground: false
+            onToggled: value => {
+                root.userToggled = true;
+                root.toggled(value);
             }
         }
 
-        Column {
-            id: expandedContent
+        Item {
             width: parent.width
-            spacing: Theme.spacingM
-            visible: root.checked && root.hasContent
+            visible: root.checked || height > 0
+            height: root.checked && root.hasContent ? expandedContent.height : 0
+            clip: true
+
+            Behavior on height {
+                enabled: root.userToggled && Theme.currentAnimationSpeed !== SettingsData.AnimationSpeed.None
+                NumberAnimation {
+                    duration: SettingsMetrics.transitionDuration
+                    easing.type: Easing.BezierSpline
+                    easing.bezierCurve: Theme.expressiveCurves.expressiveDefaultSpatial
+                    onRunningChanged: {
+                        if (!running)
+                            root.userToggled = false;
+                    }
+                }
+            }
+
+            Column {
+                id: expandedContent
+
+                readonly property bool isSettingsGroupHost: true
+
+                function isEdge(item, first) {
+                    if (first || !root.lastInGroup)
+                        return false;
+                    let last = null;
+                    for (let i = 0; i < visibleChildren.length; i++) {
+                        if (visibleChildren[i].isSettingsRow === true)
+                            last = visibleChildren[i];
+                    }
+                    return last === item;
+                }
+
+                enabled: root.checked
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: root.iconName !== "" ? Theme.iconSize + Theme.spacingL : 0
+                spacing: 0
+            }
         }
     }
 }

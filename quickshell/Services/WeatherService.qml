@@ -10,11 +10,15 @@ import "../Common/suncalc.js" as SunCalc
 
 Singleton {
     id: root
+    readonly property var log: Log.scoped("WeatherService")
 
     property int refCount: 0
 
     property var selectedDate: new Date()
-    property var weather: ({
+    property var weather: emptyWeather()
+
+    function emptyWeather() {
+        return {
             "available": false,
             "loading": true,
             "temp": 0,
@@ -33,7 +37,8 @@ Singleton {
             "precipitationProbability": 0,
             "isDay": true,
             "forecast": []
-        })
+        };
+    }
 
     property var location: null
     property int updateInterval: 900000 // 15 minutes
@@ -43,9 +48,12 @@ Singleton {
     property int lastFetchTime: 0
     property int minFetchInterval: 30000
     property int persistentRetryCount: 0
+    property int _geocodeReqId: 0
+    property var _pendingCoords: null
 
-    readonly property var lowPriorityCmd: ["nice", "-n", "19", "ionice", "-c3"]
-    readonly property var curlBaseCmd: ["curl", "-sS", "--fail", "--connect-timeout", "3", "--max-time", "6", "--limit-rate", "100k", "--compressed"]
+    // ionice is util-linux only; the BSDs get plain nice
+    readonly property var lowPriorityCmd: Qt.platform.os === "linux" ? ["nice", "-n", "19", "ionice", "-c3"] : ["nice", "-n", "19"]
+    readonly property var fetchCmd: [Proc.dmsBin, "dl", "--connect-timeout", "8", "--timeout", "20"]
 
     property var weatherIcons: ({
             "0": "clear_day",
@@ -78,36 +86,11 @@ Singleton {
             "99": "thunderstorm"
         })
 
-    property var nightWeatherIcons: ({
-            "0": "clear_night",
-            "1": "clear_night",
-            "2": "partly_cloudy_night",
-            "3": "cloud",
-            "45": "foggy",
-            "48": "foggy",
-            "51": "rainy",
-            "53": "rainy",
-            "55": "rainy",
-            "56": "rainy",
-            "57": "rainy",
-            "61": "rainy",
-            "63": "rainy",
-            "65": "rainy",
-            "66": "rainy",
-            "67": "rainy",
-            "71": "cloudy_snowing",
-            "73": "cloudy_snowing",
-            "75": "snowing_heavy",
-            "77": "cloudy_snowing",
-            "80": "rainy",
-            "81": "rainy",
-            "82": "rainy",
-            "85": "cloudy_snowing",
-            "86": "snowing_heavy",
-            "95": "thunderstorm",
-            "96": "thunderstorm",
-            "99": "thunderstorm"
-        })
+    readonly property var nightWeatherIcons: Object.assign({}, weatherIcons, {
+        "0": "clear_night",
+        "1": "clear_night",
+        "2": "partly_cloudy_night"
+    })
 
     function getWeatherIcon(code, isDay) {
         if (typeof isDay === "undefined") {
@@ -122,21 +105,21 @@ Singleton {
             "0": I18n.tr("Clear Sky"),
             "1": I18n.tr("Clear Sky"),
             "2": I18n.tr("Partly Cloudy"),
-            "3": I18n.tr("Overcast"),
-            "45": I18n.tr("Fog"),
+            "3": I18n.tr("Overcast", "weather condition name"),
+            "45": I18n.tr("Fog", "weather condition name"),
             "48": I18n.tr("Fog"),
-            "51": I18n.tr("Drizzle"),
+            "51": I18n.tr("Drizzle", "weather condition name"),
             "53": I18n.tr("Drizzle"),
             "55": I18n.tr("Drizzle"),
             "56": I18n.tr("Freezing Drizzle"),
             "57": I18n.tr("Freezing Drizzle"),
             "61": I18n.tr("Light Rain"),
-            "63": I18n.tr("Rain"),
+            "63": I18n.tr("Rain", "noun, weather condition name"),
             "65": I18n.tr("Heavy Rain"),
             "66": I18n.tr("Light Rain"),
             "67": I18n.tr("Heavy Rain"),
             "71": I18n.tr("Light Snow"),
-            "73": I18n.tr("Snow"),
+            "73": I18n.tr("Snow", "noun, weather condition name"),
             "75": I18n.tr("Heavy Snow"),
             "77": I18n.tr("Snow"),
             "80": I18n.tr("Light Rain"),
@@ -144,7 +127,7 @@ Singleton {
             "82": I18n.tr("Heavy Rain"),
             "85": I18n.tr("Light Snow Showers"),
             "86": I18n.tr("Heavy Snow Showers"),
-            "95": I18n.tr("Thunderstorm"),
+            "95": I18n.tr("Thunderstorm", "weather condition name"),
             "96": I18n.tr("Thunderstorm with Hail"),
             "99": I18n.tr("Thunderstorm with Hail")
         };
@@ -183,6 +166,24 @@ Singleton {
             return null;
         }
         return SunCalc.getTimes(date, location.latitude, location.longitude, location.elevation);
+    }
+
+    function getMoonTrack(date) {
+        if (!location)
+            return null;
+        const offset = (weather.utcOffsetSeconds ?? -date.getTimezoneOffset() * 60) * 1000;
+        const localDate = new Date(date.getTime() + offset);
+        const start = Date.UTC(localDate.getUTCFullYear(), localDate.getUTCMonth(), localDate.getUTCDate()) - offset;
+        const hour = 60 * 60 * 1000;
+        const altitude = time => Math.sin(SunCalc.getMoonPosition(new Date(time), location.latitude, location.longitude).altitude);
+        const values = [];
+        for (let i = 0; i <= 24; i++)
+            values.push(altitude(start + i * hour));
+        return {
+            values: values,
+            altitude: altitude(date.getTime()),
+            progress: (date.getTime() - start) / (24 * hour)
+        };
     }
 
     function getEcliptic(date, points = 60) {
@@ -252,12 +253,12 @@ Singleton {
                 end: new Date(times.goldenHourEnd)
             },
             {
-                name: I18n.tr("Morning"),
+                name: I18n.tr("Morning", "time of day period name in weather view"),
                 start: new Date(times.goldenHourEnd),
                 end: new Date(times.solarNoon)
             },
             {
-                name: I18n.tr("Afternoon"),
+                name: I18n.tr("Afternoon", "time of day period name in weather view"),
                 start: new Date(times.solarNoon),
                 end: new Date(times.goldenHour)
             },
@@ -310,7 +311,7 @@ Singleton {
         }
 
         return {
-            period: I18n.tr("Night"),
+            period: I18n.tr("Night", "noun, time of day period, also night mode state"),
             periodIndex: 0,
             periodPercent: 0,
             dayPercent: dayPercent
@@ -348,6 +349,13 @@ Singleton {
         const value = SettingsData.useFahrenheit ? Math.round(celsius * (9 / 5) + 32) : celsius;
         const unit = unitsShort ? "°" : (SettingsData.useFahrenheit ? "°F" : "°C");
         return includeUnits ? value + unit : value;
+    }
+
+    function currentTempText(unitsShort = true) {
+        const unit = unitsShort ? "°" : (SettingsData.useFahrenheit ? "°F" : "°C");
+        if (!weather.available)
+            return "--" + unit;
+        return (SettingsData.useFahrenheit ? weather.tempF : weather.temp) + unit;
     }
 
     function formatSpeed(kmh, includeUnits = true) {
@@ -390,12 +398,14 @@ Singleton {
         var value;
         var unit;
         if (SettingsData.useFahrenheit) {
-            value = (distance / 1609.344).toFixed(1);
+            value = distance / 1609.344;
             unit = "mi";
             if (value < 1) {
                 value = Math.round(value * 5280 / 50) * 50;
                 unit = "ft";
+                return value + " " + unit;
             }
+            value = value.toFixed(1);
         } else {
             value = distance;
             unit = "m";
@@ -434,16 +444,9 @@ Singleton {
     }
 
     function formatForecastDay(isoString, index) {
+        const date = isoString ? new Date(isoString.slice(0, 10) + "T12:00:00") : new Date();
         if (!isoString)
-            return "--";
-
-        if (index === 0)
-            return I18n.tr("Today");
-        if (index === 1)
-            return I18n.tr("Tomorrow");
-
-        const date = new Date();
-        date.setDate(date.getDate() + index);
+            date.setDate(date.getDate() + index);
         const locale = I18n.locale();
         return locale.dayName(date.getDay(), Locale.ShortFormat);
     }
@@ -452,14 +455,52 @@ Singleton {
         if (!location) {
             return null;
         }
-
-        const params = ["latitude=" + location.latitude, "longitude=" + location.longitude, "current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m", "daily=sunrise,sunset,temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max", "hourly=temperature_2m,weather_code,precipitation_probability,wind_speed_10m,apparent_temperature,relative_humidity_2m,surface_pressure,visibility,cloud_cover", "timezone=auto", "forecast_days=7"];
-
-        return "https://api.open-meteo.com/v1/forecast?" + params.join('&');
+        return getWeatherApiUrlForCoords(location.latitude, location.longitude);
     }
 
     function getGeocodingUrl(query) {
         return "https://geocoding-api.open-meteo.com/v1/search?name=" + encodeURIComponent(query) + "&count=1&language=en&format=json";
+    }
+
+    function getConfiguredLocationName() {
+        return SessionData.isGreeterMode ? SessionData.weatherLocation : SettingsData.weatherLocation;
+    }
+
+    function setLocation(lat, lon, city, country) {
+        root.location = {
+            city: city || I18n.tr("Local Weather"),
+            country: country || "",
+            latitude: lat,
+            longitude: lon
+        };
+    }
+
+    function updateLocationCity(city, country) {
+        if (!root.location)
+            return;
+
+        root.location = {
+            latitude: root.location.latitude,
+            longitude: root.location.longitude,
+            city: city || root.location.city,
+            country: country || root.location.country
+        };
+
+        if (root.weather.available) {
+            root.weather = Object.assign({}, root.weather, {
+                city: city || root.weather.city,
+                country: country || root.weather.country
+            });
+        }
+    }
+
+    function getWeatherApiUrlForCoords(lat, lon) {
+        if (lat == null || lon == null)
+            return null;
+
+        const params = ["latitude=" + lat, "longitude=" + lon, "current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m", "daily=sunrise,sunset,moonrise,moonset,temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max", "hourly=temperature_2m,weather_code,precipitation_probability,wind_speed_10m,apparent_temperature,relative_humidity_2m,surface_pressure,visibility,cloud_cover,uv_index,dew_point_2m", "timezone=auto", "forecast_days=7"];
+
+        return "https://api.open-meteo.com/v1/forecast?" + params.join('&');
     }
 
     function addRef() {
@@ -475,9 +516,9 @@ Singleton {
     }
 
     function updateLocation() {
-        const useAuto = SessionData.isGreeterMode ? GreetdSettings.useAutoLocation : SettingsData.useAutoLocation;
-        const coords = SessionData.isGreeterMode ? GreetdSettings.weatherCoordinates : SettingsData.weatherCoordinates;
-        const cityName = SessionData.isGreeterMode ? GreetdSettings.weatherLocation : SettingsData.weatherLocation;
+        const useAuto = SettingsData.useAutoLocation;
+        const coords = SessionData.isGreeterMode ? SessionData.weatherCoordinates : SettingsData.weatherCoordinates;
+        const cityName = SessionData.isGreeterMode ? SessionData.weatherLocation : SettingsData.weatherLocation;
 
         if (useAuto) {
             getLocationFromService();
@@ -490,41 +531,110 @@ Singleton {
                 const lat = parseFloat(parts[0]);
                 const lon = parseFloat(parts[1]);
                 if (!isNaN(lat) && !isNaN(lon)) {
-                    getLocationFromCoords(lat, lon);
+                    if (cityName) {
+                        // User provided both: trust the configured name and coordinates, skip geocoding
+                        setLocation(lat, lon, cityName, "");
+                        fetchWeather(lat, lon);
+                    } else {
+                        getLocationFromCoords(lat, lon);
+                    }
                     return;
                 }
             }
         }
 
-        if (cityName)
+        if (cityName) {
             getLocationFromCity(cityName);
+        } else {
+            root.handleWeatherFailure();
+        }
     }
 
     function getLocationFromCoords(lat, lon) {
-        const url = "https://nominatim.openstreetmap.org/reverse?lat=" + lat + "&lon=" + lon + "&format=json&addressdetails=1&accept-language=en";
-        reverseGeocodeFetcher.command = lowPriorityCmd.concat(curlBaseCmd).concat(["-H", "User-Agent: DankMaterialShell Weather Widget", url]);
-        reverseGeocodeFetcher.running = true;
+        // Use coordinates immediately for weather; resolve city name in parallel with fallbacks
+        setLocation(lat, lon, I18n.tr("Local Weather"), "");
+        fetchWeather(lat, lon);
+        resolveCityName(lat, lon);
     }
 
     function getLocationFromCity(city) {
-        cityGeocodeFetcher.command = lowPriorityCmd.concat(curlBaseCmd).concat([getGeocodingUrl(city)]);
+        cityGeocodeFetcher.command = lowPriorityCmd.concat(fetchCmd, [getGeocodingUrl(city)]);
         cityGeocodeFetcher.running = true;
     }
 
     function getLocationFromService() {
-        if (!LocationService.valid)
+        if (!LocationService.valid) {
+            getLocationFromIP();
             return;
-        getLocationFromCoords(LocationService.latitude, LocationService.longitude);
+        }
+
+        const lat = LocationService.latitude;
+        const lon = LocationService.longitude;
+
+        if (lat === 0 && lon === 0) {
+            getLocationFromIP();
+            return;
+        }
+
+        getLocationFromCoords(lat, lon);
     }
 
-    function fetchWeather() {
+    function getLocationFromIP() {
+        ipLocationFetcher.running = true;
+    }
+
+    function resolveCityName(lat, lon) {
+        // Cancel any in-flight city resolution to avoid stale updates
+        if (nominatimFetcher.running)
+            nominatimFetcher.running = false;
+        if (photonFetcher.running)
+            photonFetcher.running = false;
+        if (bigDataCloudFetcher.running)
+            bigDataCloudFetcher.running = false;
+
+        root._geocodeReqId++;
+        root._pendingCoords = {
+            latitude: lat,
+            longitude: lon,
+            reqId: root._geocodeReqId
+        };
+
+        tryNominatim(lat, lon, root._geocodeReqId);
+    }
+
+    function tryNominatim(lat, lon, reqId) {
+        const url = "https://nominatim.openstreetmap.org/reverse?lat=" + lat + "&lon=" + lon + "&format=json&addressdetails=1&accept-language=en";
+        nominatimFetcher.command = lowPriorityCmd.concat(fetchCmd, ["--user-agent", "Dux Shell Weather Widget", url]);
+        nominatimFetcher.reqId = reqId;
+        nominatimFetcher.running = true;
+    }
+
+    function tryPhoton(lat, lon, reqId) {
+        const url = "https://photon.komoot.io/reverse?lat=" + lat + "&lon=" + lon + "&lang=en";
+        photonFetcher.command = lowPriorityCmd.concat(fetchCmd, [url]);
+        photonFetcher.reqId = reqId;
+        photonFetcher.running = true;
+    }
+
+    function tryBigDataCloud(lat, lon, reqId) {
+        const url = "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=" + lat + "&longitude=" + lon + "&localityLanguage=zh";
+        bigDataCloudFetcher.command = lowPriorityCmd.concat(fetchCmd, [url]);
+        bigDataCloudFetcher.reqId = reqId;
+        bigDataCloudFetcher.running = true;
+    }
+
+    function fetchWeather(lat, lon) {
         if (root.refCount === 0 || !SettingsData.weatherEnabled) {
             return;
         }
 
-        if (!location) {
-            updateLocation();
-            return;
+        if (lat == null || lon == null) {
+            if (!location) {
+                updateLocation();
+                return;
+            }
+            lat = location.latitude;
+            lon = location.longitude;
         }
 
         if (weatherFetcher.running) {
@@ -536,15 +646,14 @@ Singleton {
             return;
         }
 
-        const apiUrl = getWeatherApiUrl();
+        const apiUrl = getWeatherApiUrlForCoords(lat, lon);
         if (!apiUrl) {
             return;
         }
 
         root.lastFetchTime = now;
         root.weather.loading = true;
-        const weatherCmd = lowPriorityCmd.concat(["curl", "-sS", "--fail", "--connect-timeout", "3", "--max-time", "6", "--limit-rate", "150k", "--compressed"]);
-        weatherFetcher.command = weatherCmd.concat([apiUrl]);
+        weatherFetcher.command = lowPriorityCmd.concat(root.fetchCmd, [apiUrl]);
         weatherFetcher.running = true;
     }
 
@@ -569,12 +678,17 @@ Singleton {
         }
     }
 
-    function handleWeatherFailure() {
+    property string lastFetchError: ""
+
+    function handleWeatherFailure(reason) {
+        if (reason)
+            root.lastFetchError = reason;
         root.retryAttempts++;
         if (root.retryAttempts < root.maxRetryAttempts) {
             retryTimer.start();
         } else {
             root.retryAttempts = 0;
+            log.warn("Weather fetch failed:", root.lastFetchError || "no output from fetcher");
             if (!root.weather.available) {
                 root.weather.loading = false;
             }
@@ -586,8 +700,122 @@ Singleton {
     }
 
     Process {
-        id: reverseGeocodeFetcher
+        id: nominatimFetcher
+        property int reqId: 0
         running: false
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if (nominatimFetcher.reqId !== root._geocodeReqId)
+                    return;
+
+                const raw = text.trim();
+                if (!raw || raw[0] !== "{") {
+                    root.tryPhoton(root._pendingCoords.latitude, root._pendingCoords.longitude, root._geocodeReqId);
+                    return;
+                }
+
+                try {
+                    const data = JSON.parse(raw);
+                    const address = data.address || {};
+                    const city = address.hamlet || address.city || address.town || address.village || I18n.tr("Unknown");
+                    const country = address.country || I18n.tr("Unknown");
+                    root.updateLocationCity(city, country);
+                } catch (e) {
+                    root.tryPhoton(root._pendingCoords.latitude, root._pendingCoords.longitude, root._geocodeReqId);
+                }
+            }
+        }
+
+        onExited: exitCode => {
+            if (nominatimFetcher.reqId !== root._geocodeReqId)
+                return;
+            if (exitCode !== 0) {
+                root.tryPhoton(root._pendingCoords.latitude, root._pendingCoords.longitude, root._geocodeReqId);
+            }
+        }
+    }
+
+    Process {
+        id: photonFetcher
+        property int reqId: 0
+        running: false
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if (photonFetcher.reqId !== root._geocodeReqId)
+                    return;
+
+                const raw = text.trim();
+                if (!raw || raw[0] !== "{") {
+                    root.tryBigDataCloud(root._pendingCoords.latitude, root._pendingCoords.longitude, root._geocodeReqId);
+                    return;
+                }
+
+                try {
+                    const data = JSON.parse(raw);
+                    const features = data.features;
+                    if (!features || features.length === 0) {
+                        throw new Error("No Photon results");
+                    }
+
+                    const props = features[0].properties || {};
+                    const city = props.city || props.town || props.village || props.locality || props.name || I18n.tr("Unknown");
+                    const country = props.country || I18n.tr("Unknown");
+                    root.updateLocationCity(city, country);
+                } catch (e) {
+                    root.tryBigDataCloud(root._pendingCoords.latitude, root._pendingCoords.longitude, root._geocodeReqId);
+                }
+            }
+        }
+
+        onExited: exitCode => {
+            if (photonFetcher.reqId !== root._geocodeReqId)
+                return;
+            if (exitCode !== 0) {
+                root.tryBigDataCloud(root._pendingCoords.latitude, root._pendingCoords.longitude, root._geocodeReqId);
+            }
+        }
+    }
+
+    Process {
+        id: bigDataCloudFetcher
+        property int reqId: 0
+        running: false
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if (bigDataCloudFetcher.reqId !== root._geocodeReqId)
+                    return;
+
+                const raw = text.trim();
+                if (!raw || raw[0] !== "{") {
+                    // All city resolution fallbacks failed; weather is already displayed
+                    return;
+                }
+
+                try {
+                    const data = JSON.parse(raw);
+                    const city = data.city || data.locality || I18n.tr("Unknown");
+                    const country = data.countryName || I18n.tr("Unknown");
+                    root.updateLocationCity(city, country);
+                } catch (e) {
+                    // All fallbacks failed; keep placeholder city name
+                }
+            }
+        }
+
+        onExited: exitCode => {
+            if (bigDataCloudFetcher.reqId !== root._geocodeReqId)
+                return;
+        // Final fallback; no further action needed
+        }
+    }
+
+    Process {
+        id: ipLocationFetcher
+        running: false
+        command: lowPriorityCmd.concat(fetchCmd, ["http://ip-api.com/json/"])
 
         stdout: StdioCollector {
             onStreamFinished: {
@@ -599,16 +827,21 @@ Singleton {
 
                 try {
                     const data = JSON.parse(raw);
-                    const address = data.address || {};
 
-                    root.location = {
-                        city: address.hamlet || address.city || address.town || address.village || I18n.tr("Unknown"),
-                        country: address.country || I18n.tr("Unknown"),
-                        latitude: parseFloat(data.lat),
-                        longitude: parseFloat(data.lon)
-                    };
+                    if (data.status === "fail") {
+                        throw new Error("IP location lookup failed");
+                    }
 
-                    fetchWeather();
+                    const lat = parseFloat(data.lat);
+                    const lon = parseFloat(data.lon);
+                    const city = data.city;
+
+                    if (!city || isNaN(lat) || isNaN(lon)) {
+                        throw new Error("Missing or invalid location data");
+                    }
+
+                    setLocation(lat, lon, city, data.country || "");
+                    fetchWeather(lat, lon);
                 } catch (e) {
                     root.handleWeatherFailure();
                 }
@@ -670,11 +903,15 @@ Singleton {
         id: weatherFetcher
         running: false
 
+        stderr: StdioCollector {
+            id: weatherFetchErr
+        }
+
         stdout: StdioCollector {
             onStreamFinished: {
                 const raw = text.trim();
                 if (!raw || raw[0] !== "{") {
-                    root.handleWeatherFailure();
+                    root.handleWeatherFailure(weatherFetchErr.text.trim());
                     return;
                 }
 
@@ -732,6 +969,7 @@ Singleton {
                             const tempMaxF = (tempMaxC * 9 / 5 + 32);
 
                             forecast.push({
+                                "rawDate": daily.time[i],
                                 "day": formatForecastDay(daily.time[i], i),
                                 "wCode": daily.weather_code?.[i] || 0,
                                 "tempMin": Math.round(tempMinC),
@@ -755,6 +993,12 @@ Singleton {
                     const feelsLikeC = current.apparent_temperature || tempC;
                     const feelsLikeF = feelsLikeC * 9 / 5 + 32;
 
+                    const currentHour = hourly.time?.findIndex(time => time.slice(0, 13) === current.time?.slice(0, 13)) ?? -1;
+                    const hourlyValue = key => {
+                        const value = hourly[key]?.[currentHour];
+                        return Number.isFinite(value) ? value : null;
+                    };
+                    root.lastFetchError = "";
                     root.weather = {
                         "available": true,
                         "loading": false,
@@ -771,7 +1015,14 @@ Singleton {
                         "sunset": formatTime(daily.sunset?.[0]) || "18:00",
                         "rawSunrise": daily.sunrise?.[0] || "",
                         "rawSunset": daily.sunset?.[0] || "",
-                        "uv": 0,
+                        "moonrise": daily.moonrise?.[0] ?? "",
+                        "moonset": daily.moonset?.[0] ?? "",
+                        "utcOffsetSeconds": data.utc_offset_seconds ?? null,
+                        "currentHourIndex": currentHour >= 0 ? currentHour : null,
+                        "uv": hourlyValue("uv_index"),
+                        "visibility": hourlyValue("visibility"),
+                        "dewPoint": hourlyValue("dew_point_2m"),
+                        "windDirection": Number.isFinite(current.wind_direction_10m) ? current.wind_direction_10m : null,
                         "pressure": Math.round(current.surface_pressure || 0),
                         "precipitationProbability": Math.round(daily.precipitation_probability_max?.[0] || 0),
                         "isDay": Boolean(current.is_day),
@@ -829,12 +1080,15 @@ Singleton {
 
     Connections {
         target: LocationService
+        enabled: root.refCount > 0 && SettingsData.weatherEnabled
 
         function onLocationChanged(data) {
             if (!SettingsData.useAutoLocation)
                 return;
-            if (data.latitude === 0 && data.longitude === 0)
+            if (data.latitude === 0 && data.longitude === 0) {
+                root.getLocationFromIP();
                 return;
+            }
             root.getLocationFromCoords(data.latitude, data.longitude);
         }
     }
@@ -842,26 +1096,7 @@ Singleton {
     Component.onCompleted: {
         SettingsData.weatherCoordinatesChanged.connect(() => {
             root.location = null;
-            root.weather = {
-                "available": false,
-                "loading": true,
-                "temp": 0,
-                "tempF": 0,
-                "feelsLike": 0,
-                "feelsLikeF": 0,
-                "city": "",
-                "country": "",
-                "wCode": 0,
-                "humidity": 0,
-                "wind": "",
-                "sunrise": "06:00",
-                "sunset": "18:00",
-                "uv": 0,
-                "pressure": 0,
-                "precipitationProbability": 0,
-                "isDay": true,
-                "forecast": []
-            };
+            root.weather = emptyWeather();
             root.lastFetchTime = 0;
             root.forceRefresh();
         });
@@ -874,26 +1109,7 @@ Singleton {
 
         SettingsData.useAutoLocationChanged.connect(() => {
             root.location = null;
-            root.weather = {
-                "available": false,
-                "loading": true,
-                "temp": 0,
-                "tempF": 0,
-                "feelsLike": 0,
-                "feelsLikeF": 0,
-                "city": "",
-                "country": "",
-                "wCode": 0,
-                "humidity": 0,
-                "wind": "",
-                "sunrise": "06:00",
-                "sunset": "18:00",
-                "uv": 0,
-                "pressure": 0,
-                "precipitationProbability": 0,
-                "isDay": true,
-                "forecast": []
-            };
+            root.weather = emptyWeather();
             root.lastFetchTime = 0;
             root.forceRefresh();
         });
