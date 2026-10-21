@@ -2,16 +2,17 @@ package plugins
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/duxlabs-dev/dux-shell/core/internal/registries"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/afero"
 )
-
-const registryRepo = "https://github.com/AvengeMedia/dms-plugin-registry.git"
 
 type Plugin struct {
 	ID           string   `json:"id"`
@@ -33,7 +34,10 @@ type Plugin struct {
 type GitClient interface {
 	PlainClone(path string, url string) error
 	Pull(path string) error
-	HasUpdates(path string) (bool, error)
+	OriginURL(path string) (string, error)
+	HasUpdates(path string) (hasUpdates bool, localHash string, remoteHash string, err error)
+	CurrentRevision(path string) (string, error)
+	CheckoutRevision(path string, revision string) error
 }
 
 type realGitClient struct{}
@@ -58,49 +62,53 @@ func (g *realGitClient) Pull(path string) error {
 	}
 
 	err = worktree.Pull(&git.PullOptions{})
-	if err != nil && err.Error() != "already up-to-date" {
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return err
 	}
 
 	return nil
 }
 
-func (g *realGitClient) HasUpdates(path string) (bool, error) {
+func (g *realGitClient) OriginURL(path string) (string, error) {
 	repo, err := git.PlainOpen(path)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-
-	// Fetch remote changes
-	err = repo.Fetch(&git.FetchOptions{})
-	if err != nil && err.Error() != "already up-to-date" {
-		// If fetch fails, we can't determine if there are updates
-		// Return false and the error
-		return false, err
-	}
-
-	// Get the HEAD reference
-	head, err := repo.Head()
-	if err != nil {
-		return false, err
-	}
-
-	// Get the remote HEAD reference (typically origin/HEAD or origin/main or origin/master)
 	remote, err := repo.Remote("origin")
 	if err != nil {
-		return false, err
+		return "", err
+	}
+	urls := remote.Config().URLs
+	if len(urls) == 0 {
+		return "", errors.New("origin remote has no URL")
+	}
+	return urls[0], nil
+}
+
+func (g *realGitClient) HasUpdates(path string) (bool, string, string, error) {
+	repo, err := git.PlainOpen(path)
+	if err != nil {
+		return false, "", "", err
+	}
+
+	head, err := repo.Head()
+	if err != nil {
+		return false, "", "", err
+	}
+
+	remote, err := repo.Remote("origin")
+	if err != nil {
+		return false, "", "", err
 	}
 
 	refs, err := remote.List(&git.ListOptions{})
 	if err != nil {
-		return false, err
+		return false, "", "", err
 	}
 
-	// Find the default branch remote ref
 	var remoteHead string
 	for _, ref := range refs {
 		if ref.Name().IsBranch() {
-			// Try common branch names
 			if ref.Name().Short() == "main" || ref.Name().Short() == "master" {
 				remoteHead = ref.Hash().String()
 				break
@@ -108,20 +116,79 @@ func (g *realGitClient) HasUpdates(path string) (bool, error) {
 		}
 	}
 
-	// If we couldn't find a remote HEAD, assume no updates
+	localHash := head.Hash()
 	if remoteHead == "" {
-		return false, nil
+		return false, localHash.String(), "", nil
+	}
+	if localHash.String() == remoteHead {
+		return false, localHash.String(), remoteHead, nil
 	}
 
-	// Compare local HEAD with remote HEAD
-	return head.Hash().String() != remoteHead, nil
+	remoteCommit, err := repo.CommitObject(plumbing.NewHash(remoteHead))
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		return true, localHash.String(), remoteHead, nil
+	}
+	if err != nil {
+		return false, "", "", err
+	}
+	headCommit, err := repo.CommitObject(localHash)
+	if err != nil {
+		return false, "", "", err
+	}
+	contained, err := remoteCommit.IsAncestor(headCommit)
+	if err != nil {
+		return false, "", "", err
+	}
+	return !contained, localHash.String(), remoteHead, nil
+}
+
+func (g *realGitClient) CurrentRevision(path string) (string, error) {
+	repo, err := git.PlainOpen(path)
+	if err != nil {
+		return "", err
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return "", err
+	}
+	return head.Hash().String(), nil
+}
+
+func (g *realGitClient) CheckoutRevision(path string, revision string) error {
+	if !gitCommitPattern.MatchString(revision) {
+		return fmt.Errorf("invalid git revision %q", revision)
+	}
+
+	repo, err := git.PlainOpen(path)
+	if err != nil {
+		return err
+	}
+	hash := plumbing.NewHash(revision)
+	if _, objectErr := repo.CommitObject(hash); objectErr != nil {
+		if _, remoteErr := repo.Remote("origin"); remoteErr != nil {
+			return fmt.Errorf("revision %s is not available in repository: %w", revision, objectErr)
+		}
+		fetchErr := repo.Fetch(&git.FetchOptions{})
+		if fetchErr != nil && fetchErr != git.NoErrAlreadyUpToDate {
+			return fmt.Errorf("failed to fetch locked revision: %w", fetchErr)
+		}
+	}
+	if _, err := repo.CommitObject(hash); err != nil {
+		return fmt.Errorf("revision %s is not available in repository: %w", revision, err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return err
+	}
+	return worktree.Reset(&git.ResetOptions{Commit: hash, Mode: git.HardReset})
 }
 
 type Registry struct {
-	fs       afero.Fs
-	cacheDir string
-	plugins  []Plugin
-	git      GitClient
+	fs         afero.Fs
+	cacheDir   string
+	registries []registries.Source
+	plugins    []Plugin
+	git        GitClient
 }
 
 func NewRegistry() (*Registry, error) {
@@ -129,63 +196,67 @@ func NewRegistry() (*Registry, error) {
 }
 
 func NewRegistryWithFs(fs afero.Fs) (*Registry, error) {
-	cacheDir := getCacheDir()
+	sources, err := registries.Active(fs)
+	if err != nil {
+		return nil, err
+	}
 	return &Registry{
-		fs:       fs,
-		cacheDir: cacheDir,
-		git:      &realGitClient{},
+		fs:         fs,
+		cacheDir:   getCacheDir(),
+		registries: sources,
+		git:        &realGitClient{},
 	}, nil
+}
+
+func (r *Registry) cacheDirFor(src registries.Source) string {
+	return filepath.Join(r.cacheDir, src.Name)
 }
 
 func getCacheDir() string {
 	return filepath.Join(os.TempDir(), "dankdots-plugin-registry")
 }
 
-func (r *Registry) Update() error {
-	exists, err := afero.DirExists(r.fs, r.cacheDir)
+// A cached clone is reused only when its origin still matches the configured
+// URL; renamed or re-pointed registries re-clone instead of pulling from the
+// stale remote.
+func (r *Registry) updateOne(src registries.Source) error {
+	dir := r.cacheDirFor(src)
+	exists, err := afero.DirExists(r.fs, dir)
 	if err != nil {
 		return fmt.Errorf("failed to check cache directory: %w", err)
 	}
 
-	if !exists {
-		if err := r.fs.MkdirAll(filepath.Dir(r.cacheDir), 0o755); err != nil {
-			return fmt.Errorf("failed to create cache directory: %w", err)
+	if exists {
+		origin, originErr := r.git.OriginURL(dir)
+		if originErr == nil && origin == src.URL && r.git.Pull(dir) == nil {
+			return nil
 		}
-
-		if err := r.git.PlainClone(r.cacheDir, registryRepo); err != nil {
-			return fmt.Errorf("failed to clone registry: %w", err)
-		}
-	} else {
-		// Try to pull, if it fails (e.g., shallow clone corruption), delete and re-clone
-		if err := r.git.Pull(r.cacheDir); err != nil {
-			// Repository is likely corrupted or has issues, delete and re-clone
-			if err := r.fs.RemoveAll(r.cacheDir); err != nil {
-				return fmt.Errorf("failed to remove corrupted registry: %w", err)
-			}
-
-			if err := r.fs.MkdirAll(filepath.Dir(r.cacheDir), 0o755); err != nil {
-				return fmt.Errorf("failed to create cache directory: %w", err)
-			}
-
-			if err := r.git.PlainClone(r.cacheDir, registryRepo); err != nil {
-				return fmt.Errorf("failed to re-clone registry: %w", err)
-			}
+		if err := r.fs.RemoveAll(dir); err != nil {
+			return fmt.Errorf("failed to remove stale registry cache: %w", err)
 		}
 	}
 
-	return r.loadPlugins()
+	if err := r.fs.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return fmt.Errorf("failed to create cache directory: %w", err)
+	}
+	if err := r.git.PlainClone(dir, src.URL); err != nil {
+		return fmt.Errorf("failed to clone: %w", err)
+	}
+	return nil
 }
 
-func (r *Registry) loadPlugins() error {
-	pluginsDir := filepath.Join(r.cacheDir, "plugins")
-
+// A registry without a plugins/ directory is a valid themes-only registry.
+func (r *Registry) loadPluginsFrom(dir string) ([]Plugin, error) {
+	pluginsDir := filepath.Join(dir, "plugins")
 	entries, err := afero.ReadDir(r.fs, pluginsDir)
 	if err != nil {
-		return fmt.Errorf("failed to read plugins directory: %w", err)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read plugins directory: %w", err)
 	}
 
-	r.plugins = []Plugin{}
-
+	var plugins []Plugin
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -205,15 +276,57 @@ func (r *Registry) loadPlugins() error {
 			plugin.ID = strings.TrimSuffix(entry.Name(), ".json")
 		}
 
-		r.plugins = append(r.plugins, plugin)
+		plugins = append(plugins, plugin)
 	}
+	return plugins, nil
+}
 
-	return nil
+// Pre-multi-registry caches were a single clone at the base dir; the per-name
+// layout nests under it, so a leftover clone is deleted wholesale first.
+func (r *Registry) resetLegacyCache() {
+	if exists, _ := afero.DirExists(r.fs, filepath.Join(r.cacheDir, ".git")); exists {
+		_ = r.fs.RemoveAll(r.cacheDir)
+	}
+}
+
+// Update refreshes every configured registry, aggregating plugins in
+// declaration order (first occurrence of an ID wins). A failing registry is
+// reported in the joined error but does not block the others.
+func (r *Registry) Update() error {
+	unlock, err := registries.LockCache()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	r.resetLegacyCache()
+	r.plugins = []Plugin{}
+	seen := make(map[string]struct{})
+	var errs []error
+	for _, src := range r.registries {
+		if err := r.updateOne(src); err != nil {
+			errs = append(errs, fmt.Errorf("registry %s: %w", src.Name, err))
+			continue
+		}
+		plugins, err := r.loadPluginsFrom(r.cacheDirFor(src))
+		if err != nil {
+			errs = append(errs, fmt.Errorf("registry %s: %w", src.Name, err))
+			continue
+		}
+		for _, p := range plugins {
+			if _, dup := seen[p.ID]; dup {
+				continue
+			}
+			seen[p.ID] = struct{}{}
+			r.plugins = append(r.plugins, p)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (r *Registry) List() ([]Plugin, error) {
 	if len(r.plugins) == 0 {
-		if err := r.Update(); err != nil {
+		if err := r.Update(); err != nil && len(r.plugins) == 0 {
 			return nil, err
 		}
 	}

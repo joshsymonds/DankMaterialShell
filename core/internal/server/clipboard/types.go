@@ -10,9 +10,11 @@ import (
 	"github.com/godbus/dbus/v5"
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/wlcontext"
-	wlclient "github.com/AvengeMedia/DankMaterialShell/core/pkg/go-wayland/wayland/client"
+	wlclient "github.com/duxlabs-dev/dux-go/wayland/client"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/wlcontext"
 )
+
+const largeEntryBytes = 1 << 20
 
 type Config struct {
 	MaxHistory     int   `json:"maxHistory"`
@@ -38,7 +40,7 @@ func getConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(configDir, "DankMaterialShell", "clsettings.json"), nil
+	return filepath.Join(configDir, "dms", "clsettings.json"), nil
 }
 
 func LoadConfig() Config {
@@ -95,15 +97,17 @@ type SearchResult struct {
 }
 
 type Entry struct {
-	ID        uint64    `json:"id"`
-	Data      []byte    `json:"data,omitempty"`
-	MimeType  string    `json:"mimeType"`
-	Preview   string    `json:"preview"`
-	Size      int       `json:"size"`
-	Timestamp time.Time `json:"timestamp"`
-	IsImage   bool      `json:"isImage"`
-	Hash      uint64    `json:"hash,omitempty"`
-	Pinned    bool      `json:"pinned"`
+	ID          uint64    `json:"id"`
+	Data        []byte    `json:"data,omitempty"`
+	MimeType    string    `json:"mimeType"`
+	Preview     string    `json:"preview"`
+	Size        int       `json:"size"`
+	Timestamp   time.Time `json:"timestamp"`
+	IsImage     bool      `json:"isImage"`
+	Hash        uint64    `json:"hash,omitempty"`
+	Pinned      bool      `json:"pinned"`
+	AltData     []byte    `json:"altData,omitempty"`
+	AltMimeType string    `json:"altMimeType,omitempty"`
 }
 
 type State struct {
@@ -130,17 +134,10 @@ type Manager struct {
 	mimeTypes      []string
 	offerMimeTypes map[any][]string
 	offerMutex     sync.RWMutex
-	offerRegistry  map[uint32]any
 
-	sourceMimeTypes []string
-	sourceMutex     sync.RWMutex
-
-	persistData      map[string][]byte
-	persistMimeTypes []string
-	persistMutex     sync.RWMutex
-
-	isOwner   bool
-	ownerLock sync.Mutex
+	isOwner        bool
+	ownerLock      sync.Mutex
+	pasteSupported bool
 
 	initialized bool
 
@@ -159,7 +156,9 @@ type Manager struct {
 	notifierWg  sync.WaitGroup
 	lastState   *State
 
-	dbusConn *dbus.Conn
+	// lazily created by dbusConnForFlatpak under dbusConnMutex
+	dbusConn      *dbus.Conn
+	dbusConnMutex sync.Mutex
 }
 
 func (m *Manager) GetState() State {

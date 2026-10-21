@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/spf13/afero"
 )
 
 type Manager struct {
 	fs         afero.Fs
 	pluginsDir string
+	lockPath   string
 	gitClient  GitClient
 }
 
@@ -28,6 +29,7 @@ func NewManagerWithFs(fs afero.Fs) (*Manager, error) {
 	return &Manager{
 		fs:         fs,
 		pluginsDir: pluginsDir,
+		lockPath:   getPluginLockPath(),
 		gitClient:  &realGitClient{},
 	}, nil
 }
@@ -38,7 +40,23 @@ func getPluginsDir() string {
 		log.Error("failed to get user config dir", "err", err)
 		return ""
 	}
-	return filepath.Join(configDir, "DankMaterialShell", "plugins")
+	path := filepath.Join(configDir, "dms", "plugins")
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+		return filepath.Join(resolved, "plugins")
+	}
+	return path
+}
+
+func getPluginLockPath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		log.Error("failed to get user config dir", "err", err)
+		return ""
+	}
+	return filepath.Join(configDir, "dms", "plugins.lock.json")
 }
 
 func (m *Manager) IsInstalled(plugin Plugin) (bool, error) {
@@ -64,7 +82,20 @@ func (m *Manager) findInstalledPath(pluginID string) (string, error) {
 	return m.findInDir(systemDir, pluginID)
 }
 
+// isSafePluginPathComponent rejects ids that aren't a single path component,
+// so filepath.Join can't resolve (and later RemoveAll) outside the plugins dir
+func isSafePluginPathComponent(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	return !strings.ContainsAny(s, "/\\")
+}
+
 func (m *Manager) findInDir(dir, pluginID string) (string, error) {
+	if !isSafePluginPathComponent(pluginID) {
+		return "", fmt.Errorf("invalid plugin id: %q", pluginID)
+	}
+
 	// First, check if folder with exact ID name exists
 	exactPath := filepath.Join(dir, pluginID)
 	if exists, _ := afero.DirExists(m.fs, exactPath); exists {
@@ -105,7 +136,12 @@ func (m *Manager) findInDir(dir, pluginID string) (string, error) {
 }
 
 func (m *Manager) Install(plugin Plugin) error {
+	if !isSafePluginPathComponent(plugin.ID) {
+		return fmt.Errorf("invalid plugin id: %q", plugin.ID)
+	}
+
 	pluginPath := filepath.Join(m.pluginsDir, plugin.ID)
+	repoPath := pluginPath
 
 	exists, err := afero.DirExists(m.fs, pluginPath)
 	if err != nil {
@@ -114,6 +150,18 @@ func (m *Manager) Install(plugin Plugin) error {
 
 	if exists {
 		return fmt.Errorf("plugin already installed: %s", plugin.Name)
+	}
+	if strings.TrimSpace(plugin.Repo) == "" {
+		return fmt.Errorf("plugin repository is required")
+	}
+	if err := validatePluginRepo(plugin.Repo); err != nil {
+		return err
+	}
+	if err := validatePluginRepoPath(plugin.Path); err != nil {
+		return err
+	}
+	if _, err := m.ensureLockfile(); err != nil {
+		return err
 	}
 
 	if err := m.fs.MkdirAll(m.pluginsDir, 0o755); err != nil {
@@ -127,7 +175,7 @@ func (m *Manager) Install(plugin Plugin) error {
 
 	if plugin.Path != "" {
 		repoName := m.getRepoName(plugin.Repo)
-		repoPath := filepath.Join(reposDir, repoName)
+		repoPath = filepath.Join(reposDir, repoName)
 
 		repoExists, err := afero.DirExists(m.fs, repoPath)
 		if err != nil {
@@ -165,17 +213,28 @@ func (m *Manager) Install(plugin Plugin) error {
 		if err := m.createSymlink(sourcePath, pluginPath); err != nil {
 			return fmt.Errorf("failed to create symlink: %w", err)
 		}
-
 		metaPath := pluginPath + ".meta"
 		metaContent := fmt.Sprintf("repo=%s\npath=%s\nrepodir=%s", plugin.Repo, plugin.Path, repoName)
 		if err := afero.WriteFile(m.fs, metaPath, []byte(metaContent), 0o644); err != nil {
-			return fmt.Errorf("failed to write metadata: %w", err)
+			m.fs.Remove(pluginPath) //nolint:errcheck
+			return fmt.Errorf("failed to write plugin repository metadata: %w", err)
 		}
+
 	} else {
 		if err := m.gitClient.PlainClone(pluginPath, plugin.Repo); err != nil {
 			m.fs.RemoveAll(pluginPath) //nolint:errcheck
 			return fmt.Errorf("failed to clone plugin: %w", err)
 		}
+	}
+
+	if err := m.recordInstalledPlugin(plugin, repoPath); err != nil {
+		if plugin.Path != "" {
+			m.fs.Remove(pluginPath)           //nolint:errcheck
+			m.fs.Remove(pluginPath + ".meta") //nolint:errcheck
+		} else {
+			m.fs.RemoveAll(pluginPath) //nolint:errcheck
+		}
+		return fmt.Errorf("failed to update plugin lockfile: %w", err)
 	}
 
 	return nil
@@ -194,6 +253,15 @@ func (m *Manager) createSymlink(source, dest string) error {
 }
 
 func (m *Manager) Update(plugin Plugin) error {
+	lock, err := m.ensureLockfile()
+	if err != nil {
+		return err
+	}
+	if locked, ok := lock.Plugins[plugin.ID]; ok {
+		plugin.Repo = locked.Repo
+		plugin.Path = locked.Path
+	}
+
 	pluginPath, err := m.findInstalledPath(plugin.ID)
 	if err != nil {
 		return fmt.Errorf("failed to find plugin: %w", err)
@@ -206,46 +274,42 @@ func (m *Manager) Update(plugin Plugin) error {
 	if strings.HasPrefix(pluginPath, "/etc/xdg/quickshell/dms-plugins") {
 		return fmt.Errorf("cannot update system plugin: %s", plugin.Name)
 	}
-
-	metaPath := pluginPath + ".meta"
-	metaExists, err := afero.Exists(m.fs, metaPath)
-	if err != nil {
-		return fmt.Errorf("failed to check metadata: %w", err)
-	}
-
-	if metaExists {
-		reposDir := filepath.Join(m.pluginsDir, ".repos")
-		repoName := m.getRepoName(plugin.Repo)
-		repoPath := filepath.Join(reposDir, repoName)
-
-		// Try to pull, if it fails (e.g., shallow clone corruption), delete and re-clone
-		if err := m.gitClient.Pull(repoPath); err != nil {
-			// Repository is likely corrupted or has issues, delete and re-clone
-			if err := m.fs.RemoveAll(repoPath); err != nil {
-				return fmt.Errorf("failed to remove corrupted repository: %w", err)
-			}
-
-			if err := m.gitClient.PlainClone(repoPath, plugin.Repo); err != nil {
-				return fmt.Errorf("failed to re-clone repository: %w", err)
-			}
-		}
-	} else {
-		// Try to pull, if it fails, delete and re-clone
-		if err := m.gitClient.Pull(pluginPath); err != nil {
-			if err := m.fs.RemoveAll(pluginPath); err != nil {
-				return fmt.Errorf("failed to remove corrupted plugin: %w", err)
-			}
-
-			if err := m.gitClient.PlainClone(pluginPath, plugin.Repo); err != nil {
-				return fmt.Errorf("failed to re-clone plugin: %w", err)
-			}
+	if plugin.Repo == "" {
+		plugin.Repo, err = m.gitClient.OriginURL(pluginPath)
+		if err != nil {
+			return fmt.Errorf("failed to read plugin origin: %w", err)
 		}
 	}
 
+	repoPath := m.repositoryPath(plugin.ID, LockedPlugin{Repo: plugin.Repo, Path: plugin.Path})
+	if err := m.gitClient.Pull(repoPath); err != nil {
+		if err := m.fs.RemoveAll(repoPath); err != nil {
+			return fmt.Errorf("failed to remove corrupted plugin repository: %w", err)
+		}
+		if err := m.gitClient.PlainClone(repoPath, plugin.Repo); err != nil {
+			return fmt.Errorf("failed to re-clone plugin repository: %w", err)
+		}
+	}
+
+	if err := m.recordInstalledPlugin(plugin, repoPath); err != nil {
+		if locked, ok := lock.Plugins[plugin.ID]; ok {
+			m.gitClient.CheckoutRevision(repoPath, locked.Commit) //nolint:errcheck
+		}
+		return err
+	}
 	return nil
 }
 
 func (m *Manager) Uninstall(plugin Plugin) error {
+	lock, err := m.ensureLockfile()
+	if err != nil {
+		return err
+	}
+	if locked, ok := lock.Plugins[plugin.ID]; ok {
+		plugin.Repo = locked.Repo
+		plugin.Path = locked.Path
+	}
+
 	pluginPath, err := m.findInstalledPath(plugin.ID)
 	if err != nil {
 		return fmt.Errorf("failed to find plugin: %w", err)
@@ -258,70 +322,64 @@ func (m *Manager) Uninstall(plugin Plugin) error {
 	if strings.HasPrefix(pluginPath, "/etc/xdg/quickshell/dms-plugins") {
 		return fmt.Errorf("cannot uninstall system plugin: %s", plugin.Name)
 	}
-
-	metaPath := pluginPath + ".meta"
-	metaExists, err := afero.Exists(m.fs, metaPath)
-	if err != nil {
-		return fmt.Errorf("failed to check metadata: %w", err)
+	updatedLock := lock.Clone()
+	delete(updatedLock.Plugins, plugin.ID)
+	if err := m.lockStore().Write(updatedLock); err != nil {
+		return err
+	}
+	rollbackLock := func(err error) error {
+		if rollbackErr := m.lockStore().Write(lock); rollbackErr != nil {
+			return fmt.Errorf("%w (also failed to restore plugin lockfile: %v)", err, rollbackErr)
+		}
+		return err
 	}
 
-	if metaExists {
+	metaPath := pluginPath + ".meta"
+	if plugin.Path != "" {
 		reposDir := filepath.Join(m.pluginsDir, ".repos")
 		repoName := m.getRepoName(plugin.Repo)
 		repoPath := filepath.Join(reposDir, repoName)
 
-		shouldCleanup, err := m.shouldCleanupRepo(repoPath, plugin.Repo, plugin.ID)
+		shouldCleanup, err := m.shouldCleanupRepo(plugin.Repo, plugin.ID)
 		if err != nil {
-			return fmt.Errorf("failed to check repo cleanup: %w", err)
+			return rollbackLock(fmt.Errorf("failed to check repo cleanup: %w", err))
 		}
 
 		if err := m.fs.Remove(pluginPath); err != nil {
-			return fmt.Errorf("failed to remove symlink: %w", err)
+			return rollbackLock(fmt.Errorf("failed to remove symlink: %w", err))
 		}
 
-		if err := m.fs.Remove(metaPath); err != nil {
-			return fmt.Errorf("failed to remove metadata: %w", err)
+		if metaExists, _ := afero.Exists(m.fs, metaPath); metaExists {
+			if err := m.fs.Remove(metaPath); err != nil {
+				return rollbackLock(fmt.Errorf("failed to remove metadata: %w", err))
+			}
 		}
 
 		if shouldCleanup {
 			if err := m.fs.RemoveAll(repoPath); err != nil {
-				return fmt.Errorf("failed to cleanup repository: %w", err)
+				return rollbackLock(fmt.Errorf("failed to cleanup repository: %w", err))
 			}
 		}
 	} else {
 		if err := m.fs.RemoveAll(pluginPath); err != nil {
-			return fmt.Errorf("failed to remove plugin: %w", err)
+			return rollbackLock(fmt.Errorf("failed to remove plugin: %w", err))
 		}
 	}
 
 	return nil
 }
 
-func (m *Manager) shouldCleanupRepo(repoPath, repoURL, excludePlugin string) (bool, error) {
-	installed, err := m.ListInstalled()
+func (m *Manager) shouldCleanupRepo(repoURL, excludePlugin string) (bool, error) {
+	lock, err := m.ensureLockfile()
 	if err != nil {
 		return false, err
 	}
-
-	registry, err := NewRegistry()
-	if err != nil {
-		return false, err
-	}
-
-	allPlugins, err := registry.List()
-	if err != nil {
-		return false, err
-	}
-
-	for _, id := range installed {
+	for id, plugin := range lock.Plugins {
 		if id == excludePlugin {
 			continue
 		}
-
-		for _, p := range allPlugins {
-			if p.ID == id && p.Repo == repoURL && p.Path != "" {
-				return false, nil
-			}
+		if plugin.Repo == repoURL && plugin.Path != "" {
+			return false, nil
 		}
 	}
 
@@ -423,8 +481,9 @@ func (m *Manager) getPluginManifest(pluginPath string) *pluginManifest {
 }
 
 type pluginManifest struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID     string          `json:"id"`
+	Name   string          `json:"name"`
+	Lyrics *LyricsProvider `json:"lyrics"`
 }
 
 func (m *Manager) GetPluginsDir() string {
@@ -442,6 +501,16 @@ func (m *Manager) UninstallByIDOrName(idOrName string) error {
 
 	if strings.HasPrefix(pluginPath, "/etc/xdg/quickshell/dms-plugins") {
 		return fmt.Errorf("cannot uninstall system plugin: %s", idOrName)
+	}
+	manifest := m.getPluginManifest(pluginPath)
+	if manifest != nil {
+		lock, err := m.ensureLockfile()
+		if err != nil {
+			return err
+		}
+		if locked, ok := lock.Plugins[manifest.ID]; ok {
+			return m.Uninstall(Plugin{ID: manifest.ID, Name: manifest.Name, Repo: locked.Repo, Path: locked.Path})
+		}
 	}
 
 	metaPath := pluginPath + ".meta"
@@ -475,6 +544,16 @@ func (m *Manager) UpdateByIDOrName(idOrName string) error {
 	if strings.HasPrefix(pluginPath, "/etc/xdg/quickshell/dms-plugins") {
 		return fmt.Errorf("cannot update system plugin: %s", idOrName)
 	}
+	manifest := m.getPluginManifest(pluginPath)
+	if manifest != nil {
+		lock, err := m.ensureLockfile()
+		if err != nil {
+			return err
+		}
+		if locked, ok := lock.Plugins[manifest.ID]; ok {
+			return m.Update(Plugin{ID: manifest.ID, Name: manifest.Name, Repo: locked.Repo, Path: locked.Path})
+		}
+	}
 
 	metaPath := pluginPath + ".meta"
 	metaExists, _ := afero.Exists(m.fs, metaPath)
@@ -489,8 +568,14 @@ func (m *Manager) UpdateByIDOrName(idOrName string) error {
 	if err := m.gitClient.Pull(pluginPath); err != nil {
 		return fmt.Errorf("failed to update plugin: %w", err)
 	}
-
-	return nil
+	if manifest == nil {
+		return nil
+	}
+	repo, err := m.gitClient.OriginURL(pluginPath)
+	if err != nil {
+		return fmt.Errorf("failed to read plugin origin: %w", err)
+	}
+	return m.recordInstalledPlugin(Plugin{ID: manifest.ID, Name: manifest.Name, Repo: repo}, pluginPath)
 }
 
 func (m *Manager) findInstalledPathByIDOrName(idOrName string) (string, error) {
@@ -507,6 +592,10 @@ func (m *Manager) findInstalledPathByIDOrName(idOrName string) (string, error) {
 }
 
 func (m *Manager) findInDirByIDOrName(dir, idOrName string) (string, error) {
+	if !isSafePluginPathComponent(idOrName) {
+		return "", fmt.Errorf("invalid plugin id/name: %q", idOrName)
+	}
+
 	// Check exact folder name match first
 	exactPath := filepath.Join(dir, idOrName)
 	if exists, _ := afero.DirExists(m.fs, exactPath); exists {
@@ -554,35 +643,48 @@ func (m *Manager) findInDirByIDOrName(dir, idOrName string) (string, error) {
 	return "", nil
 }
 
-func (m *Manager) HasUpdates(pluginID string, plugin Plugin) (bool, error) {
+func (m *Manager) HasUpdates(pluginID string, plugin Plugin) (hasUpdates bool, diffURL string, err error) {
+	lock, err := m.ensureLockfile()
+	if err != nil {
+		return false, "", err
+	}
+	if locked, ok := lock.Plugins[pluginID]; ok {
+		plugin.Repo = locked.Repo
+		plugin.Path = locked.Path
+	}
+
 	pluginPath, err := m.findInstalledPath(pluginID)
 	if err != nil {
-		return false, fmt.Errorf("failed to find plugin: %w", err)
+		return false, "", fmt.Errorf("failed to find plugin: %w", err)
 	}
 
 	if pluginPath == "" {
-		return false, fmt.Errorf("plugin not installed: %s", pluginID)
+		return false, "", fmt.Errorf("plugin not installed: %s", pluginID)
 	}
 
 	if strings.HasPrefix(pluginPath, "/etc/xdg/quickshell/dms-plugins") {
-		return false, nil
+		return false, "", nil
 	}
 
-	metaPath := pluginPath + ".meta"
-	metaExists, err := afero.Exists(m.fs, metaPath)
+	repoPath := pluginPath
+	if plugin.Path != "" {
+		repoPath = m.repositoryPath(pluginID, LockedPlugin{Repo: plugin.Repo, Path: plugin.Path})
+	}
+	if resolved, err := filepath.EvalSymlinks(repoPath); err == nil {
+		repoPath = resolved
+	}
+	hasUp, localHash, remoteHash, err := m.gitClient.HasUpdates(repoPath)
+
 	if err != nil {
-		return false, fmt.Errorf("failed to check metadata: %w", err)
+		return false, "", err
 	}
 
-	if metaExists {
-		// Plugin is from a monorepo, check the repo directory
-		reposDir := filepath.Join(m.pluginsDir, ".repos")
-		repoName := m.getRepoName(plugin.Repo)
-		repoPath := filepath.Join(reposDir, repoName)
-
-		return m.gitClient.HasUpdates(repoPath)
+	diffURL = plugin.Repo
+	if diffURL != "" {
+		diffURL = strings.TrimSuffix(diffURL, ".git")
+		if hasUp && len(localHash) >= 7 && len(remoteHash) >= 7 {
+			diffURL = fmt.Sprintf("%s/compare/%s...%s", diffURL, localHash[:7], remoteHash[:7])
+		}
 	}
-
-	// Plugin is a standalone repo
-	return m.gitClient.HasUpdates(pluginPath)
+	return hasUp, diffURL, nil
 }

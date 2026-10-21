@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
+import "../../Common/QmlUtils.js" as QmlUtils
 
 Column {
     id: root
@@ -11,49 +12,47 @@ Column {
     property var defaultValue: []
     property var items: defaultValue
     property Component delegate: null
+    property alias inputs: inputSlot.data
+    property bool isLoading: false
+    property bool _loaded: false
 
     width: parent.width
     spacing: Theme.spacingM
 
-    Component.onCompleted: {
-        const settings = findSettings()
+    Component.onCompleted: loadValue()
+
+    function loadValue() {
+        const settings = QmlUtils.findSettings(root.parent);
         if (settings) {
-            items = settings.loadValue(settingKey, defaultValue)
+            isLoading = true;
+            items = settings.loadValue(settingKey, defaultValue);
+            isLoading = false;
         }
+        _loaded = true;
     }
 
     onItemsChanged: {
-        const settings = findSettings()
-        if (settings) {
-            settings.saveValue(settingKey, items)
-        }
-    }
-
-    function findSettings() {
-        let item = parent
-        while (item) {
-            if (item.saveValue !== undefined && item.loadValue !== undefined) {
-                return item
-            }
-            item = item.parent
-        }
-        return null
+        if (isLoading || !_loaded)
+            return;
+        const settings = QmlUtils.findSettings(root.parent);
+        if (settings)
+            settings.saveValue(settingKey, items);
     }
 
     function addItem(item) {
-        items = items.concat([item])
+        items = items.concat([item]);
     }
 
     function removeItem(index) {
-        const newItems = items.slice()
-        newItems.splice(index, 1)
-        items = newItems
+        const newItems = items.slice();
+        newItems.splice(index, 1);
+        items = newItems;
     }
 
     StyledText {
         text: root.label
         font.pixelSize: Theme.fontSizeMedium
-        font.weight: Font.Medium
+        font.weight: Theme.fontWeightMedium
         color: Theme.surfaceText
     }
 
@@ -64,6 +63,13 @@ Column {
         width: parent.width
         wrapMode: Text.WordWrap
         visible: root.description !== ""
+    }
+
+    Column {
+        id: inputSlot
+        width: parent.width
+        spacing: Theme.spacingM
+        visible: children.length > 0
     }
 
     Column {
@@ -89,7 +95,7 @@ Column {
             width: parent.width
             height: 40
             radius: Theme.cornerRadius
-            color: Theme.withAlpha(Theme.surfaceContainerHigh, Theme.popupTransparency)
+            color: Theme.chipSurface
             border.width: 0
 
             StyledText {
@@ -100,32 +106,8 @@ Column {
                 color: Theme.surfaceText
             }
 
-            Rectangle {
-                anchors.right: parent.right
-                anchors.rightMargin: Theme.spacingM
-                anchors.verticalCenter: parent.verticalCenter
-                width: 60
-                height: 28
-                color: removeArea.containsMouse ? Theme.errorHover : Theme.error
-                radius: Theme.cornerRadius
-
-                StyledText {
-                    anchors.centerIn: parent
-                    text: I18n.tr("Remove")
-                    color: Theme.errorText
-                    font.pixelSize: Theme.fontSizeSmall
-                    font.weight: Font.Medium
-                }
-
-                MouseArea {
-                    id: removeArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.removeItem(index)
-                    }
-                }
+            ListSettingRemoveButton {
+                onClicked: root.removeItem(index)
             }
         }
     }

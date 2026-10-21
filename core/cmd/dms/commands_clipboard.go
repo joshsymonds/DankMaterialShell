@@ -28,9 +28,10 @@ import (
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/clipboard"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-go/wlclipboard"
+	"github.com/duxlabs-dev/dux-shell/core/internal/clipboard"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/spf13/cobra"
 )
 
@@ -62,6 +63,15 @@ var clipPasteCmd = &cobra.Command{
 	Long:  "Paste text from clipboard to stdout. Works without server.",
 	Run:   runClipPaste,
 }
+
+var clipSendPasteCmd = &cobra.Command{
+	Use:   "send-paste",
+	Short: "Send a paste keystroke to the focused window",
+	Long:  "Emulate ctrl+v (or ctrl+shift+v with --shift) via a virtual keyboard. Works without server.",
+	Run:   runClipSendPaste,
+}
+
+var clipSendPasteShift bool
 
 var clipWatchCmd = &cobra.Command{
 	Use:   "watch [command]",
@@ -216,8 +226,10 @@ func init() {
 
 	clipMigrateCmd.Flags().BoolVar(&clipMigrateDelete, "delete", false, "Delete cliphist db after successful migration")
 
+	clipSendPasteCmd.Flags().BoolVarP(&clipSendPasteShift, "shift", "s", false, "Send ctrl+shift+v (terminal paste)")
+
 	clipConfigCmd.AddCommand(clipConfigGetCmd, clipConfigSetCmd)
-	clipboardCmd.AddCommand(clipCopyCmd, clipPasteCmd, clipWatchCmd, clipHistoryCmd, clipGetCmd, clipDeleteCmd, clipClearCmd, clipSearchCmd, clipConfigCmd, clipExportCmd, clipImportCmd, clipMigrateCmd)
+	clipboardCmd.AddCommand(clipCopyCmd, clipPasteCmd, clipSendPasteCmd, clipWatchCmd, clipHistoryCmd, clipGetCmd, clipDeleteCmd, clipClearCmd, clipSearchCmd, clipConfigCmd, clipExportCmd, clipImportCmd, clipMigrateCmd)
 }
 
 func runClipCopy(cmd *cobra.Command, args []string) {
@@ -272,8 +284,8 @@ func runClipCopy(cmd *cobra.Command, args []string) {
 	}
 }
 
-func parseMultiOffers(data []byte) ([]clipboard.Offer, error) {
-	var offers []clipboard.Offer
+func parseMultiOffers(data []byte) ([]wlclipboard.Offer, error) {
+	var offers []wlclipboard.Offer
 	pos := 0
 
 	for pos < len(data) {
@@ -300,18 +312,24 @@ func parseMultiOffers(data []byte) ([]clipboard.Offer, error) {
 		offerData := data[pos : pos+dataLen]
 		pos += dataLen
 
-		offers = append(offers, clipboard.Offer{MimeType: mimeType, Data: offerData})
+		offers = append(offers, wlclipboard.Offer{MimeType: mimeType, Data: offerData})
 	}
 
 	return offers, nil
 }
 
 func runClipPaste(cmd *cobra.Command, args []string) {
-	data, _, err := clipboard.Paste()
+	data, _, err := wlclipboard.Paste()
 	if err != nil {
 		log.Fatalf("paste: %v", err)
 	}
 	os.Stdout.Write(data)
+}
+
+func runClipSendPaste(cmd *cobra.Command, args []string) {
+	if err := clipboard.SendPasteKeystroke(clipSendPasteShift); err != nil {
+		log.Fatalf("send-paste: %v", err)
+	}
 }
 
 func runClipWatch(cmd *cobra.Command, args []string) {
@@ -327,13 +345,13 @@ func runClipWatch(cmd *cobra.Command, args []string) {
 
 	switch {
 	case len(args) > 0:
-		if err := clipboard.Watch(ctx, func(data []byte, mimeType string) {
+		if err := wlclipboard.Watch(ctx, func(data []byte, mimeType string) {
 			runCommand(args, data)
 		}); err != nil && err != context.Canceled {
 			log.Fatalf("Watch error: %v", err)
 		}
 	case clipWatchStore:
-		if err := clipboard.Watch(ctx, func(data []byte, mimeType string) {
+		if err := wlclipboard.Watch(ctx, func(data []byte, mimeType string) {
 			if err := clipboard.Store(data, mimeType); err != nil {
 				log.Errorf("store: %v", err)
 			}
@@ -365,7 +383,7 @@ func runClipWatch(cmd *cobra.Command, args []string) {
 			log.Fatalf("Watch error: %v", err)
 		}
 	case clipJSONOutput:
-		if err := clipboard.Watch(ctx, func(data []byte, mimeType string) {
+		if err := wlclipboard.Watch(ctx, func(data []byte, mimeType string) {
 			out := map[string]any{
 				"data":      string(data),
 				"mimeType":  mimeType,
@@ -378,7 +396,7 @@ func runClipWatch(cmd *cobra.Command, args []string) {
 			log.Fatalf("Watch error: %v", err)
 		}
 	default:
-		if err := clipboard.Watch(ctx, func(data []byte, mimeType string) {
+		if err := wlclipboard.Watch(ctx, func(data []byte, mimeType string) {
 			os.Stdout.Write(data)
 			os.Stdout.WriteString("\n")
 		}); err != nil && err != context.Canceled {
@@ -412,7 +430,7 @@ func runCommand(args []string, stdin []byte) {
 }
 
 func runClipHistory(cmd *cobra.Command, args []string) {
-	req := models.Request{
+	req := ipc.Request{
 		ID:     1,
 		Method: "clipboard.getHistory",
 	}
@@ -483,7 +501,7 @@ func runClipGet(cmd *cobra.Command, args []string) {
 	}
 
 	if clipGetCopy {
-		req := models.Request{
+		req := ipc.Request{
 			ID:     1,
 			Method: "clipboard.copyEntry",
 			Params: map[string]any{"id": id},
@@ -501,7 +519,7 @@ func runClipGet(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	req := models.Request{
+	req := ipc.Request{
 		ID:     1,
 		Method: "clipboard.getEntry",
 		Params: map[string]any{
@@ -547,7 +565,7 @@ func runClipDelete(cmd *cobra.Command, args []string) {
 		log.Fatalf("Invalid ID: %v", err)
 	}
 
-	req := models.Request{
+	req := ipc.Request{
 		ID:     1,
 		Method: "clipboard.deleteEntry",
 		Params: map[string]any{
@@ -568,7 +586,7 @@ func runClipDelete(cmd *cobra.Command, args []string) {
 }
 
 func runClipClear(cmd *cobra.Command, args []string) {
-	req := models.Request{
+	req := ipc.Request{
 		ID:     1,
 		Method: "clipboard.clearHistory",
 	}
@@ -603,7 +621,7 @@ func runClipSearch(cmd *cobra.Command, args []string) {
 		params["isImage"] = false
 	}
 
-	req := models.Request{
+	req := ipc.Request{
 		ID:     1,
 		Method: "clipboard.search",
 		Params: params,
@@ -670,7 +688,7 @@ func runClipSearch(cmd *cobra.Command, args []string) {
 }
 
 func runClipConfigGet(cmd *cobra.Command, args []string) {
-	req := models.Request{
+	req := ipc.Request{
 		ID:     1,
 		Method: "clipboard.getConfig",
 	}
@@ -724,7 +742,7 @@ func runClipConfigSet(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	req := models.Request{
+	req := ipc.Request{
 		ID:     1,
 		Method: "clipboard.setConfig",
 		Params: params,
@@ -743,7 +761,7 @@ func runClipConfigSet(cmd *cobra.Command, args []string) {
 }
 
 func runClipExport(cmd *cobra.Command, args []string) {
-	req := models.Request{
+	req := ipc.Request{
 		ID:     1,
 		Method: "clipboard.getHistory",
 	}
@@ -914,7 +932,7 @@ func downloadToTempFile(rawURL string) (string, error) {
 	var contentType string
 	var lastErr error
 
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
 		}
@@ -986,19 +1004,25 @@ func downloadToTempFile(rawURL string) (string, error) {
 	return filePath, nil
 }
 
+// copyFileToClipboard copies through the server so the entry lands in
+// history, and serves the same offers itself when the server is down or
+// refuses (e.g. file over the history size limit).
 func copyFileToClipboard(filePath string) error {
-	req := models.Request{
+	if abs, err := filepath.Abs(filePath); err == nil {
+		filePath = abs
+	}
+	resp, ok := tryServerRequest(ipc.Request{
 		ID:     1,
 		Method: "clipboard.copyFile",
 		Params: map[string]any{"filePath": filePath},
+	})
+	if ok && resp.Error == "" {
+		return nil
 	}
 
-	resp, err := sendServerRequest(req)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return fmt.Errorf("server request: %w", err)
+		return fmt.Errorf("read file: %w", err)
 	}
-	if resp.Error != "" {
-		return fmt.Errorf("server error: %s", resp.Error)
-	}
-	return nil
+	return clipboard.CopyMulti(clipboard.FileOffers(filePath, filePath, data), false, false)
 }

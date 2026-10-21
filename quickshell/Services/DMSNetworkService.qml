@@ -24,6 +24,50 @@ Singleton {
 
     property var wiredConnections: []
 
+    property string cellularIP: ""
+    property string cellularInterface: ""
+    property bool cellularConnected: false
+    property bool cellularEnabled: true
+    property bool cellularHardwareEnabled: true
+    property string cellularConnectionUuid: ""
+    property var cellularDevices: []
+    property var cellularConnections: []
+
+    readonly property var activeCellularDevice: {
+        const devices = cellularDevices || [];
+        for (const device of devices) {
+            if (device.connected) {
+                return device;
+            }
+        }
+        return devices.length > 0 ? devices[0] : null;
+    }
+    readonly property int cellularSignalStrength: activeCellularDevice?.signalQuality ?? 0
+    readonly property string cellularAccessTech: activeCellularDevice?.accessTech ?? ""
+    readonly property bool cellularAvailable: (cellularDevices?.length ?? 0) > 0
+    readonly property string cellularSignalIcon: {
+        if (!cellularAvailable || !cellularEnabled || !cellularHardwareEnabled) {
+            return "signal_cellular_off";
+        }
+        // Daemons older than the ModemManager metrics don't send signalQuality.
+        if (activeCellularDevice.signalQuality === undefined) {
+            return "network_cell";
+        }
+        if (cellularSignalStrength >= 80) {
+            return "signal_cellular_4_bar";
+        }
+        if (cellularSignalStrength >= 60) {
+            return "signal_cellular_3_bar";
+        }
+        if (cellularSignalStrength >= 40) {
+            return "signal_cellular_2_bar";
+        }
+        if (cellularSignalStrength >= 20) {
+            return "signal_cellular_1_bar";
+        }
+        return "signal_cellular_0_bar";
+    }
+
     property string wifiIP: ""
     property string wifiInterface: ""
     property bool wifiConnected: false
@@ -41,6 +85,9 @@ Singleton {
     property var savedConnections: []
     property var ssidToConnectionName: ({})
     property var wifiSignalIcon: {
+        if (isConnecting) {
+            return "wifi";
+        }
         if (!wifiConnected) {
             return "wifi_off";
         }
@@ -53,7 +100,7 @@ Singleton {
         return "wifi_1_bar";
     }
 
-    property string userPreference: "auto"
+    readonly property string userPreference: SettingsData.networkPreference
     property bool isConnecting: false
     property string connectingSSID: ""
     property string connectionError: ""
@@ -63,9 +110,34 @@ Singleton {
 
     property bool wifiAvailable: true
     property bool wifiToggling: false
+    property bool cellularToggling: false
     property bool changingPreference: false
     property string targetPreference: ""
     property var savedWifiNetworks: []
+    readonly property int savedWifiStateApiVersion: 26
+    readonly property int hotspotApiVersion: 28
+    property bool backendHotspotSupported: false
+    property bool backendHotspotAvailable: false
+    property bool backendHotspotConfigured: false
+    property bool backendHotspotEnabled: false
+    property bool backendHotspotActivating: false
+    property bool backendHotspotSecured: false
+    property string backendHotspotSSID: ""
+    property string backendHotspotDevice: ""
+    property string backendHotspotBand: ""
+    property string backendHotspotLastError: ""
+    readonly property bool hotspotSupported: DMSService.isConnected && networkAvailable && DMSService.apiVersion >= hotspotApiVersion && backendHotspotSupported
+    readonly property bool hotspotAvailable: hotspotSupported && backendHotspotAvailable
+    readonly property bool hotspotConfigured: hotspotSupported && backendHotspotConfigured
+    readonly property bool hotspotEnabled: hotspotSupported && backendHotspotEnabled
+    readonly property bool hotspotActivating: hotspotSupported && backendHotspotActivating
+    readonly property bool hotspotSecured: hotspotSupported && backendHotspotSecured
+    readonly property bool hotspotWouldDisconnectWifi: hotspotSupported && !hotspotEnabled && !hotspotActivating && hotspotTargetWouldDisconnectWifi(backendHotspotDevice, backendHotspotBand)
+    readonly property string hotspotSSID: hotspotSupported ? backendHotspotSSID : ""
+    readonly property string hotspotDevice: hotspotSupported ? backendHotspotDevice : ""
+    readonly property string hotspotBand: hotspotSupported ? backendHotspotBand : ""
+    property bool hotspotBusy: false
+    property string hotspotError: ""
     property string connectionStatus: ""
     property string lastConnectionError: ""
     property bool passwordDialogShouldReopen: false
@@ -80,6 +152,8 @@ Singleton {
     property string lastConnectedVpnUuid: ""
     property string pendingVpnUuid: ""
     property var vpnBusyStartTime: 0
+    property string vpnError: ""
+    property string vpnErrorUuid: ""
 
     property var profiles: {
         const mergedProfiles = vpnProfiles ? vpnProfiles.slice() : [];
@@ -133,6 +207,17 @@ Singleton {
     property alias isBusy: root.vpnIsBusy
     property alias connected: root.vpnConnected
 
+    function vpnStateForUuid(uuid) {
+        if (!uuid)
+            return "";
+        const match = vpnActive.find(v => v.uuid === uuid);
+        return match ? (match.state || "") : "";
+    }
+
+    function isVpnConnectingUuid(uuid) {
+        return vpnStateForUuid(uuid) === "activating" || (vpnIsBusy && pendingVpnUuid === uuid);
+    }
+
     property string networkInfoSSID: ""
     property string networkInfoDetails: ""
     property bool networkInfoLoading: false
@@ -143,6 +228,7 @@ Singleton {
 
     property int refCount: 0
     property bool stateInitialized: false
+    property var _lastRawState: null
 
     property string credentialsToken: ""
     property string credentialsSSID: ""
@@ -170,7 +256,6 @@ Singleton {
     }
 
     Component.onCompleted: {
-        root.userPreference = SettingsData.networkPreference;
         lastConnectedVpnUuid = SessionData.vpnLastConnected || "";
         if (socketPath && socketPath.length > 0) {
             checkDMSCapabilities();
@@ -246,9 +331,12 @@ Singleton {
 
     function addRef() {
         refCount++;
-        if (refCount === 1 && networkAvailable) {
+        if (refCount !== 1)
+            return;
+        if (_lastRawState)
+            syncLists(_lastRawState);
+        if (networkAvailable)
             startAutoScan();
-        }
     }
 
     function removeRef() {
@@ -266,7 +354,7 @@ Singleton {
         DMSService.sendRequest("network.getState", null, response => {
             if (response.result) {
                 updateState(response.result);
-                if (!initialStateFetched && response.result.wifiEnabled && (!response.result.wifiNetworks || response.result.wifiNetworks.length === 0)) {
+                if (refCount > 0 && !initialStateFetched && response.result.wifiEnabled && (!response.result.wifiNetworks || response.result.wifiNetworks.length === 0)) {
                     initialStateFetched = true;
                     Qt.callLater(() => scanWifi());
                 }
@@ -274,7 +362,57 @@ Singleton {
         });
     }
 
+    function keepUnchanged(previous, next) {
+        if (!(previous instanceof Array) || !(next instanceof Array))
+            return next;
+        const byContent = new Map();
+        for (const item of previous)
+            byContent.set(JSON.stringify(item), item);
+        let same = previous.length === next.length;
+        const merged = [];
+        for (let i = 0; i < next.length; i++) {
+            const item = byContent.get(JSON.stringify(next[i])) ?? next[i];
+            same = same && item === previous[i];
+            merged.push(item);
+        }
+        return same ? previous : merged;
+    }
+
+    function syncLists(state) {
+        ethernetDevices = keepUnchanged(ethernetDevices, state.ethernetDevices || []);
+        wiredConnections = keepUnchanged(wiredConnections, state.wiredConnections || []);
+        cellularDevices = keepUnchanged(cellularDevices, state.cellularDevices || []);
+        cellularConnections = keepUnchanged(cellularConnections, state.cellularConnections || []);
+
+        if (state.wifiNetworks) {
+            wifiNetworks = keepUnchanged(wifiNetworks, state.wifiNetworks);
+        }
+
+        if (!state.wifiNetworks && !state.savedWifiNetworks)
+            return;
+        const hasSavedWifiState = DMSService.apiVersion >= savedWifiStateApiVersion && state.savedWifiNetworks instanceof Array;
+        const sourceSavedNetworks = hasSavedWifiState ? state.savedWifiNetworks : (state.wifiNetworks || []).filter(network => network.saved);
+        const normalized = sourceSavedNetworks.map(network => Object.assign({}, network, {
+                saved: true,
+                outOfRange: hasSavedWifiState ? network.outOfRange === true : false
+            }));
+        const saved = keepUnchanged(savedWifiNetworks, normalized);
+        if (saved !== savedWifiNetworks) {
+            const mapping = {};
+            for (const network of saved) {
+                if (network?.ssid)
+                    mapping[network.ssid] = network.ssid;
+            }
+            savedConnections = saved;
+            savedWifiNetworks = saved;
+            ssidToConnectionName = mapping;
+        }
+
+        networksUpdated();
+    }
+
     function updateState(state) {
+        _lastRawState = state;
         const previousConnecting = isConnecting;
         const previousConnectingSSID = connectingSSID;
 
@@ -287,9 +425,13 @@ Singleton {
         ethernetInterface = state.ethernetDevice || "";
         ethernetConnected = state.ethernetConnected || false;
         ethernetConnectionUuid = state.ethernetConnectionUuid || "";
-        ethernetDevices = state.ethernetDevices || [];
 
-        wiredConnections = state.wiredConnections || [];
+        cellularIP = state.cellularIP || "";
+        cellularInterface = state.cellularDevice || "";
+        cellularConnected = state.cellularConnected || false;
+        cellularEnabled = state.cellularEnabled !== undefined ? state.cellularEnabled : true;
+        cellularHardwareEnabled = state.cellularHardwareEnabled !== undefined ? state.cellularHardwareEnabled : true;
+        cellularConnectionUuid = state.cellularConnectionUuid || "";
 
         wifiIP = state.wifiIP || "";
         wifiInterface = state.wifiDevice || "";
@@ -298,39 +440,58 @@ Singleton {
         wifiConnectionUuid = state.wifiConnectionUuid || "";
         wifiDevicePath = state.wifiDevicePath || "";
         activeAccessPointPath = state.activeAccessPointPath || "";
-        wifiDevices = state.wifiDevices || [];
+        wifiDevices = keepUnchanged(wifiDevices, state.wifiDevices || []);
         connectingDevice = state.connectingDevice || "";
+
+        if (DMSService.apiVersion >= hotspotApiVersion) {
+            const supportsHotspot = state.hotspotSupported === true;
+            const wasHotspotEnabled = backendHotspotEnabled;
+            const wasHotspotActivating = backendHotspotActivating;
+            backendHotspotSupported = supportsHotspot;
+            backendHotspotAvailable = state.hotspotAvailable === true;
+            backendHotspotConfigured = state.hotspotConfigured === true;
+            backendHotspotEnabled = state.hotspotEnabled === true;
+            backendHotspotActivating = state.hotspotActivating === true;
+            backendHotspotSecured = state.hotspotSecured === true;
+            backendHotspotSSID = state.hotspotSSID || "";
+            backendHotspotDevice = state.hotspotDevice || "";
+            backendHotspotBand = state.hotspotBand || "";
+            backendHotspotLastError = state.hotspotLastError || "";
+
+            // Activation is asynchronous: only toast outcomes of starts we watched
+            // begin, so restoring state after a shell restart stays silent.
+            const watchedStart = wasHotspotActivating || hotspotBusy;
+            if (watchedStart && !wasHotspotEnabled && backendHotspotEnabled) {
+                ToastService.showInfo(I18n.tr("Hotspot started", "hotspot start success message"));
+            } else if (wasHotspotActivating && !backendHotspotActivating && !backendHotspotEnabled && backendHotspotLastError) {
+                hotspotError = backendHotspotLastError;
+                ToastService.showError(I18n.tr("Failed to start hotspot", "hotspot start error title"), hotspotErrorMessage(backendHotspotLastError));
+            }
+        } else {
+            backendHotspotSupported = false;
+            backendHotspotAvailable = false;
+            backendHotspotConfigured = false;
+            backendHotspotEnabled = false;
+            backendHotspotActivating = false;
+            backendHotspotSecured = false;
+            backendHotspotSSID = "";
+            backendHotspotDevice = "";
+            backendHotspotBand = "";
+            backendHotspotLastError = "";
+        }
 
         currentWifiSSID = state.wifiSSID || "";
         wifiSignalStrength = state.wifiSignal || 0;
 
-        if (state.wifiNetworks) {
-            wifiNetworks = state.wifiNetworks;
-
-            const saved = [];
-            const mapping = {};
-            for (const network of state.wifiNetworks) {
-                if (network.saved) {
-                    saved.push({
-                        ssid: network.ssid,
-                        saved: true
-                    });
-                    mapping[network.ssid] = network.ssid;
-                }
-            }
-            savedConnections = saved;
-            savedWifiNetworks = saved;
-            ssidToConnectionName = mapping;
-
-            networksUpdated();
-        }
+        if (refCount > 0)
+            syncLists(state);
 
         if (state.vpnProfiles) {
-            vpnProfiles = state.vpnProfiles;
+            vpnProfiles = keepUnchanged(vpnProfiles, state.vpnProfiles);
         }
 
         const previousVpnActive = vpnActive;
-        vpnActive = state.vpnActive || [];
+        vpnActive = keepUnchanged(vpnActive, state.vpnActive || []);
 
         if (vpnConnected && activeUuid) {
             lastConnectedVpnUuid = activeUuid;
@@ -364,6 +525,17 @@ Singleton {
             }
         }
 
+        const incomingVpnError = state.vpnError || "";
+        if (incomingVpnError && incomingVpnError !== vpnError) {
+            vpnIsBusy = false;
+            pendingVpnUuid = "";
+            vpnBusyStartTime = 0;
+            const failedName = (vpnProfiles.find(p => p.uuid === state.vpnErrorUuid)?.name) || I18n.tr("VPN", "virtual private network, widget and page title");
+            ToastService.showError(I18n.tr("%1: %2", "vpn error toast, %1 is the vpn name, %2 is the error").arg(failedName).arg(incomingVpnError));
+        }
+        vpnError = incomingVpnError;
+        vpnErrorUuid = state.vpnErrorUuid || "";
+
         isConnecting = state.isConnecting || false;
         connectingSSID = state.connectingSSID || "";
         connectionError = state.lastError || "";
@@ -373,10 +545,10 @@ Singleton {
             if (wifiConnected && currentWifiSSID === pendingConnectionSSID && wifiIP) {
                 const elapsed = Date.now() - pendingConnectionStartTime;
                 log.info("Successfully connected to", pendingConnectionSSID, "in", elapsed, "ms");
-                ToastService.showInfo(`Connected to ${pendingConnectionSSID}`);
+                ToastService.showInfo(I18n.tr("Connected to %1", "wifi toast, %1 is the network name").arg(pendingConnectionSSID));
 
-                if (userPreference === "wifi" || userPreference === "auto") {
-                    setConnectionPriority("wifi");
+                if (userPreference === "wifi") {
+                    applyNetworkPreference("wifi");
                 }
 
                 pendingConnectionSSID = "";
@@ -393,7 +565,7 @@ Singleton {
                     pendingConnectionSSID = "";
                 } else {
                     if (connectionError) {
-                        ToastService.showError(I18n.tr("Failed to connect to %1").arg(pendingConnectionSSID));
+                        ToastService.showError(I18n.tr("Failed to connect to %1", "wifi error toast, %1 is the network name").arg(pendingConnectionSSID));
                     }
                     connectionStatus = "failed";
                     pendingConnectionSSID = "";
@@ -433,6 +605,53 @@ Singleton {
         });
     }
 
+    function connectCellular() {
+        if (!networkAvailable || isConnecting)
+            return;
+        isConnecting = true;
+        connectionError = "";
+        connectionStatus = "connecting";
+
+        DMSService.sendRequest("network.cellular.connect", null, response => {
+            if (response.error) {
+                connectionError = response.error;
+                lastConnectionError = response.error;
+                connectionStatus = "failed";
+                ToastService.showError(I18n.tr("Failed to activate configuration"), response.error);
+            } else {
+                connectionError = "";
+                connectionStatus = "connected";
+                ToastService.showInfo(I18n.tr("Configuration activated"));
+            }
+            isConnecting = false;
+        });
+    }
+
+    function connectToSpecificCellularConfig(uuid) {
+        if (!networkAvailable || isConnecting)
+            return;
+        isConnecting = true;
+        connectionError = "";
+        connectionStatus = "connecting";
+
+        DMSService.sendRequest("network.cellular.connect.config", {
+            uuid: uuid
+        }, response => {
+            if (response.error) {
+                connectionError = response.error;
+                lastConnectionError = response.error;
+                connectionStatus = "failed";
+                ToastService.showError(I18n.tr("Failed to activate configuration"), response.error);
+            } else {
+                connectionError = "";
+                connectionStatus = "connected";
+                ToastService.showInfo(I18n.tr("Configuration activated"));
+            }
+
+            isConnecting = false;
+        });
+    }
+
     function scanWifi() {
         if (!networkAvailable || isScanning || !wifiEnabled)
             return;
@@ -454,11 +673,13 @@ Singleton {
         scanWifi();
     }
 
-    function connectToWifi(ssid, password = "", username = "", anonymousIdentity = "", domainSuffixMatch = "", hidden = false) {
+    function connectToWifi(ssid, password = "", username = "", anonymousIdentity = "", domainSuffixMatch = "", hidden = false, eapMethod = "", phase2Auth = "") {
         if (!networkAvailable || isConnecting)
             return;
         pendingConnectionSSID = ssid;
         pendingConnectionStartTime = Date.now();
+        isConnecting = true;
+        connectingSSID = ssid;
         connectionError = "";
         connectionStatus = "connecting";
         credentialsRequested = false;
@@ -470,6 +691,10 @@ Singleton {
             params.device = effectiveWifiDevice;
         if (hidden)
             params.hidden = true;
+        if (eapMethod)
+            params.eapMethod = eapMethod;
+        if (phase2Auth)
+            params.phase2Auth = phase2Auth;
 
         if (DMSService.apiVersion >= 7) {
             if (password || username) {
@@ -502,8 +727,10 @@ Singleton {
                 connectionError = response.error;
                 lastConnectionError = response.error;
                 pendingConnectionSSID = "";
+                isConnecting = false;
+                connectingSSID = "";
                 connectionStatus = "failed";
-                ToastService.showError(I18n.tr("Failed to start connection to %1").arg(ssid));
+                ToastService.showError(I18n.tr("Failed to start connection to %1", "wifi error toast, %1 is the network name").arg(ssid));
             }
         });
     }
@@ -541,6 +768,12 @@ Singleton {
 
         credentialsRequested = false;
 
+        if (credentialsReason === "wrong-password" && credentialsSSID && credentialsSetting === "802-11-wireless-security") {
+            pendingConnectionSSID = credentialsSSID;
+            pendingConnectionStartTime = Date.now();
+            connectionStatus = "connecting";
+        }
+
         DMSService.sendRequest("network.credentials.submit", params, response => {
             if (response.error) {
                 log.warn("Failed to submit credentials:", response.error);
@@ -576,23 +809,19 @@ Singleton {
             if (response.error) {
                 log.warn("Failed to forget network:", response.error);
             } else {
-                ToastService.showInfo(I18n.tr("Forgot network %1").arg(ssid));
+                ToastService.showInfo(I18n.tr("Forgot network %1", "toast after removing a saved wifi network, %1 is its name").arg(ssid));
 
                 savedConnections = savedConnections.filter(s => s.ssid !== ssid);
                 savedWifiNetworks = savedWifiNetworks.filter(s => s.ssid !== ssid);
 
-                const updated = [...wifiNetworks];
-                for (const network of updated) {
-                    if (network.ssid === ssid) {
-                        network.saved = false;
-                        if (network.connected) {
-                            network.connected = false;
-                            currentWifiSSID = "";
-                        }
-                    }
-                }
-                wifiNetworks = updated;
+                if (wifiNetworks.some(network => network.ssid === ssid && network.connected))
+                    currentWifiSSID = "";
+                wifiNetworks = wifiNetworks.map(network => network.ssid !== ssid ? network : Object.assign({}, network, {
+                        saved: false,
+                        connected: false
+                    }));
                 networksUpdated();
+                Qt.callLater(() => refreshSavedWifiNetworks());
             }
             forgetSSID = "";
         });
@@ -614,6 +843,22 @@ Singleton {
         });
     }
 
+    function toggleCellularRadio() {
+        if (!networkAvailable || cellularToggling)
+            return;
+        cellularToggling = true;
+        DMSService.sendRequest("network.cellular.toggle", null, response => {
+            cellularToggling = false;
+
+            if (response.error) {
+                ToastService.showError(I18n.tr("Failed to toggle cellular"), response.error);
+            } else if (response.result) {
+                cellularEnabled = response.result.enabled;
+                ToastService.showInfo(cellularEnabled ? I18n.tr("Cellular enabled") : I18n.tr("Cellular disabled"));
+            }
+        });
+    }
+
     function enableWifiDevice() {
         if (!networkAvailable)
             return;
@@ -629,11 +874,13 @@ Singleton {
     function setNetworkPreference(preference) {
         if (!networkAvailable)
             return;
-        userPreference = preference;
+        SettingsData.set("networkPreference", preference);
+        applyNetworkPreference(preference);
+    }
+
+    function applyNetworkPreference(preference) {
         changingPreference = true;
         targetPreference = preference;
-        SettingsData.set("networkPreference", preference);
-
         DMSService.sendRequest("network.preference.set", {
             preference: preference
         }, response => {
@@ -646,19 +893,6 @@ Singleton {
         });
     }
 
-    function setConnectionPriority(type) {
-        if (type === "wifi") {
-            setNetworkPreference("wifi");
-        } else if (type === "ethernet") {
-            setNetworkPreference("ethernet");
-        }
-    }
-
-    function connectToWifiAndSetPreference(ssid, password, username = "", anonymousIdentity = "", domainSuffixMatch = "", hidden = false) {
-        connectToWifi(ssid, password, username, anonymousIdentity, domainSuffixMatch, hidden);
-        setNetworkPreference("wifi");
-    }
-
     function toggleNetworkConnection(type) {
         if (!networkAvailable)
             return;
@@ -668,6 +902,12 @@ Singleton {
             } else {
                 DMSService.sendRequest("network.ethernet.connect", null, null);
             }
+        } else if (type === "cellular") {
+            if (cellularConnected) {
+                DMSService.sendRequest("network.cellular.disconnect", null, null);
+            } else {
+                connectCellular();
+            }
         }
     }
 
@@ -675,6 +915,14 @@ Singleton {
         if (!networkAvailable)
             return;
         DMSService.sendRequest("network.ethernet.disconnect", {
+            device: deviceName
+        }, null);
+    }
+
+    function disconnectCellularDevice(deviceName) {
+        if (!networkAvailable)
+            return;
+        DMSService.sendRequest("network.cellular.disconnect", {
             device: deviceName
         }, null);
     }
@@ -690,6 +938,13 @@ Singleton {
     function stopAutoScan() {
         autoScan = false;
         autoRefreshEnabled = false;
+    }
+
+    Timer {
+        interval: 10000
+        repeat: true
+        running: root.autoScan && root.networkAvailable && root.wifiEnabled
+        onTriggered: root.scanWifi()
     }
 
     function fetchWiredNetworkInfo(uuid) {
@@ -948,10 +1203,6 @@ Singleton {
         return activeUuids && activeUuids.indexOf(uuid) !== -1;
     }
 
-    function isActiveUuid(uuid) {
-        return isActiveVpnUuid(uuid);
-    }
-
     function refreshNetworkState() {
         if (networkAvailable) {
             getState();
@@ -981,5 +1232,143 @@ Singleton {
                 Qt.callLater(() => getState());
             }
         });
+    }
+
+    function configureHotspot(ssid, password = "", device = "", band = "", callback = null) {
+        if (!hotspotSupported || hotspotBusy)
+            return false;
+
+        const params = {
+            ssid: ssid
+        };
+        if (password)
+            params.password = password;
+        if (device)
+            params.device = device;
+        if (band)
+            params.band = band;
+
+        hotspotBusy = true;
+        hotspotError = "";
+
+        DMSService.sendRequest("network.hotspot.configure", params, response => {
+            hotspotBusy = false;
+            if (response.error) {
+                hotspotError = response.error;
+                ToastService.showError(I18n.tr("Failed to configure hotspot", "hotspot configuration error title"), response.error);
+            } else {
+                Qt.callLater(() => getState());
+            }
+            if (callback)
+                callback(response);
+        });
+
+        return true;
+    }
+
+    function startHotspot(callback = null) {
+        if (!hotspotAvailable || hotspotBusy)
+            return false;
+
+        hotspotBusy = true;
+        hotspotError = "";
+
+        DMSService.sendRequest("network.hotspot.start", null, response => {
+            hotspotBusy = false;
+            if (response.error) {
+                hotspotError = response.error;
+                ToastService.showError(I18n.tr("Failed to start hotspot", "hotspot start error title"), response.error);
+            } else {
+                Qt.callLater(() => getState());
+            }
+            if (callback)
+                callback(response);
+        });
+
+        return true;
+    }
+
+    function stopHotspot(callback = null) {
+        if (!hotspotSupported || hotspotBusy)
+            return false;
+
+        hotspotBusy = true;
+        hotspotError = "";
+
+        DMSService.sendRequest("network.hotspot.stop", null, response => {
+            hotspotBusy = false;
+            if (response.error) {
+                hotspotError = response.error;
+                ToastService.showError(I18n.tr("Failed to stop hotspot", "hotspot stop error title"), response.error);
+            } else {
+                Qt.callLater(() => getState());
+            }
+            if (callback)
+                callback(response);
+        });
+
+        return true;
+    }
+
+    function configureAndStartHotspot(ssid, password = "", device = "", band = "", callback = null) {
+        return configureHotspot(ssid, password, device, band, configureResponse => {
+            if (configureResponse.error) {
+                if (callback)
+                    callback(configureResponse);
+                return;
+            }
+            startHotspot(callback);
+        });
+    }
+
+    function getHotspotSecrets(callback) {
+        if (!hotspotSupported) {
+            if (callback)
+                callback({
+                    error: "hotspot not supported"
+                });
+            return false;
+        }
+
+        DMSService.sendRequest("network.hotspot.getSecrets", null, response => {
+            if (callback)
+                callback(response);
+        });
+
+        return true;
+    }
+
+    function hotspotTargetWouldDisconnectWifi(device, band = "") {
+        const devices = wifiDevices || [];
+        const active = devices.find(d => d.connected);
+        if (!active)
+            return false;
+        if (device) {
+            const target = devices.find(d => d.name === device);
+            return target ? target.connected : device === active.name;
+        }
+        // Band capabilities are not exposed per device, so a fixed-band automatic
+        // selection cannot safely promise that an idle radio will be usable.
+        if (band)
+            return true;
+        return !devices.some(d => d.apCapable && !d.connected && d.state === "disconnected" && d.name !== active.name);
+    }
+
+    function hotspotErrorMessage(code) {
+        switch (code) {
+        case "hotspot-ip-config-failed":
+            return I18n.tr("IP sharing setup failed. Check that dnsmasq is installed.", "hotspot IP configuration failure message");
+        case "hotspot-supplicant-failed":
+            return I18n.tr("The WiFi adapter could not start access point mode.", "hotspot adapter failure message");
+        default:
+            return I18n.tr("Hotspot activation failed.", "generic hotspot activation failure message");
+        }
+    }
+
+    function refreshSavedWifiNetworks() {
+        if (!networkAvailable)
+            return;
+
+        getState();
     }
 }

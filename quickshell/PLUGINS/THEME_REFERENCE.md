@@ -33,22 +33,35 @@ Theme.spacingXL         // Extra large
 
 ## Border Radius
 
+`Theme.radiusStrength` ranges from 0 to 100, with the Material baseline at 50. `Theme.cornerRadius` aliases `Theme.cornerRadiusM`. Small and large aliases use S and L.
+
 ```qml
-Theme.cornerRadius      // Standard corner radius
-Theme.cornerRadiusSmall // Smaller radius
-Theme.cornerRadiusLarge // Larger radius
+Theme.cornerRadiusXS
+Theme.cornerRadiusS
+Theme.cornerRadiusM
+Theme.cornerRadiusL
+Theme.cornerRadiusLIncreased
+Theme.cornerRadiusXL
+Theme.cornerRadiusXLIncreased
+Theme.cornerRadiusXXL
+Theme.fullRadius(width, height)
+Theme.buttonRadius(width, height, buttonHeight, pressed, true)
 ```
+
+Use `fullRadius()` for pills and round controls so lower strength values reduce their rounding. `cornerRadiusFull` remains available for compatibility. See the shared [shape reference](../../dux-qml-common/SHAPES.md) for component baselines.
 
 ## Colors
 
 ### Surface Colors
+Pick the tier by what the surface sits on: a host floats over the desktop, a card sits in a host, a chip in a card, a nested chip in a chip.
 ```qml
-Theme.surface
-Theme.surfaceContainerLow
-Theme.surfaceContainer
-Theme.surfaceContainerHigh
-Theme.surfaceContainerHighest
+Theme.hostSurface        // popout, desktop widget or panel background
+Theme.cardSurface        // card inside a host
+Theme.chipSurface        // chip, row or field inside a card
+Theme.chipSurfaceNested  // chip inside a chip
 ```
+
+Each tier follows the user's surface overrides; the raw `Theme.surfaceContainer*` palette does not, so keep it for swatches and previews. Plugin settings already sit on a card, so their boxes start at `chipSurface`. Wrap fills in `Theme.foregroundColor(Theme.cardSurface, Theme.isFloatingWindow(root))` so they follow the foreground toggle and opacity. Outer floating windows use `Theme.floatingWindowSurface`. Pass raw surface colors to shared text fields; those widgets apply foreground opacity themselves. These roles need DMS 1.7 or newer, so set `"requires_dms": ">=1.7.0"` when you use them.
 
 ### Text Colors
 ```qml
@@ -62,7 +75,8 @@ Theme.outline           // Border/divider color
 Theme.primary
 Theme.onPrimary
 Theme.secondary
-Theme.onSecondary
+Theme.secondaryContainer
+Theme.onSecondaryContainer
 Theme.error
 Theme.warning
 Theme.success
@@ -70,14 +84,15 @@ Theme.success
 
 ### Special Functions
 ```qml
-Theme.popupBackground()  // Popup background with opacity
+Theme.withAlpha(Theme.primary, Theme.stateLayerHover)
+Theme.foregroundColor(Theme.cardSurface, Theme.isFloatingWindow(root))
 ```
 
 ## Common Patterns
 
 ### Icon with Text
 ```qml
-DankIcon {
+DIcon {
     name: "icon_name"
     color: Theme.onSurface
     font.pixelSize: Theme.iconSize
@@ -93,19 +108,24 @@ StyledText {
 ### Container with Border
 ```qml
 Rectangle {
-    color: Theme.surfaceContainerHigh
+    color: Theme.cardSurface
     radius: Theme.cornerRadius
-    border.color: Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.08)
-    border.width: 1
+    border.color: Theme.outlineVariant
+    border.width: Theme.outlineWidth
 }
 ```
 
 ### Hover Effect
+`StateLayer` draws the hover, press and ripple layers over its parent and takes clicks.
 ```qml
-MouseArea {
-    hoverEnabled: true
-    onEntered: parent.color = Qt.lighter(Theme.surfaceContainerHigh, 1.1)
-    onExited: parent.color = Theme.surfaceContainerHigh
+Rectangle {
+    color: Theme.chipSurface
+    radius: Theme.cornerRadius
+
+    StateLayer {
+        anchors.fill: parent
+        onClicked: root.activate()
+    }
 }
 ```
 

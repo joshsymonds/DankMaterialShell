@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
+import "../../Common/QmlUtils.js" as QmlUtils
 
 Row {
     id: root
@@ -17,35 +18,25 @@ Row {
     property bool isInitialized: false
 
     function loadValue() {
-        const settings = findSettings()
+        const settings = QmlUtils.findSettings(root.parent);
         if (settings && settings.pluginService) {
-            const loadedValue = settings.loadValue(settingKey, defaultValue)
-            value = loadedValue
-            isInitialized = true
+            const loadedValue = settings.loadValue(settingKey, defaultValue);
+            value = loadedValue;
+            isInitialized = true;
         }
     }
 
     Component.onCompleted: {
-        Qt.callLater(loadValue)
+        Qt.callLater(loadValue);
     }
 
     onValueChanged: {
-        if (!isInitialized) return
-        const settings = findSettings()
+        if (!isInitialized)
+            return;
+        const settings = QmlUtils.findSettings(root.parent);
         if (settings) {
-            settings.saveValue(settingKey, value)
+            settings.saveValue(settingKey, value);
         }
-    }
-
-    function findSettings() {
-        let item = parent
-        while (item) {
-            if (item.saveValue !== undefined && item.loadValue !== undefined) {
-                return item
-            }
-            item = item.parent
-        }
-        return null
     }
 
     Column {
@@ -56,8 +47,9 @@ Row {
         StyledText {
             text: root.label
             font.pixelSize: Theme.fontSizeLarge
-            font.weight: Font.Medium
+            font.weight: Theme.fontWeightMedium
             color: Theme.surfaceText
+            width: parent.width
         }
 
         StyledText {
@@ -70,12 +62,12 @@ Row {
         }
     }
 
-    DankToggle {
+    DToggle {
         id: toggle
         anchors.verticalCenter: parent.verticalCenter
         checked: root.value
         onToggled: isChecked => {
-            root.value = isChecked
+            root.value = isChecked;
         }
     }
 }

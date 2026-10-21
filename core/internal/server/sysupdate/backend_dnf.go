@@ -3,6 +3,7 @@ package sysupdate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 )
@@ -52,7 +53,11 @@ func (b dnfBackend) Upgrade(ctx context.Context, opts UpgradeOptions, onLine fun
 }
 
 func dnfUpgradeArgv(bin string, opts UpgradeOptions) []string {
-	return privilegedArgv(opts, bin, "upgrade", "--refresh", "-y")
+	argv := withAutoYes(opts, []string{bin, "upgrade", "--refresh"}, "-y")
+	if len(opts.Ignored) > 0 {
+		argv = append(argv, "--exclude="+strings.Join(opts.Ignored, ","))
+	}
+	return privilegedArgv(opts, argv...)
 }
 
 func dnfListUpgrades(ctx context.Context, bin string) (string, error) {
@@ -65,7 +70,20 @@ func dnfListUpgrades(ctx context.Context, bin string) (string, error) {
 	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && exitErr.ExitCode() == 100 {
 		return string(out), nil
 	}
+	if detail := lastNonEmptyLine(string(out)); detail != "" {
+		return "", fmt.Errorf("%w: %s", err, detail)
+	}
 	return "", err
+}
+
+func lastNonEmptyLine(text string) string {
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func dnfCheckUpdatesArgv(bin string) []string {
@@ -97,7 +115,12 @@ func parseDnfList(text, backendID string, installed map[string]string) []Package
 		return nil
 	}
 	var pkgs []Package
+	seen := make(map[string]struct{})
 	for line := range strings.SplitSeq(text, "\n") {
+		// indented rows are packages being obsoleted, which are removals rather than upgrades
+		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			continue
+		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -111,6 +134,12 @@ func parseDnfList(text, backendID string, installed map[string]string) []Package
 		if !looksLikeRpmVersion(version) {
 			continue
 		}
+		// dnf prints one row per (package, repo), so one version in two repos appears twice
+		key := nameArch + "\t" + version
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
 		name := nameArch[:dot]
 		pkgs = append(pkgs, Package{
 			Name:        nameArch,

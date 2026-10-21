@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 )
 
 func NewSysfsBackend() (*SysfsBackend, error) {
@@ -189,7 +189,7 @@ func (b *SysfsBackend) SetBrightnessWithExponent(id string, percent int, exponen
 	devicePath := filepath.Join(b.basePath, class, name)
 	brightnessPath := filepath.Join(devicePath, "brightness")
 
-	data := []byte(fmt.Sprintf("%d", value))
+	data := fmt.Appendf(nil, "%d", value)
 	if err := os.WriteFile(brightnessPath, data, 0o644); err != nil {
 		return fmt.Errorf("write brightness: %w", err)
 	}

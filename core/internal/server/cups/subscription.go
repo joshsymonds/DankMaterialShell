@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/ipp"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/pkg/ipp"
 )
 
 type SubscriptionManager struct {
@@ -37,6 +37,9 @@ func (sm *SubscriptionManager) Start() error {
 		return fmt.Errorf("subscription manager already running")
 	}
 	sm.running = true
+	// replace the channel closed by the previous Stop(); doing it here rather
+	// than in Stop() guarantees a lagging eventHandler still observes the close
+	sm.eventChan = make(chan SubscriptionEvent, 100)
 	sm.mu.Unlock()
 
 	subID, err := sm.createSubscription()
@@ -114,10 +117,7 @@ func (sm *SubscriptionManager) notificationLoop() {
 		if err != nil {
 			log.Warnf("[CUPS] Error fetching notifications: %v", err)
 			jitter := time.Duration(50+(time.Now().UnixNano()%200)) * time.Millisecond
-			sleepTime := backoff + jitter
-			if sleepTime > 30*time.Second {
-				sleepTime = 30 * time.Second
-			}
+			sleepTime := min(backoff+jitter, 30*time.Second)
 			select {
 			case <-sm.stopChan:
 				return
@@ -206,6 +206,8 @@ func (sm *SubscriptionManager) parseEvent(attrs ipp.Attributes) SubscriptionEven
 }
 
 func (sm *SubscriptionManager) Events() <-chan SubscriptionEvent {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	return sm.eventChan
 }
 
@@ -228,6 +230,13 @@ func (sm *SubscriptionManager) Stop() {
 	}
 
 	sm.stopChan = make(chan struct{})
+
+	// the writer (notificationLoop) joined above, so closing is safe; without
+	// this close Manager.eventHandler never returns and Unsubscribe deadlocks
+	// on eventWG.Wait(). Start() allocates the replacement.
+	sm.mu.Lock()
+	close(sm.eventChan)
+	sm.mu.Unlock()
 }
 
 func (sm *SubscriptionManager) cancelSubscription() {

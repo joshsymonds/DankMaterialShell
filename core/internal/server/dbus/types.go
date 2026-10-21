@@ -1,13 +1,15 @@
 package dbus
 
 import (
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/syncmap"
 	"github.com/godbus/dbus/v5"
 )
 
 type Manager struct {
-	systemConn  *dbus.Conn
-	sessionConn *dbus.Conn
+	systemConn     *dbus.Conn
+	sessionConn    *dbus.Conn
+	systemSignals  chan *dbus.Signal
+	sessionSignals chan *dbus.Signal
 
 	subscriptions     syncmap.Map[string, *signalSubscription]
 	signalSubscribers syncmap.Map[string, chan SignalEvent]

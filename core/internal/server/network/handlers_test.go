@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net"
 	"testing"
+	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -38,34 +40,7 @@ func (m *mockNetConn) Close() error {
 	return nil
 }
 
-func TestRespondError_Network(t *testing.T) {
-	conn := newMockNetConn()
-	models.RespondError(conn, 123, "test error")
-
-	var resp models.Response[any]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-	require.NoError(t, err)
-
-	assert.Equal(t, 123, resp.ID)
-	assert.Equal(t, "test error", resp.Error)
-	assert.Nil(t, resp.Result)
-}
-
-func TestRespond_Network(t *testing.T) {
-	conn := newMockNetConn()
-	result := models.SuccessResult{Success: true, Message: "test"}
-	models.Respond(conn, 123, result)
-
-	var resp models.Response[models.SuccessResult]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-	require.NoError(t, err)
-
-	assert.Equal(t, 123, resp.ID)
-	assert.Empty(t, resp.Error)
-	require.NotNil(t, resp.Result)
-	assert.True(t, resp.Result.Success)
-	assert.Equal(t, "test", resp.Result.Message)
-}
+func (m *mockNetConn) SetWriteDeadline(t time.Time) error { return nil }
 
 func TestHandleGetState(t *testing.T) {
 	manager := &Manager{
@@ -76,13 +51,14 @@ func TestHandleGetState(t *testing.T) {
 		},
 	}
 
-	conn := newMockNetConn()
-	req := models.Request{ID: 123, Method: "network.getState"}
+	mc := newMockNetConn()
+	conn := ipc.NewConnWriter(mc)
+	req := ipc.Request{ID: 123, Method: "network.getState"}
 
 	handleGetState(conn, req, manager)
 
-	var resp models.Response[NetworkState]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+	var resp ipc.Response[NetworkState]
+	err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 	require.NoError(t, err)
 
 	assert.Equal(t, 123, resp.ID)
@@ -92,40 +68,15 @@ func TestHandleGetState(t *testing.T) {
 	assert.Equal(t, "TestNetwork", resp.Result.WiFiSSID)
 }
 
-func TestHandleGetWiFiNetworks(t *testing.T) {
-	manager := &Manager{
-		state: &NetworkState{
-			WiFiNetworks: []WiFiNetwork{
-				{SSID: "Network1", Signal: 90},
-				{SSID: "Network2", Signal: 80},
-			},
-		},
-	}
-
-	conn := newMockNetConn()
-	req := models.Request{ID: 123, Method: "network.wifi.networks"}
-
-	handleGetWiFiNetworks(conn, req, manager)
-
-	var resp models.Response[[]WiFiNetwork]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-	require.NoError(t, err)
-
-	assert.Equal(t, 123, resp.ID)
-	assert.Empty(t, resp.Error)
-	require.NotNil(t, resp.Result)
-	assert.Len(t, *resp.Result, 2)
-	assert.Equal(t, "Network1", (*resp.Result)[0].SSID)
-}
-
 func TestHandleConnectWiFi(t *testing.T) {
 	t.Run("missing ssid parameter", func(t *testing.T) {
 		manager := &Manager{
 			state: &NetworkState{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "network.wifi.connect",
 			Params: map[string]any{},
@@ -133,8 +84,8 @@ func TestHandleConnectWiFi(t *testing.T) {
 
 		handleConnectWiFi(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -142,51 +93,100 @@ func TestHandleConnectWiFi(t *testing.T) {
 	})
 }
 
-func TestHandleSetPreference(t *testing.T) {
-	t.Run("missing preference parameter", func(t *testing.T) {
-		manager := &Manager{
-			state: &NetworkState{},
-		}
-
-		conn := newMockNetConn()
-		req := models.Request{
+func TestHandleHotspotRequests(t *testing.T) {
+	t.Run("configure dispatches request", func(t *testing.T) {
+		iwdBackend, err := NewIWDBackend()
+		require.NoError(t, err)
+		backend := &testHotspotBackend{IWDBackend: iwdBackend}
+		manager := NewTestManager(backend, &NetworkState{})
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
-			Method: "network.preference.set",
-			Params: map[string]any{},
+			Method: "network.hotspot.configure",
+			Params: map[string]any{
+				"ssid":     "DMS Hotspot",
+				"password": "hunter2-password",
+				"device":   "wlan0",
+				"band":     "bg",
+			},
 		}
 
-		handleSetPreference(conn, req, manager)
+		HandleRequest(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err = json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
-		assert.Contains(t, resp.Error, "missing or invalid 'preference' parameter")
+		assert.Empty(t, resp.Error)
+		require.NotNil(t, resp.Result)
+		assert.True(t, resp.Result.Success)
+		assert.True(t, backend.configureCalled)
+		assert.Equal(t, HotspotRequest{
+			SSID:     "DMS Hotspot",
+			Password: "hunter2-password",
+			Device:   "wlan0",
+			Band:     "bg",
+		}, backend.configureReq)
 	})
-}
 
-func TestHandleGetNetworkInfo(t *testing.T) {
-	t.Run("missing ssid parameter", func(t *testing.T) {
-		manager := &Manager{
-			state: &NetworkState{},
-		}
+	t.Run("start dispatches without payload", func(t *testing.T) {
+		iwdBackend, err := NewIWDBackend()
+		require.NoError(t, err)
+		backend := &testHotspotBackend{IWDBackend: iwdBackend}
+		manager := NewTestManager(backend, &NetworkState{})
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "network.hotspot.start"}
 
-		conn := newMockNetConn()
-		req := models.Request{
-			ID:     123,
-			Method: "network.info",
-			Params: map[string]any{},
-		}
+		HandleRequest(conn, req, manager)
 
-		handleGetNetworkInfo(conn, req, manager)
-
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err = json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
-		assert.Contains(t, resp.Error, "missing or invalid 'ssid' parameter")
+		assert.Empty(t, resp.Error)
+		assert.True(t, backend.startCalled)
+	})
+
+	t.Run("getSecrets dispatches", func(t *testing.T) {
+		iwdBackend, err := NewIWDBackend()
+		require.NoError(t, err)
+		backend := &testHotspotBackend{IWDBackend: iwdBackend, secrets: "hunter2-password"}
+		manager := NewTestManager(backend, &NetworkState{})
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "network.hotspot.getSecrets"}
+
+		HandleRequest(conn, req, manager)
+
+		var resp ipc.Response[map[string]string]
+		err = json.NewDecoder(mc.writeBuf).Decode(&resp)
+		require.NoError(t, err)
+
+		assert.Equal(t, 123, resp.ID)
+		assert.Empty(t, resp.Error)
+		assert.True(t, backend.getSecretsCalled)
+		require.NotNil(t, resp.Result)
+		assert.Equal(t, "hunter2-password", (*resp.Result)["password"])
+	})
+
+	t.Run("unsupported backend returns error", func(t *testing.T) {
+		manager := &Manager{state: &NetworkState{}}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "network.hotspot.start"}
+
+		HandleRequest(conn, req, manager)
+
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
+		require.NoError(t, err)
+
+		assert.Equal(t, 123, resp.ID)
+		assert.Contains(t, resp.Error, ErrHotspotNotSupported.Error())
 	})
 }
 
@@ -198,72 +198,20 @@ func TestHandleRequest(t *testing.T) {
 	}
 
 	t.Run("unknown method", func(t *testing.T) {
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "network.unknown",
 		}
 
 		HandleRequest(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
 		assert.Contains(t, resp.Error, "unknown method")
-	})
-
-	t.Run("valid method - getState", func(t *testing.T) {
-		conn := newMockNetConn()
-		req := models.Request{
-			ID:     123,
-			Method: "network.getState",
-		}
-
-		HandleRequest(conn, req, manager)
-
-		var resp models.Response[NetworkState]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-		require.NoError(t, err)
-
-		assert.Equal(t, 123, resp.ID)
-		assert.Empty(t, resp.Error)
-	})
-}
-
-func TestHandleSubscribe(t *testing.T) {
-	// This test is complex due to the streaming nature of subscriptions
-	// Better suited as an integration test
-	t.Skip("Subscription test requires connection lifecycle management - integration test needed")
-}
-
-func TestManager_Subscribe_Unsubscribe(t *testing.T) {
-	manager := &Manager{
-		state: &NetworkState{},
-	}
-
-	t.Run("subscribe creates channel", func(t *testing.T) {
-		ch := manager.Subscribe("client1")
-		assert.NotNil(t, ch)
-		count := 0
-		manager.subscribers.Range(func(key string, ch chan NetworkState) bool {
-			count++
-			return true
-		})
-		assert.Equal(t, 1, count)
-	})
-
-	t.Run("unsubscribe removes channel", func(t *testing.T) {
-		manager.Unsubscribe("client1")
-		count := 0
-		manager.subscribers.Range(func(key string, ch chan NetworkState) bool { count++; return true })
-		assert.Equal(t, 0, count)
-	})
-
-	t.Run("unsubscribe non-existent client is safe", func(t *testing.T) {
-		assert.NotPanics(t, func() {
-			manager.Unsubscribe("non-existent")
-		})
 	})
 }

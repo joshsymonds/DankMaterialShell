@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Format staged .qml files using qmlls (the Qt QML language server).
+"""Format staged .qml files using qmlls (the Qt QML language server) and
+staged .js files using the qmlformat CLI (qmlls never answers a formatting
+request for a JavaScript document; .mjs is not supported by qmlformat).
 
-Per file:
+Per .qml file:
   1. Speak LSP over stdio to qmlls: initialize -> didOpen -> formatting,
      apply returned edits, save, `git add`.
   2. Run qmllint on the formatted file and warn about unused imports
      (informational only — never modifies files).
+
+Per .js file: run `qmlformat <file>`, write its stdout back, `git add`.
 
 Refuses to run if any staged file also has unstaged changes, since `git add`
 would silently absorb those into the commit.
@@ -13,15 +17,20 @@ would silently absorb those into the commit.
 
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 
 TAB_SIZE = 4
+REQUEST_TIMEOUT = 30
 QMLLS_CANDIDATES = ["qmlls6", "qmlls"]
 QMLLINT_CANDIDATES = ["/usr/lib/qt6/bin/qmllint", "qmllint6", "qmllint"]
+QMLFORMAT_CANDIDATES = ["/usr/lib/qt6/bin/qmlformat", "qmlformat6", "qmlformat"]
+FORMATTED_SUFFIXES = (".qml", ".js")
 
 
 def git(*args, cwd=None):
@@ -38,9 +47,9 @@ def repo_root():
     return Path(git("rev-parse", "--show-toplevel").strip())
 
 
-def staged_qml_files(root):
+def staged_files(root):
     out = git("diff", "--cached", "--name-only", "--diff-filter=ACMR", cwd=root)
-    return [root / line for line in out.splitlines() if line.endswith(".qml")]
+    return [root / line for line in out.splitlines() if line.endswith(FORMATTED_SUFFIXES)]
 
 
 def has_unstaged_changes(root, file):
@@ -54,6 +63,28 @@ def find_qmlls():
         if path:
             return path
     return None
+
+
+def find_qmlformat():
+    for candidate in QMLFORMAT_CANDIDATES:
+        path = candidate if "/" in candidate and Path(candidate).is_file() else shutil.which(candidate)
+        if path:
+            return path
+    return None
+
+
+def format_js(qmlformat, file):
+    """Return qmlformat's output for a .js file, or None when it rejects the file."""
+    result = subprocess.run([qmlformat, str(file)], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def truncated(original, new_text):
+    """qmlls and qmlformat can succeed and still hand back an empty or gutted
+    document; writing that back destroys the file and stages the wreckage."""
+    return not new_text.strip() or len(new_text) < len(original) // 2
 
 
 def find_qmllint():
@@ -111,12 +142,19 @@ class LspClient:
             stderr=subprocess.DEVNULL,
         )
         self._next_id = 1
+        self._write_lock = threading.Lock()
+        self._responses = queue.Queue()
+        # Drain stdout continuously: qmlls floods publishDiagnostics (~100KB
+        # per file) and blocks once the 64KB pipe fills, deadlocking against
+        # our own blocking write of a large didOpen.
+        threading.Thread(target=self._pump, daemon=True).start()
 
     def _send(self, msg):
         body = json.dumps(msg).encode("utf-8")
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-        self.proc.stdin.write(header + body)
-        self.proc.stdin.flush()
+        with self._write_lock:
+            self.proc.stdin.write(header + body)
+            self.proc.stdin.flush()
 
     def _read(self):
         headers = {}
@@ -138,19 +176,39 @@ class LspClient:
             body += chunk
         return json.loads(body)
 
+    def _pump(self):
+        while True:
+            try:
+                msg = self._read()
+            except (RuntimeError, OSError, ValueError):
+                self._responses.put(None)
+                return
+            if "id" in msg and "method" in msg:
+                # Server-to-client request — reply with null so it doesn't stall.
+                try:
+                    self._send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+                except OSError:
+                    pass
+                continue
+            if "id" in msg and ("result" in msg or "error" in msg):
+                self._responses.put(msg)
+
     def request(self, method, params):
         req_id = self._next_id
         self._next_id += 1
         self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         while True:
-            msg = self._read()
-            if msg.get("id") == req_id and ("result" in msg or "error" in msg):
-                if "error" in msg:
-                    raise RuntimeError(f"LSP {method} error: {msg['error']}")
-                return msg.get("result")
-            if "id" in msg and "method" in msg:
-                # Server-to-client request — reply with null so it doesn't stall.
-                self._send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+            try:
+                msg = self._responses.get(timeout=REQUEST_TIMEOUT)
+            except queue.Empty:
+                raise RuntimeError(f"LSP {method} timed out after {REQUEST_TIMEOUT}s")
+            if msg is None:
+                raise RuntimeError("qmlls closed unexpectedly")
+            if msg.get("id") != req_id:
+                continue
+            if "error" in msg:
+                raise RuntimeError(f"LSP {method} error: {msg['error']}")
+            return msg.get("result")
 
     def notify(self, method, params):
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
@@ -195,11 +253,55 @@ def apply_edits(text, edits):
     return text
 
 
+def start_client(qmlls, root):
+    # quickshell's .qmlls.ini buildDir symlinks back into the tree, and qmlls then formats aliased files to nothing
+    client = LspClient([qmlls, "--ignore-settings"])
+    client.request("initialize", {
+        "processId": os.getpid(),
+        "rootUri": root.as_uri(),
+        "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
+        "capabilities": {
+            "textDocument": {
+                "formatting": {"dynamicRegistration": False},
+                "synchronization": {"dynamicRegistration": False},
+            },
+        },
+    })
+    client.notify("initialized", {})
+    return client
+
+
+def format_js_files(qmlformat, root, files):
+    changed = 0
+    skipped = 0
+    for file in files:
+        rel = file.relative_to(root)
+        print(f"  {rel} ... ", end="", flush=True)
+        original = file.read_text()
+        new_text = format_js(qmlformat, file)
+        if new_text is None:
+            skipped += 1
+            print("skipped (qmlformat rejected the file)")
+            continue
+        if truncated(original, new_text):
+            skipped += 1
+            print("skipped (qmlformat returned a truncated document)")
+            continue
+        if new_text == original:
+            print("unchanged")
+            continue
+        file.write_text(new_text)
+        git("add", "--", str(rel), cwd=root)
+        changed += 1
+        print("formatted & staged")
+    return changed, skipped
+
+
 def main():
     root = repo_root()
-    files = staged_qml_files(root)
+    files = staged_files(root)
     if not files:
-        print("No staged .qml files.")
+        print("No staged .qml or .js files.")
         return 0
 
     dirty = [f for f in files if has_unstaged_changes(root, f)]
@@ -210,6 +312,24 @@ def main():
         print("\nStash or stage those changes first.", file=sys.stderr)
         return 1
 
+    js_files = [f for f in files if f.suffix == ".js"]
+    files = [f for f in files if f.suffix == ".qml"]
+
+    changed = 0
+    skipped = 0
+    if js_files:
+        qmlformat = find_qmlformat()
+        if not qmlformat:
+            print(f"qmlformat not found (tried: {', '.join(QMLFORMAT_CANDIDATES)})", file=sys.stderr)
+            return 1
+        changed, skipped = format_js_files(qmlformat, root, js_files)
+
+    if not files:
+        print(f"\n{changed} of {len(js_files)} file(s) changed.")
+        if skipped:
+            print(f"{skipped} file(s) skipped (could not be formatted; see above).")
+        return 0
+
     qmlls = find_qmlls()
     if not qmlls:
         print(f"qmlls not found (tried: {', '.join(QMLLS_CANDIDATES)})", file=sys.stderr)
@@ -219,23 +339,9 @@ def main():
     if not qmllint:
         print("warning: qmllint with --json not found; skipping unused-import checks", file=sys.stderr)
 
-    client = LspClient([qmlls])
-    changed = 0
+    client = start_client(qmlls, root)
     unused_by_file = {}
     try:
-        client.request("initialize", {
-            "processId": os.getpid(),
-            "rootUri": root.as_uri(),
-            "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
-            "capabilities": {
-                "textDocument": {
-                    "formatting": {"dynamicRegistration": False},
-                    "synchronization": {"dynamicRegistration": False},
-                },
-            },
-        })
-        client.notify("initialized", {})
-
         for file in files:
             rel = file.relative_to(root)
             print(f"  {rel} ... ", end="", flush=True)
@@ -252,14 +358,40 @@ def main():
                 },
             })
 
-            edits = client.request("textDocument/formatting", {
-                "textDocument": {"uri": uri},
-                "options": {"tabSize": TAB_SIZE, "insertSpaces": True},
-            })
+            try:
+                edits = client.request("textDocument/formatting", {
+                    "textDocument": {"uri": uri},
+                    "options": {"tabSize": TAB_SIZE, "insertSpaces": True},
+                })
+            except (RuntimeError, OSError) as exc:
+                # qmlls (qmlformat's DOM) chokes on some valid files: it refuses
+                # them ("Cannot format invalid documents!") or outright crashes
+                # (e.g. SIGABRT on a function declaration inside a property
+                # binding). Don't let one file's formatter bug abort the commit.
+                skipped += 1
+                if client.proc.poll() is not None:
+                    print("skipped (qmlls crashed on this file; restarting it)")
+                    client = start_client(qmlls, root)
+                    continue
+                if "timed out" in str(exc):
+                    print("skipped (qmlls timed out on this file; restarting it)")
+                    client.proc.kill()
+                    client = start_client(qmlls, root)
+                    continue
+                client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+                if "invalid document" in str(exc).lower():
+                    print("skipped (qmlls rejected as invalid)")
+                else:
+                    print(f"skipped ({exc})")
+                continue
 
             client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
 
             new_text = apply_edits(original, edits or [])
+            if truncated(original, new_text):
+                skipped += 1
+                print("skipped (qmlls returned a truncated document)")
+                continue
             if new_text == original:
                 print("unchanged")
                 continue
@@ -275,7 +407,9 @@ def main():
                 if findings:
                     unused_by_file[file] = findings
 
-        print(f"\n{changed} of {len(files)} file(s) changed.")
+        print(f"\n{changed} of {len(files) + len(js_files)} file(s) changed.")
+        if skipped:
+            print(f"{skipped} file(s) skipped (could not be formatted; see above).")
 
         if unused_by_file:
             print("\nUnused import warnings (informational, not auto-removed):")

@@ -1,6 +1,6 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Rectangle {
     id: root
@@ -37,7 +37,7 @@ Rectangle {
     radius: Theme.cornerRadius
     color: Theme.withAlpha(statusColor, 0.08)
 
-    DankIcon {
+    DIcon {
         id: statusIcon
         anchors.left: parent.left
         anchors.leftMargin: Theme.spacingM
@@ -59,7 +59,7 @@ Rectangle {
             width: parent.width
             text: root.resultData?.name || ""
             font.pixelSize: Theme.fontSizeSmall
-            font.weight: Font.Medium
+            font.weight: Theme.fontWeightMedium
             color: Theme.surfaceText
             elide: Text.ElideRight
         }
@@ -82,7 +82,7 @@ Rectangle {
         height: Math.round(Theme.fontSizeSmall * 1.67)
         width: categoryText.implicitWidth + Theme.spacingS
         radius: Theme.spacingXS
-        color: Theme.surfaceContainerHighest
+        color: Theme.chipSurface
         visible: !!(root.resultData?.category)
 
         StyledText {
@@ -90,11 +90,12 @@ Rectangle {
             anchors.centerIn: parent
             text: root.resultData?.category || ""
             font.pixelSize: Theme.fontSizeSmall - 2
+            font.weight: Theme.fontWeightMedium
             color: Theme.surfaceVariantText
         }
     }
 
-    DankActionButton {
+    DActionButton {
         id: urlButton
         anchors.right: parent.right
         anchors.rightMargin: Theme.spacingM

@@ -4,21 +4,30 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland // ! Import is needed despite what qmlls says
 import qs.Common
 import qs.Services
+import "../Common/BlurStrength.js" as BlurStrength
 
 Singleton {
     id: root
     readonly property var log: Log.scoped("BlurService")
 
-    property bool quickshellSupported: false
     property bool compositorSupported: false
-    property bool available: quickshellSupported && compositorSupported
+    property bool _probed: false
+    property bool probed: false
+    readonly property bool available: compositorSupported
+    readonly property bool blurRequested: SettingsData.blurEnabled ?? false
+    onBlurRequestedChanged: {
+        if (blurRequested)
+            probe();
+    }
     readonly property bool enabled: available && (SettingsData.blurEnabled ?? false)
+    readonly property int defaultStrength: BlurStrength.defaultReach(CompositorService.configKey)
+    readonly property int strength: SettingsData.blurStrength || defaultStrength
 
+    // These settings predate non-blurred surface borders, so keep their keys for compatibility.
     readonly property color borderColor: {
-        if (!enabled)
+        if (!(SettingsData.blurBorderEnabled ?? false))
             return "transparent";
         const opacity = SettingsData.blurBorderOpacity ?? 0.35;
         switch (SettingsData.blurBorderColor ?? "outline") {
@@ -29,12 +38,12 @@ Singleton {
         case "surfaceText":
             return Theme.withAlpha(Theme.surfaceText, opacity);
         case "custom":
-            return Theme.withAlpha(SettingsData.blurBorderCustomColor ?? "#ffffff", opacity);
+            return Theme.withAlpha(Qt.color(SettingsData.blurBorderCustomColor ?? "#ffffff"), opacity);
         default:
             return Theme.withAlpha(Theme.outline, opacity);
         }
     }
-    readonly property int borderWidth: enabled ? 1 : 0
+    readonly property int borderWidth: (SettingsData.blurBorderEnabled ?? false) ? 1 : 0
 
     function hoverColor(baseColor, hoverAlpha) {
         if (!enabled)
@@ -42,39 +51,10 @@ Singleton {
         return Theme.withAlpha(baseColor, hoverAlpha ?? 0.15);
     }
 
-    function createBlurRegion(targetWindow) {
-        if (!available)
-            return null;
-
-        try {
-            const region = Qt.createQmlObject(`
-                import Quickshell
-                Region {}
-            `, targetWindow, "BlurRegion");
-            targetWindow.BackgroundEffect.blurRegion = region;
-            return region;
-        } catch (e) {
-            log.warn("Failed to create blur region:", e);
-            return null;
-        }
-    }
-
-    function reapplyBlurRegion(targetWindow, region) {
-        if (!region || !available)
-            return;
-        try {
-            targetWindow.BackgroundEffect.blurRegion = region;
-            region.changed();
-        } catch (e) {}
-    }
-
-    function destroyBlurRegion(targetWindow, region) {
-        if (!region)
-            return;
-        try {
-            targetWindow.BackgroundEffect.blurRegion = null;
-        } catch (e) {}
-        region.destroy();
+    Binding {
+        target: Theme
+        property: "blurLayersActive"
+        value: root.enabled
     }
 
     Process {
@@ -85,6 +65,7 @@ Singleton {
         stdout: StdioCollector {
             onStreamFinished: {
                 root.compositorSupported = text.trim() === "supported";
+                root.probed = true;
                 if (root.compositorSupported)
                     log.info("Compositor supports ext-background-effect-v1");
                 else
@@ -99,17 +80,14 @@ Singleton {
     }
 
     Component.onCompleted: {
-        try {
-            const test = Qt.createQmlObject(`
-                import Quickshell
-                Region { radius: 0 }
-            `, root, "BlurAvailabilityTest");
-            test.destroy();
-            quickshellSupported = true;
-            log.info("Quickshell blur support available");
-            blurProbe.running = true;
-        } catch (e) {
-            log.info("BackgroundEffect not available - blur disabled. Requires a newer version of Quickshell.");
-        }
+        if (blurRequested)
+            probe();
+    }
+
+    function probe() {
+        if (_probed)
+            return;
+        _probed = true;
+        blurProbe.running = true;
     }
 }

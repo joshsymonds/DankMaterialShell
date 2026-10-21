@@ -1,12 +1,13 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
 
-import QtCore
 import QtQuick
 import Qt.labs.folderlistmodel
 import Quickshell
+import Quickshell.Io
 import qs.Common
 import qs.Services
+import "../Common/PluginRanking.js" as PluginRanking
 
 Singleton {
     id: root
@@ -18,21 +19,27 @@ Singleton {
     property var pluginDaemonComponents: ({})
     property var pluginLauncherComponents: ({})
     property var pluginDesktopComponents: ({})
+    property var pluginDashComponents: ({})
+    property var pluginDashCardComponents: ({})
     property var availablePluginsList: []
-    property string pluginDirectory: {
-        var configDir = StandardPaths.writableLocation(StandardPaths.ConfigLocation);
-        var configDirStr = configDir.toString();
-        if (configDirStr.startsWith("file://")) {
-            configDirStr = configDirStr.substring(7);
-        }
-        return configDirStr + "/DankMaterialShell/plugins";
-    }
+    readonly property string pluginDirectory: Paths.strip(Paths.config) + "/plugins"
+
+    property bool pluginDirectoryExists: false
     property string systemPluginDirectory: "/etc/xdg/quickshell/dms-plugins"
+    readonly property string previewApiBase: Site.api + "/previews/"
 
     property var knownManifests: ({})
     property var pathToPluginId: ({})
     property var pluginInstances: ({})
+    property var pluginDaemonInstances: ({})
+    property var _daemonSpawnQueue: []
     property var globalVars: ({})
+    property var pluginLoadErrors: ({})
+    property var _componentRevisions: ({})
+    property var directoryModifiedTimes: ({})
+    property string pendingSettingsRevealPluginId: ""
+
+    property var _translationLoaders: ({})
 
     property var _stateCache: ({})
     property var _stateLoaded: ({})
@@ -45,6 +52,7 @@ Singleton {
     signal pluginLoadFailed(string pluginId, string error)
     signal pluginDataChanged(string pluginId)
     signal pluginStateChanged(string pluginId)
+    signal registryInstallFinished(string pluginId, bool success)
     signal pluginListUpdated
     signal globalVarChanged(string pluginId, string varName)
     signal requestLauncherUpdate(string pluginId)
@@ -63,10 +71,33 @@ Singleton {
         onTriggered: root._flushDirtyStates()
     }
 
+    // Zero-interval so daemons spawn on the next event-loop tick, after any
+    // deferred destroy() of a previous generation has fully unregistered its
+    // IpcHandlers (quickshell#898 leaves stale registrations otherwise)
+    Timer {
+        id: _daemonSpawnTimer
+        interval: 0
+        repeat: false
+        onTriggered: root._drainDaemonSpawnQueue()
+    }
+
+    Process {
+        id: directoryCheckProcess
+        command: ["test", "-d", root.pluginDirectory]
+        onExited: exitCode => {
+            root.pluginDirectoryExists = (exitCode === 0);
+        }
+    }
+
+    function checkPluginDirectoryExists() {
+        directoryCheckProcess.running = true;
+    }
+
     Component.onCompleted: {
         userWatcher.folder = Paths.toFileUrl(root.pluginDirectory);
         systemWatcher.folder = Paths.toFileUrl(root.systemPluginDirectory);
         Qt.callLater(resyncAll);
+        Qt.callLater(checkPluginDirectoryExists);
     }
 
     FolderListModel {
@@ -110,7 +141,9 @@ Singleton {
             const manifestPath = dirPath + "/plugin.json";
             out.push({
                 path: manifestPath,
-                source: sourceTag
+                source: sourceTag,
+                directory: dirPath,
+                modifiedAt: new Date(model.get(i, "fileModified")).getTime() || 0
             });
         }
         return out;
@@ -120,6 +153,10 @@ Singleton {
         const userList = snapshotModel(userWatcher, "user");
         const sysList = snapshotModel(systemWatcher, "system");
         const seenPaths = {};
+        const modifiedTimes = {};
+        for (const entry of userList.concat(sysList))
+            modifiedTimes[entry.directory] = entry.modifiedAt;
+        directoryModifiedTimes = modifiedTimes;
 
         function consider(entry) {
             const key = entry.path;
@@ -154,39 +191,165 @@ Singleton {
     }
 
     function loadPluginManifestFile(manifestPathNoScheme, sourceTag, mtimeEpochMs) {
-        const manifestId = "m_" + Math.random().toString(36).slice(2);
-        const qml = `
-            import QtQuick
-            import Quickshell.Io
-            FileView {
-                id: fv
-                property string absPath: ""
-                onLoaded: {
-                    try {
-                        let raw = text()
-                        if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1)
-                        const manifest = JSON.parse(raw)
-                        root._onManifestParsed(absPath, manifest, "${sourceTag}", ${mtimeEpochMs})
-                    } catch (e) {
-                        log.error("bad manifest", absPath, e.message)
-                        knownManifests[absPath] = { mtime: ${mtimeEpochMs}, source: "${sourceTag}", bad: true }
-                    }
-                    fv.destroy()
-                }
-                onLoadFailed: (err) => {
-                    log.warn("manifest load failed", absPath, err)
-                    fv.destroy()
-                }
-            }
-        `;
+        const loader = manifestFvComp.createObject(root, {
+            absPath: manifestPathNoScheme,
+            path: manifestPathNoScheme,
+            sourceTag: sourceTag,
+            mtimeEpochMs: mtimeEpochMs
+        });
+    }
 
-        const loader = Qt.createQmlObject(qml, root, "mf_" + manifestId);
-        loader.absPath = manifestPathNoScheme;
-        loader.path = manifestPathNoScheme;
+    Component {
+        id: manifestFvComp
+        FileView {
+            id: fv
+            property string absPath: ""
+            property string sourceTag: ""
+            property double mtimeEpochMs: 0
+            onLoaded: {
+                try {
+                    let raw = text();
+                    if (raw.charCodeAt(0) === 0xFEFF)
+                        raw = raw.slice(1);
+                    const manifest = JSON.parse(raw);
+                    root._onManifestParsed(absPath, manifest, sourceTag, mtimeEpochMs);
+                } catch (e) {
+                    root.log.error("bad manifest", absPath, e.message);
+                    root.knownManifests[absPath] = {
+                        mtime: mtimeEpochMs,
+                        source: sourceTag,
+                        bad: true
+                    };
+                }
+                fv.destroy();
+            }
+            onLoadFailed: err => {
+                // a directory without plugin.json is not a plugin, not a failed one (#3112)
+                if (err !== FileViewError.FileNotFound)
+                    root.log.warn("manifest load failed", absPath, err);
+                fv.destroy();
+            }
+        }
+    }
+
+    readonly property var pluginSurfaceKeys: ["widget", "desktop", "daemon", "launcher", "dash", "dashCard"]
+
+    Connections {
+        target: I18n
+        function onLocaleApplied() {
+            for (const pluginId in root.availablePlugins)
+                root._loadPluginTranslations(pluginId, root.availablePlugins[pluginId].pluginDirectory);
+        }
+    }
+
+    function _dropPluginTranslations(pluginId) {
+        const loader = _translationLoaders[pluginId];
+        if (loader) {
+            loader.destroy();
+            delete _translationLoaders[pluginId];
+        }
+        I18n.unregisterPluginTranslations(pluginId);
+    }
+
+    function _loadPluginTranslations(pluginId, dir) {
+        if (!dir)
+            return;
+        const loader = _translationLoaders[pluginId];
+        if (loader) {
+            loader.destroy();
+            delete _translationLoaders[pluginId];
+        }
+        const candidates = I18n.localeCandidates();
+        if (!candidates.length) {
+            I18n.unregisterPluginTranslations(pluginId);
+            return;
+        }
+        _tryTranslationCandidate(pluginId, dir, candidates, 0);
+    }
+
+    function _tryTranslationCandidate(pluginId, dir, candidates, index) {
+        if (index >= candidates.length) {
+            delete _translationLoaders[pluginId];
+            I18n.unregisterPluginTranslations(pluginId);
+            return;
+        }
+        _translationLoaders[pluginId] = translationFvComp.createObject(root, {
+            pluginId: pluginId,
+            dir: dir,
+            candidates: candidates,
+            index: index,
+            path: dir + "/translations/" + candidates[index] + ".json"
+        });
+    }
+
+    Component {
+        id: translationFvComp
+        FileView {
+            id: tfv
+            property string pluginId: ""
+            property string dir: ""
+            property var candidates: []
+            property int index: 0
+            printErrors: false
+            onLoaded: {
+                try {
+                    I18n.registerPluginTranslations(pluginId, JSON.parse(text()));
+                } catch (e) {
+                    root.log.warn("bad plugin translations", path, e.message);
+                    I18n.unregisterPluginTranslations(pluginId);
+                }
+                delete root._translationLoaders[pluginId];
+                tfv.destroy();
+            }
+            onLoadFailed: err => {
+                tfv.destroy();
+                root._tryTranslationCandidate(pluginId, dir, candidates, index + 1);
+            }
+        }
+    }
+
+    function _stripDotSlash(p) {
+        return p.startsWith("./") ? p.slice(2) : p;
+    }
+
+    function _deriveLegacySurface(type, capabilities) {
+        if (type === "daemon")
+            return "daemon";
+        if (type === "launcher" || (capabilities && capabilities.includes("launcher")))
+            return "launcher";
+        switch (type) {
+        case "desktop":
+        case "dash":
+        case "dashCard":
+            return type;
+        }
+        return "widget";
+    }
+
+    function _resolveComponentPaths(manifest, dir) {
+        const paths = {};
+        if (manifest.components && typeof manifest.components === "object") {
+            for (const surface in manifest.components) {
+                if (!pluginSurfaceKeys.includes(surface)) {
+                    log.warn("unknown plugin surface", surface, "in", dir);
+                    continue;
+                }
+                const rel = manifest.components[surface];
+                if (!rel)
+                    continue;
+                paths[surface] = dir + "/" + _stripDotSlash(rel);
+            }
+            return paths;
+        }
+        if (manifest.component) {
+            const surface = _deriveLegacySurface(manifest.type, manifest.capabilities);
+            paths[surface] = dir + "/" + _stripDotSlash(manifest.component);
+        }
+        return paths;
     }
 
     function _onManifestParsed(absPath, manifest, sourceTag, mtimeEpochMs) {
-        if (!manifest || !manifest.id || !manifest.name || !manifest.component) {
+        if (!manifest || !manifest.id || !manifest.name) {
             log.error("invalid manifest fields:", absPath);
             knownManifests[absPath] = {
                 mtime: mtimeEpochMs,
@@ -197,12 +360,24 @@ Singleton {
         }
 
         const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-        let comp = manifest.component;
-        if (comp.startsWith("./"))
-            comp = comp.slice(2);
         let settings = manifest.settings;
         if (settings && settings.startsWith("./"))
             settings = settings.slice(2);
+        let startupCheck = manifest.startupCheck;
+        if (startupCheck && startupCheck.startsWith("./"))
+            startupCheck = startupCheck.slice(2);
+
+        const componentPaths = _resolveComponentPaths(manifest, dir);
+        const surfaces = Object.keys(componentPaths);
+        if (surfaces.length === 0 && !manifest.lyrics?.command) {
+            log.error("no valid component surfaces in manifest:", absPath);
+            knownManifests[absPath] = {
+                mtime: mtimeEpochMs,
+                source: sourceTag,
+                bad: true
+            };
+            return;
+        }
 
         const info = {};
         for (const k in manifest)
@@ -219,10 +394,13 @@ Singleton {
 
         info.manifestPath = absPath;
         info.pluginDirectory = dir;
-        info.componentPath = dir + "/" + comp;
+        info.componentPaths = componentPaths;
+        info.surfaces = surfaces;
+        info.componentPath = componentPaths.widget || componentPaths[surfaces[0]];
         info.settingsPath = settings ? (dir + "/" + settings) : null;
+        info.startupCheckPath = startupCheck ? (dir + "/" + startupCheck) : null;
         info.loaded = isPluginLoaded(manifest.id);
-        info.type = manifest.type || "widget";
+        info.type = manifest.type || (manifest.components ? "composite" : "widget");
         info.source = sourceTag;
         info.requires_dms = manifest.requires_dms || null;
 
@@ -242,10 +420,12 @@ Singleton {
                 source: sourceTag
             };
             _updateAvailablePluginsList();
+            _loadPluginTranslations(manifest.id, dir);
+            const isPureDesktop = surfaces.length === 1 && surfaces[0] === "desktop";
+            const enabled = isPureDesktop || SettingsData.getPluginSetting(manifest.id, "enabled", false);
+            if (enabled && !info.loaded && !installingPlugins[manifest.id])
+                runStartupGate(manifest.id);
             pluginListUpdated();
-            const enabled = info.type === "desktop" || SettingsData.getPluginSetting(manifest.id, "enabled", false);
-            if (enabled && !info.loaded)
-                loadPlugin(manifest.id);
         } else {
             knownManifests[absPath] = {
                 mtime: mtimeEpochMs,
@@ -261,10 +441,50 @@ Singleton {
         if (current && current.manifestPath === absPath) {
             if (current.loaded)
                 unloadPlugin(pluginId);
+            _dropPluginTranslations(pluginId);
             const newMap = Object.assign({}, availablePlugins);
             delete newMap[pluginId];
             availablePlugins = newMap;
         }
+    }
+
+    function pluginComponentUrl(pluginId, path) {
+        if (!path)
+            return "";
+        const url = Paths.toFileUrl(path);
+        const revision = _componentRevisions[pluginId];
+        return revision ? url + "?revision=" + revision : url;
+    }
+
+    function _invalidatePluginComponents(pluginId) {
+        _componentRevisions = Object.assign({}, _componentRevisions, {
+            [pluginId]: (_componentRevisions[pluginId] || 0) + 1
+        });
+    }
+
+    function _preparePluginReload(pluginId) {
+        if (isPluginLoaded(pluginId) && !unloadPlugin(pluginId))
+            return false;
+        _invalidatePluginComponents(pluginId);
+        return true;
+    }
+
+    function updatePlugin(pluginId, callback) {
+        // Installed entries carry the registry's requires_dms, i.e. the version an update would fetch
+        const installed = (DMSService.installedPlugins || []).find(plugin => plugin.id === pluginId);
+        if (installed?.requires_dms && !checkPluginCompatibility(installed.requires_dms)) {
+            if (callback)
+                callback({
+                    error: I18n.tr("Requires DMS %1", "plugin incompatibility notice, %1 is the required DMS version").arg(installed.requires_dms)
+                });
+            return;
+        }
+        DMSService.update(pluginId, response => {
+            if (!response.error)
+                forceRescanPlugin(pluginId);
+            if (callback)
+                callback(response);
+        });
     }
 
     function loadPlugin(pluginId, bustCache) {
@@ -279,71 +499,131 @@ Singleton {
             return true;
         }
 
-        const isDaemon = plugin.type === "daemon";
-        const isLauncher = plugin.type === "launcher" || (plugin.capabilities && plugin.capabilities.includes("launcher"));
-        const isDesktop = plugin.type === "desktop";
-
-        const prevInstance = pluginInstances[pluginId];
-        if (prevInstance) {
-            prevInstance.destroy();
-            const newInstances = Object.assign({}, pluginInstances);
-            delete newInstances[pluginId];
-            pluginInstances = newInstances;
+        const componentPaths = plugin.componentPaths || {};
+        const surfaces = Object.keys(componentPaths);
+        if (surfaces.length === 0 && !plugin.lyrics?.command) {
+            log.error("Plugin has no component surfaces:", pluginId);
+            pluginLoadFailed(pluginId, "No component surfaces");
+            return false;
         }
 
-        try {
-            let url = "file://" + plugin.componentPath;
-            if (bustCache)
-                url += "?t=" + Date.now();
-            const comp = Qt.createComponent(url, Component.PreferSynchronous);
-            if (comp.status === Component.Error) {
-                log.error("component error", pluginId, comp.errorString());
-                pluginLoadFailed(pluginId, comp.errorString());
-                return false;
-            }
+        const newWidgets = Object.assign({}, pluginWidgetComponents);
+        const newDesktop = Object.assign({}, pluginDesktopComponents);
+        const newDaemons = Object.assign({}, pluginDaemonComponents);
+        const newLaunchers = Object.assign({}, pluginLauncherComponents);
+        const newDash = Object.assign({}, pluginDashComponents);
+        const newDashCards = Object.assign({}, pluginDashCardComponents);
+        const newInstances = Object.assign({}, pluginInstances);
+        const newDaemonInstances = Object.assign({}, pluginDaemonInstances);
 
-            if (isDaemon) {
-                const newDaemons = Object.assign({}, pluginDaemonComponents);
-                newDaemons[pluginId] = comp;
-                pluginDaemonComponents = newDaemons;
-            } else if (isLauncher) {
-                const instance = comp.createObject(root, {
-                    "pluginService": root
-                });
-                if (!instance) {
-                    log.error("failed to instantiate plugin:", pluginId, comp.errorString());
-                    pluginLoadFailed(pluginId, comp.errorString());
+        const prevInstance = newInstances[pluginId];
+        if (prevInstance) {
+            prevInstance.destroy();
+            delete newInstances[pluginId];
+        }
+        const prevDaemon = newDaemonInstances[pluginId];
+        if (prevDaemon) {
+            prevDaemon.destroy();
+            delete newDaemonInstances[pluginId];
+        }
+
+        if (bustCache)
+            _invalidatePluginComponents(pluginId);
+
+        try {
+            const comps = {};
+            for (const surface of surfaces) {
+                const url = pluginComponentUrl(pluginId, componentPaths[surface]);
+                // A parentless component dies with the first Loader that used it.
+                const comp = Qt.createComponent(url, Component.PreferSynchronous, root);
+                comps[surface] = comp;
+                if (comp.status === Component.Error) {
+                    const error = comp.errorString();
+                    log.error("component error", pluginId, surface, error);
+                    _destroyComponents(Object.values(comps));
+                    _setLoadError(pluginId, {
+                        title: error,
+                        details: ""
+                    });
+                    pluginLoadFailed(pluginId, error);
                     return false;
                 }
-                const newInstances = Object.assign({}, pluginInstances);
-                newInstances[pluginId] = instance;
-                pluginInstances = newInstances;
-
-                const newLaunchers = Object.assign({}, pluginLauncherComponents);
-                newLaunchers[pluginId] = comp;
-                pluginLauncherComponents = newLaunchers;
-            } else if (isDesktop) {
-                const newDesktop = Object.assign({}, pluginDesktopComponents);
-                newDesktop[pluginId] = comp;
-                pluginDesktopComponents = newDesktop;
-            } else {
-                const newComponents = Object.assign({}, pluginWidgetComponents);
-                newComponents[pluginId] = comp;
-                pluginWidgetComponents = newComponents;
             }
+
+            if (comps.launcher)
+                newLaunchers[pluginId] = comps.launcher;
+
+            if (comps.daemon) {
+                newDaemons[pluginId] = comps.daemon;
+                _daemonSpawnQueue.push(pluginId);
+                _daemonSpawnTimer.restart();
+            }
+
+            if (comps.widget)
+                newWidgets[pluginId] = comps.widget;
+            if (comps.desktop)
+                newDesktop[pluginId] = comps.desktop;
+            if (comps.dash)
+                newDash[pluginId] = comps.dash;
+            if (comps.dashCard)
+                newDashCards[pluginId] = comps.dashCard;
+
+            pluginWidgetComponents = newWidgets;
+            pluginDesktopComponents = newDesktop;
+            pluginDashComponents = newDash;
+            pluginDashCardComponents = newDashCards;
+            pluginDaemonComponents = newDaemons;
+            pluginLauncherComponents = newLaunchers;
+            pluginInstances = newInstances;
+            pluginDaemonInstances = newDaemonInstances;
 
             plugin.loaded = true;
             const newLoaded = Object.assign({}, loadedPlugins);
             newLoaded[pluginId] = plugin;
             loadedPlugins = newLoaded;
 
+            _clearLoadError(pluginId);
             pluginLoaded(pluginId);
             return true;
         } catch (e) {
             log.error("Error loading plugin:", pluginId, e.message);
+            _setLoadError(pluginId, {
+                title: e.message,
+                details: ""
+            });
             pluginLoadFailed(pluginId, e.message);
             return false;
         }
+    }
+
+    function _createDaemonInstance(pluginId, comp) {
+        const instance = comp.createObject(root, {
+            "pluginId": pluginId,
+            "pluginService": root
+        });
+        if (!instance) {
+            log.error("failed to instantiate daemon surface:", pluginId, comp.errorString());
+            return null;
+        }
+        if (instance.popoutService !== undefined)
+            instance.popoutService = PopoutService;
+        log.info("Daemon plugin loaded:", pluginId);
+        return instance;
+    }
+
+    function _drainDaemonSpawnQueue() {
+        const queue = _daemonSpawnQueue;
+        _daemonSpawnQueue = [];
+        const newDaemonInstances = Object.assign({}, pluginDaemonInstances);
+        for (const pluginId of queue) {
+            const comp = pluginDaemonComponents[pluginId];
+            if (!comp || !isPluginLoaded(pluginId) || newDaemonInstances[pluginId])
+                continue;
+            const daemon = _createDaemonInstance(pluginId, comp);
+            if (daemon)
+                newDaemonInstances[pluginId] = daemon;
+        }
+        pluginDaemonInstances = newDaemonInstances;
     }
 
     function unloadPlugin(pluginId) {
@@ -354,10 +634,7 @@ Singleton {
         }
 
         try {
-            const isDaemon = plugin.type === "daemon";
-            const isLauncher = plugin.type === "launcher" || (plugin.capabilities && plugin.capabilities.includes("launcher"));
-            const isDesktop = plugin.type === "desktop";
-
+            const components = [pluginDaemonComponents, pluginLauncherComponents, pluginDesktopComponents, pluginWidgetComponents, pluginDashComponents, pluginDashCardComponents].map(map => map[pluginId]).filter(comp => !!comp);
             const instance = pluginInstances[pluginId];
             if (instance) {
                 instance.destroy();
@@ -366,22 +643,43 @@ Singleton {
                 pluginInstances = newInstances;
             }
 
-            if (isDaemon && pluginDaemonComponents[pluginId]) {
+            const daemonInstance = pluginDaemonInstances[pluginId];
+            if (daemonInstance) {
+                daemonInstance.destroy();
+                const newDaemonInstances = Object.assign({}, pluginDaemonInstances);
+                delete newDaemonInstances[pluginId];
+                pluginDaemonInstances = newDaemonInstances;
+            }
+
+            if (pluginDaemonComponents[pluginId]) {
                 const newDaemons = Object.assign({}, pluginDaemonComponents);
                 delete newDaemons[pluginId];
                 pluginDaemonComponents = newDaemons;
-            } else if (isLauncher && pluginLauncherComponents[pluginId]) {
+            }
+            if (pluginLauncherComponents[pluginId]) {
                 const newLaunchers = Object.assign({}, pluginLauncherComponents);
                 delete newLaunchers[pluginId];
                 pluginLauncherComponents = newLaunchers;
-            } else if (isDesktop && pluginDesktopComponents[pluginId]) {
+            }
+            if (pluginDesktopComponents[pluginId]) {
                 const newDesktop = Object.assign({}, pluginDesktopComponents);
                 delete newDesktop[pluginId];
                 pluginDesktopComponents = newDesktop;
-            } else if (pluginWidgetComponents[pluginId]) {
+            }
+            if (pluginWidgetComponents[pluginId]) {
                 const newComponents = Object.assign({}, pluginWidgetComponents);
                 delete newComponents[pluginId];
                 pluginWidgetComponents = newComponents;
+            }
+            if (pluginDashComponents[pluginId]) {
+                const newDash = Object.assign({}, pluginDashComponents);
+                delete newDash[pluginId];
+                pluginDashComponents = newDash;
+            }
+            if (pluginDashCardComponents[pluginId]) {
+                const newDashCards = Object.assign({}, pluginDashCardComponents);
+                delete newDashCards[pluginId];
+                pluginDashCardComponents = newDashCards;
             }
 
             plugin.loaded = false;
@@ -389,6 +687,7 @@ Singleton {
             delete newLoaded[pluginId];
             loadedPlugins = newLoaded;
 
+            _destroyComponents(components);
             _cleanupPluginStateWriter(pluginId);
             pluginUnloaded(pluginId);
             return true;
@@ -396,6 +695,11 @@ Singleton {
             log.error("Error unloading plugin:", pluginId, "Error:", error.message);
             return false;
         }
+    }
+
+    function _destroyComponents(components) {
+        for (const comp of components)
+            comp.destroy();
     }
 
     function getWidgetComponents() {
@@ -408,6 +712,14 @@ Singleton {
 
     function getDesktopComponents() {
         return pluginDesktopComponents;
+    }
+
+    function getDashComponents() {
+        return pluginDashComponents;
+    }
+
+    function getDashCardComponents() {
+        return pluginDashCardComponents;
     }
 
     function getAvailablePlugins() {
@@ -435,7 +747,8 @@ Singleton {
         const result = [];
         for (const pluginId in availablePlugins) {
             const plugin = availablePlugins[pluginId];
-            if (plugin.type !== "widget") {
+            const hasWidgetSurface = plugin.surfaces ? plugin.surfaces.includes("widget") : (plugin.type === "widget");
+            if (!hasWidgetSurface) {
                 continue;
             }
             const variants = getPluginVariants(pluginId);
@@ -499,7 +812,7 @@ Singleton {
             return id !== widgetId;
         }
 
-        const defaultBar = SettingsData.barConfigs[0] || SettingsData.getBarConfig("default");
+        const defaultBar = SettingsData.getPrimaryBarConfig();
         if (!defaultBar)
             return;
         const leftWidgets = defaultBar.leftWidgets || [];
@@ -555,9 +868,102 @@ Singleton {
         return loadedPlugins[pluginId] !== undefined;
     }
 
-    function enablePlugin(pluginId) {
+    function enablePlugin(pluginId, onResult) {
         SettingsData.setPluginSetting(pluginId, "enabled", true);
-        return loadPlugin(pluginId);
+        return runStartupGate(pluginId, onResult);
+    }
+
+    function _setLoadError(pluginId, err) {
+        const m = Object.assign({}, pluginLoadErrors);
+        m[pluginId] = err;
+        pluginLoadErrors = m;
+    }
+
+    function _clearLoadError(pluginId) {
+        if (!pluginLoadErrors[pluginId])
+            return;
+        const m = Object.assign({}, pluginLoadErrors);
+        delete m[pluginId];
+        pluginLoadErrors = m;
+    }
+
+    function _normalizeStartupError(result) {
+        if (!result)
+            return null;
+        if (typeof result === "string")
+            return {
+                "title": result,
+                "details": ""
+            };
+        return {
+            "title": result.title || I18n.tr("Plugin dependency missing"),
+            "details": result.details || ""
+        };
+    }
+
+    function _makeStartupCheckObject(pluginId, plugin) {
+        const comp = Qt.createComponent(pluginComponentUrl(pluginId, plugin.startupCheckPath), Component.PreferSynchronous);
+        if (comp.status === Component.Error)
+            throw new Error(comp.errorString());
+        return comp.createObject(root);
+    }
+
+    function runStartupGate(pluginId, onResult) {
+        const plugin = availablePlugins[pluginId];
+        if (!plugin) {
+            if (onResult)
+                onResult(false);
+            return false;
+        }
+
+        if (!plugin.startupCheckPath) {
+            const ok = loadPlugin(pluginId);
+            if (onResult)
+                onResult(ok);
+            return ok;
+        }
+
+        let probe = null;
+        let settled = false;
+        const finish = result => {
+            if (settled)
+                return;
+            settled = true;
+            if (probe)
+                probe.destroy();
+            const err = _normalizeStartupError(result);
+            if (err) {
+                _setLoadError(pluginId, err);
+                const title = I18n.tr("%1 Startup Failed", "plugin error title, %1 is the plugin name").arg(plugin.name || pluginId);
+                const body = err.details ? (err.title + "\n\n" + err.details) : err.title;
+                if (!onResult)
+                    ToastService.showError(title, body, "", "plugin-startup-" + pluginId);
+                pluginLoadFailed(pluginId, err.title);
+                if (onResult)
+                    onResult(false);
+                return;
+            }
+            _clearLoadError(pluginId);
+            const ok = loadPlugin(pluginId);
+            if (onResult)
+                onResult(ok);
+        };
+
+        try {
+            probe = _makeStartupCheckObject(pluginId, plugin);
+            const check = probe?.check;
+            if (typeof check !== "function")
+                throw new Error("startupCheck has no check function");
+            if (check.length >= 1)
+                check(finish);
+            else
+                finish(check());
+        } catch (e) {
+            const message = String(e?.message || e);
+            log.warn("startupCheck failed for", pluginId, message);
+            finish(message);
+        }
+        return true;
     }
 
     function disablePlugin(pluginId) {
@@ -566,36 +972,48 @@ Singleton {
     }
 
     function reloadPlugin(pluginId) {
-        if (isPluginLoaded(pluginId))
-            unloadPlugin(pluginId);
-        return loadPlugin(pluginId, true);
+        if (!_preparePluginReload(pluginId))
+            return false;
+        const plugin = availablePlugins[pluginId];
+        if (plugin)
+            _loadPluginTranslations(pluginId, plugin.pluginDirectory);
+        return runStartupGate(pluginId);
+    }
+
+    function ensureLauncherInstance(pluginId) {
+        const existing = pluginInstances[pluginId];
+        if (existing)
+            return existing;
+        const comp = pluginLauncherComponents[pluginId];
+        if (!comp)
+            return null;
+        const instance = comp.createObject(root, {
+            "pluginService": root
+        });
+        if (!instance) {
+            log.error("failed to instantiate launcher surface:", pluginId, comp.errorString());
+            pluginLoadFailed(pluginId, comp.errorString());
+            return null;
+        }
+        const newInstances = Object.assign({}, pluginInstances);
+        newInstances[pluginId] = instance;
+        pluginInstances = newInstances;
+        return instance;
+    }
+
+    // !TODO: plugin API only; the launcher Controller now instantiates per query through ensureLauncherInstance
+    function ensureLauncherInstances() {
+        for (const pluginId in pluginLauncherComponents)
+            ensureLauncherInstance(pluginId);
     }
 
     function togglePlugin(pluginId) {
-        let instance = pluginInstances[pluginId];
-
-        // Lazy instantiate daemon plugins on first toggle
-        // This respects the daemon lifecycle (not instantiated on load)
-        // while supporting toggle functionality for slideout-capable daemons
-        if (!instance && pluginDaemonComponents[pluginId]) {
-            const comp = pluginDaemonComponents[pluginId];
-            const newInstance = comp.createObject(root, {
-                "pluginId": pluginId,
-                "pluginService": root
-            });
-            if (newInstance) {
-                const newInstances = Object.assign({}, pluginInstances);
-                newInstances[pluginId] = newInstance;
-                pluginInstances = newInstances;
-                instance = newInstance;
-            }
-        }
-
-        if (instance && typeof instance.toggle === "function") {
-            instance.toggle();
-            return true;
-        }
-        return false;
+        const launcherInstance = pluginLauncherComponents[pluginId] ? ensureLauncherInstance(pluginId) : null;
+        const instance = launcherInstance || pluginDaemonInstances[pluginId];
+        if (!instance || typeof instance.toggle !== "function")
+            return false;
+        instance.toggle();
+        return true;
     }
 
     function savePluginData(pluginId, key, value) {
@@ -613,10 +1031,6 @@ Singleton {
         if (!plugin)
             return "";
         return plugin.pluginDirectory || "";
-    }
-
-    function saveAllPluginSettings() {
-        SettingsData.savePluginSettings();
     }
 
     function getPluginStatePath(pluginId) {
@@ -670,10 +1084,10 @@ Singleton {
         _stateLoaded[pluginId] = true;
         _ensureStateDir();
         const path = getPluginStatePath(pluginId);
-        const escapedPath = path.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
         try {
-            const qml = 'import QtQuick; import Quickshell.Io; FileView { path: "' + escapedPath + '"; blockLoading: true; blockWrites: true; atomicWrites: true }';
-            const fv = Qt.createQmlObject(qml, root, "sf_" + pluginId);
+            const fv = stateLoadFvComp.createObject(root, {
+                path: path
+            });
             const raw = fv.text();
             if (raw && raw.trim()) {
                 _stateCache[pluginId] = JSON.parse(raw);
@@ -694,19 +1108,23 @@ Singleton {
             return;
         }
         const path = getPluginStatePath(pluginId);
-        const escapedPath = path.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
         try {
-            const qml = 'import QtQuick; import Quickshell.Io; FileView { path: "' + escapedPath + '"; blockWrites: true; atomicWrites: true }';
-            const fv = Qt.createQmlObject(qml, root, "sw_" + pluginId);
+            const fv = stateLoadFvComp.createObject(root, {
+                path: path
+            });
             _stateWriters[pluginId] = fv;
-            fv.loaded.connect(function () {
-                fv.setText(content);
-            });
-            fv.loadFailed.connect(function () {
-                fv.setText(content);
-            });
+            fv.setText(content);
         } catch (e) {
             log.warn("Failed to write state for", pluginId, e.message);
+        }
+    }
+
+    Component {
+        id: stateLoadFvComp
+        FileView {
+            blockLoading: true
+            blockWrites: true
+            atomicWrites: true
         }
     }
 
@@ -732,38 +1150,34 @@ Singleton {
         systemWatcher.folder = "";
         systemWatcher.folder = systemUrl;
         resyncDebounce.restart();
+        checkPluginDirectoryExists();
     }
 
     function forceRescanPlugin(pluginId) {
         const plugin = availablePlugins[pluginId];
-        if (plugin && plugin.manifestPath) {
-            const manifestPath = plugin.manifestPath;
-            const source = plugin.source || "user";
-            delete knownManifests[manifestPath];
-            const newMap = Object.assign({}, availablePlugins);
-            delete newMap[pluginId];
-            availablePlugins = newMap;
-            loadPluginManifestFile(manifestPath, source, Date.now());
+        if (!plugin || !plugin.manifestPath) {
+            return;
         }
+        const manifestPath = plugin.manifestPath;
+        const source = plugin.source || "user";
+        if (!_preparePluginReload(pluginId))
+            return;
+        delete knownManifests[manifestPath];
+        const newMap = Object.assign({}, availablePlugins);
+        delete newMap[pluginId];
+        availablePlugins = newMap;
+        loadPluginManifestFile(manifestPath, source, Date.now());
     }
 
     function createPluginDirectory() {
-        const mkdirProcess = Qt.createComponent("data:text/plain,import Quickshell.Io; Process { }");
-        if (mkdirProcess.status === Component.Ready) {
-            const process = mkdirProcess.createObject(root);
-            process.command = ["mkdir", "-p", pluginDirectory];
-            process.exited.connect(function (exitCode) {
-                if (exitCode !== 0) {
-                    log.error("Failed to create plugin directory, exit code:", exitCode);
-                }
-                process.destroy();
-            });
-            process.running = true;
-            return true;
-        } else {
-            log.error("Failed to create mkdir process");
-            return false;
-        }
+        Quickshell.execDetached(["mkdir", "-p", pluginDirectory]);
+        Qt.callLater(checkPluginDirectoryExists);
+        return true;
+    }
+
+    function openPluginDirectory() {
+        Qt.openUrlExternally(Paths.toFileUrl(pluginDirectory));
+        return true;
     }
 
     // Launcher plugin helper functions
@@ -858,6 +1272,311 @@ Singleton {
         globalVarChanged(pluginId, varName);
     }
 
+    function previewUrl(plugin) {
+        if (!plugin)
+            return "";
+        if (plugin.previewUrl)
+            return plugin.previewUrl;
+        if (plugin.id)
+            return previewApiBase + plugin.id;
+        return plugin.screenshot || "";
+    }
+
+    // 16:10 screenshot-only render; the full preview card bakes in title text the card already shows
+    function thumbUrl(plugin) {
+        if (!plugin)
+            return "";
+        if (plugin.thumbUrl)
+            return plugin.thumbUrl;
+        if (plugin.id)
+            return previewApiBase + plugin.id + "/thumb";
+        return "";
+    }
+
+    function heroUrl(plugin) {
+        if (!plugin)
+            return "";
+        return plugin.screenshot || previewUrl(plugin);
+    }
+
+    function statusTone(status) {
+        switch (status) {
+        case "broken":
+            return "error";
+        case "unmaintained":
+            return "warning";
+        case "reviewed":
+            return "info";
+        default:
+            return "outline";
+        }
+    }
+
+    function statusLabel(status) {
+        switch (status) {
+        case "broken":
+            return I18n.tr("broken", "plugin status");
+        case "unmaintained":
+            return I18n.tr("unmaintained", "plugin status");
+        case "deprecated":
+            return I18n.tr("deprecated", "plugin status");
+        case "reviewed":
+            return I18n.tr("reviewed", "plugin status");
+        default:
+            return status;
+        }
+    }
+
+    function badgeTone(tone) {
+        switch (tone) {
+        case "secondary":
+            return Theme.secondary;
+        case "warning":
+            return Theme.warning;
+        case "error":
+            return Theme.error;
+        case "info":
+            return Theme.info;
+        case "outline":
+            return Theme.outline;
+        default:
+            return Theme.primary;
+        }
+    }
+
+    function badgeModel(plugin) {
+        if (!plugin || (!plugin.id && !plugin.name))
+            return [];
+        var badges = [];
+        if (plugin.featured)
+            badges.push({
+                label: I18n.tr("featured", "adjective, lowercase plugin badge"),
+                icon: "star",
+                tone: "secondary"
+            });
+        if (plugin.firstParty)
+            badges.push({
+                label: I18n.tr("official", "adjective, lowercase first party plugin or registry badge"),
+                icon: "verified",
+                tone: "primary"
+            });
+        else
+            badges.push({
+                label: I18n.tr("3rd party"),
+                icon: "",
+                tone: "warning"
+            });
+        var recency = PluginRanking.recency(plugin);
+        if (recency)
+            badges.push({
+                label: recency === "new" ? I18n.tr("new", "adjective, lowercase plugin badge, recently added") : I18n.tr("updated", "adjective, lowercase plugin badge, recently updated"),
+                icon: recency === "new" ? "fiber_new" : "update",
+                tone: "secondary"
+            });
+        var status = plugin.status || [];
+        for (var i = 0; i < status.length; i++)
+            badges.push({
+                label: statusLabel(status[i]),
+                icon: "",
+                tone: statusTone(status[i])
+            });
+        return badges;
+    }
+
+    property var installingPlugins: ({})
+
+    // The plugin removed last ({id, name, wasEnabled}), kept a few seconds so the plugins page can offer to put it back.
+    property var lastUninstalledPlugin: null
+
+    Timer {
+        id: undoUninstallTimer
+        interval: 8000
+        onTriggered: root.lastUninstalledPlugin = null
+    }
+
+    // Only a registry plugin (one with a repo in the installed list) can be put back:
+    // a plugin the registry does not know would otherwise be swapped for another one.
+    function noteUninstalled(pluginId, pluginName, wasEnabled, repo) {
+        if (!repo) {
+            undoUninstallTimer.stop();
+            lastUninstalledPlugin = null;
+            return;
+        }
+        lastUninstalledPlugin = {
+            id: pluginId,
+            name: pluginName || pluginId,
+            wasEnabled: wasEnabled === true
+        };
+        undoUninstallTimer.restart();
+    }
+
+    function undoUninstall() {
+        const plugin = lastUninstalledPlugin;
+        if (!plugin)
+            return;
+        undoUninstallTimer.stop();
+        lastUninstalledPlugin = null;
+        installFromRegistry(plugin.id, plugin.name, plugin.wasEnabled);
+    }
+
+    // Plugin id -> id of the user's own +1 reaction on the registry issue, once a click has found or created it.
+    property var upvotedPlugins: ({})
+    // Plugin id -> what this session changed on top of the registry count (+1, 0 or -1).
+    property var upvoteDeltas: ({})
+    property var upvotingPlugins: ({})
+
+    function upvoteCount(plugin) {
+        return PluginRanking.upvoteCount(plugin.upvotes, upvoteDeltas[plugin.id]);
+    }
+
+    function _setUpvote(pluginId, reactionId, delta) {
+        const voted = Object.assign({}, upvotedPlugins);
+        if (reactionId)
+            voted[pluginId] = reactionId;
+        else
+            delete voted[pluginId];
+        upvotedPlugins = voted;
+        upvoteDeltas = Object.assign({}, upvoteDeltas, {
+            [pluginId]: delta
+        });
+    }
+
+    function _setUpvoting(pluginId, active) {
+        const pending = Object.assign({}, upvotingPlugins);
+        if (active)
+            pending[pluginId] = true;
+        else
+            delete pending[pluginId];
+        upvotingPlugins = pending;
+    }
+
+    // One click: a thumbs-up on the plugin's GitHub issue through the gh CLI when
+    // it is installed and signed in, otherwise the issue opens in the browser.
+    // One click votes, a second click on a vote takes it back. GitHub keeps one +1 per account.
+    function upvotePlugin(plugin) {
+        if (!plugin || !plugin.issueUrl || upvotingPlugins[plugin.id])
+            return;
+        const path = PluginRanking.issueReactionsPath(plugin.issueUrl);
+        if (!path) {
+            if (/^https:\/\//.test(plugin.issueUrl))
+                Qt.openUrlExternally(plugin.issueUrl);
+            return;
+        }
+        const pluginId = plugin.id;
+        const issueUrl = plugin.issueUrl;
+        const delta = upvoteDeltas[pluginId] || 0;
+        const ownReaction = upvotedPlugins[pluginId];
+        _setUpvoting(pluginId, true);
+        if (ownReaction) {
+            Proc.runCommand("plugin-upvote-" + pluginId, ["gh", "api", "--method", "DELETE", path + "/" + ownReaction], (output, exitCode) => {
+                _setUpvoting(pluginId, false);
+                if (exitCode !== 0) {
+                    root.log.warn("gh upvote removal failed", pluginId, exitCode);
+                    ToastService.showInfo(I18n.tr("Opening GitHub to remove the upvote", "plugin upvote toast, shown when the GitHub CLI is missing or signed out"));
+                    Qt.openUrlExternally(issueUrl);
+                    return;
+                }
+                _setUpvote(pluginId, 0, PluginRanking.nextUpvoteDelta(delta, true, false));
+                ToastService.showInfo(I18n.tr("Upvote removed", "plugin upvote toast"));
+            }, 0, 15000);
+            return;
+        }
+        Proc.runCommand("plugin-upvote-" + pluginId, ["gh", "api", "--include", "--method", "POST", path, "-f", "content=+1"], (output, exitCode) => {
+            _setUpvoting(pluginId, false);
+            const reactionId = exitCode === 0 ? PluginRanking.reactionId(output) : 0;
+            if (!reactionId) {
+                root.log.warn("gh upvote failed", pluginId, exitCode);
+                ToastService.showInfo(I18n.tr("Opening GitHub to upvote", "plugin upvote toast, shown when the GitHub CLI is missing or signed out"));
+                Qt.openUrlExternally(issueUrl);
+                return;
+            }
+            const added = /^HTTP\/\S+ 201/.test(output || "");
+            _setUpvote(pluginId, reactionId, PluginRanking.nextUpvoteDelta(delta, false, added));
+            ToastService.showInfo(added ? I18n.tr("Upvoted on GitHub", "plugin upvote toast") : I18n.tr("Already upvoted, click again to remove", "plugin upvote toast"));
+        }, 0, 15000);
+    }
+
+    Component {
+        id: installedPluginWaiter
+        Timer {
+            id: waiter
+            required property string pluginId
+            required property var done
+            interval: 10000
+            running: true
+
+            function complete() {
+                if (!root.availablePlugins[pluginId])
+                    return;
+                stop();
+                root.enablePlugin(pluginId, ok => {
+                    if (!ok) {
+                        const error = root.pluginLoadErrors[pluginId];
+                        const message = error ? [error.title, error.details].filter(Boolean).join("\n") : I18n.tr("Failed to enable plugin: %1", "plugin error message, %1 is the plugin name or id").arg(pluginId);
+                        done(false, message);
+                        destroy();
+                        return;
+                    }
+                    const plugin = root.availablePlugins[pluginId];
+                    if (plugin?.type === "desktop") {
+                        const config = DesktopWidgetRegistry.getDefaultConfig(pluginId);
+                        SettingsData.createDesktopWidgetInstance(pluginId, plugin.name || pluginId, config);
+                    }
+                    done(true, "");
+                    destroy();
+                });
+            }
+
+            onTriggered: {
+                done(false, I18n.tr("Installed plugin could not be loaded: %1", "plugin manifest unavailable after installation").arg(pluginId));
+                destroy();
+            }
+            Component.onCompleted: complete()
+            property Connections pluginChanges: Connections {
+                target: root
+                function onPluginListUpdated() {
+                    if (waiter.running)
+                        waiter.complete();
+                }
+            }
+        }
+    }
+
+    function installFromRegistry(pluginId, pluginName, enableAfterInstall, onDone) {
+        if (installingPlugins[pluginId])
+            return;
+        installingPlugins = Object.assign({}, installingPlugins, {
+            [pluginId]: true
+        });
+        const finish = (success, error) => {
+            const pending = Object.assign({}, installingPlugins);
+            delete pending[pluginId];
+            installingPlugins = pending;
+            registryInstallFinished(pluginId, success);
+            if (onDone) {
+                onDone(success, error);
+                return;
+            }
+            if (!success)
+                ToastService.showError(error);
+        };
+        DMSService.install(pluginId, response => {
+            if (response.error) {
+                finish(false, I18n.tr("Install failed: %1", "installation error").arg(response.error));
+                return;
+            }
+            scanPlugins();
+            if (!enableAfterInstall) {
+                finish(true, "");
+                return;
+            }
+            installedPluginWaiter.createObject(root, {
+                pluginId: pluginId,
+                done: finish
+            });
+        });
+    }
+
     function checkPluginCompatibility(requiresDms) {
         if (!requiresDms)
             return true;
@@ -873,5 +1592,69 @@ Singleton {
             }
         }
         return result;
+    }
+
+    readonly property string _ipcIdPattern: "^[a-zA-Z0-9_\\-:]{1,64}$"
+
+    IpcHandler {
+        target: "plugin-scan"
+
+        function scan(): string {
+            root.scanPlugins();
+            return `SCAN_TRIGGERED: ${Object.keys(root.availablePlugins).length} known before debounce`;
+        }
+
+        function rescan(pluginId: string): string {
+            if (!pluginId)
+                return "ERROR: rescan requires a pluginId";
+            if (!new RegExp(root._ipcIdPattern).test(pluginId))
+                return `ERROR: invalid pluginId '${pluginId}' (allowed: [a-zA-Z0-9_\\-:]{1,64})`;
+            if (!(pluginId in root.availablePlugins))
+                return `ERROR: unknown pluginId '${pluginId}' (try 'list' first)`;
+            root.forceRescanPlugin(pluginId);
+            return `RESCAN_TRIGGERED: ${pluginId}`;
+        }
+
+        function reload(pluginId: string): string {
+            if (!pluginId)
+                return "ERROR: reload requires a pluginId";
+            if (!new RegExp(root._ipcIdPattern).test(pluginId))
+                return `ERROR: invalid pluginId '${pluginId}' (allowed: [a-zA-Z0-9_\\-:]{1,64})`;
+            if (!(pluginId in root.availablePlugins))
+                return `ERROR: unknown pluginId '${pluginId}'`;
+            root.reloadPlugin(pluginId);
+            return `RELOAD_TRIGGERED: ${pluginId}`;
+        }
+
+        function list(): string {
+            const ids = Object.keys(root.availablePlugins);
+            const cap = 256;
+            const n = Math.min(ids.length, cap);
+            const lines = [];
+            for (let i = 0; i < n; i++) {
+                const id = ids[i];
+                if (!new RegExp(root._ipcIdPattern).test(id))
+                    continue;
+                const p = root.availablePlugins[id];
+                const safeName = String(p.name || "").replace(/[\t\n\r]/g, " ");
+                lines.push(`${id}\t${p.loaded ? "loaded" : "unloaded"}\t${p.type || "unknown"}\t${safeName}`);
+            }
+            const header = `# count=${ids.length} returned=${n}${ids.length > n ? " (truncated, see cap)" : ""}`;
+            return header + "\n" + lines.join("\n");
+        }
+
+        function status(pluginId: string): string {
+            if (!pluginId)
+                return "ERROR: status requires a pluginId";
+            if (!new RegExp(root._ipcIdPattern).test(pluginId))
+                return `ERROR: invalid pluginId '${pluginId}'`;
+            const plugin = root.availablePlugins[pluginId];
+            if (!plugin)
+                return `ERROR: unknown pluginId '${pluginId}'`;
+            const errObj = root.pluginLoadErrors[pluginId];
+            const err = errObj ? (errObj.title || "") : "";
+            const safeErr = String(err).replace(/[\t\n\r]/g, " ");
+            return `${plugin.loaded ? "loaded" : "unloaded"}\t${plugin.type || ""}\t${safeErr}`;
+        }
     }
 }

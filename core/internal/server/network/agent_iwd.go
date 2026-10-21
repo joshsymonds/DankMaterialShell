@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/errdefs"
+	"github.com/duxlabs-dev/dux-shell/core/internal/errdefs"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -22,13 +22,14 @@ type ConnectionStateChecker interface {
 }
 
 type IWDAgent struct {
-	conn            *dbus.Conn
-	objPath         dbus.ObjectPath
-	prompts         PromptBroker
-	onUserCanceled  func()
-	onPromptRetry   func(ssid string)
-	lastRequestSSID string
-	stateChecker    ConnectionStateChecker
+	conn              *dbus.Conn
+	objPath           dbus.ObjectPath
+	prompts           PromptBroker
+	onUserCanceled    func()
+	onPromptRetry     func(ssid string)
+	takePendingSecret func(ssid string) (string, bool)
+	lastRequestSSID   string
+	stateChecker      ConnectionStateChecker
 }
 
 const iwdAgentIntrospectXML = `
@@ -91,10 +92,13 @@ func NewIWDAgent(conn *dbus.Conn, prompts PromptBroker) (*IWDAgent, error) {
 }
 
 func (a *IWDAgent) Close() {
-	if a.conn != nil {
-		mgr := a.conn.Object("net.connman.iwd", dbus.ObjectPath(iwdAgentManagerPath))
-		mgr.Call(iwdAgentManagerIface+".UnregisterAgent", 0, a.objPath)
+	if a.conn == nil {
+		return
 	}
+	mgr := a.conn.Object("net.connman.iwd", dbus.ObjectPath(iwdAgentManagerPath))
+	mgr.Call(iwdAgentManagerIface+".UnregisterAgent", 0, a.objPath)
+	_ = a.conn.Export(nil, a.objPath, iwdAgentInterface)
+	_ = a.conn.Export(nil, a.objPath, "org.freedesktop.DBus.Introspectable")
 }
 
 func (a *IWDAgent) SetStateChecker(checker ConnectionStateChecker) {
@@ -119,6 +123,13 @@ func (a *IWDAgent) RequestPassphrase(network dbus.ObjectPath) (string, *dbus.Err
 		return "", dbus.NewError("net.connman.iwd.Agent.Error.Canceled", nil)
 	}
 
+	if a.takePendingSecret != nil {
+		if psk, ok := a.takePendingSecret(ssid); ok {
+			a.lastRequestSSID = ssid
+			return psk, nil
+		}
+	}
+
 	if a.prompts == nil {
 		if a.onUserCanceled != nil {
 			a.onUserCanceled()
@@ -126,12 +137,16 @@ func (a *IWDAgent) RequestPassphrase(network dbus.ObjectPath) (string, *dbus.Err
 		return "", dbus.NewError("net.connman.iwd.Agent.Error.Canceled", nil)
 	}
 
-	if a.lastRequestSSID == ssid {
-		if a.onPromptRetry != nil {
-			a.onPromptRetry(ssid)
-		}
+	retry := a.lastRequestSSID == ssid
+	if retry && a.onPromptRetry != nil {
+		a.onPromptRetry(ssid)
 	}
 	a.lastRequestSSID = ssid
+
+	reason := ""
+	if retry {
+		reason = "wrong-password"
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -139,6 +154,7 @@ func (a *IWDAgent) RequestPassphrase(network dbus.ObjectPath) (string, *dbus.Err
 	token, err := a.prompts.Ask(ctx, PromptRequest{
 		SSID:   ssid,
 		Fields: []string{"psk"},
+		Reason: reason,
 	})
 	if err != nil {
 		if a.onUserCanceled != nil {

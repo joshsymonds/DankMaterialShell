@@ -22,6 +22,19 @@ Singleton {
 
     property var wiredConnections: activeService?.wiredConnections ?? []
 
+    property string cellularIP: activeService?.cellularIP ?? ""
+    property string cellularInterface: activeService?.cellularInterface ?? ""
+    property bool cellularConnected: activeService?.cellularConnected ?? false
+    property bool cellularEnabled: activeService?.cellularEnabled ?? true
+    property bool cellularHardwareEnabled: activeService?.cellularHardwareEnabled ?? true
+    property string cellularConnectionUuid: activeService?.cellularConnectionUuid ?? ""
+    property var cellularDevices: activeService?.cellularDevices ?? []
+    property var cellularConnections: activeService?.cellularConnections ?? []
+    property bool cellularAvailable: activeService?.cellularAvailable ?? false
+    property int cellularSignalStrength: activeService?.cellularSignalStrength ?? 0
+    property string cellularAccessTech: activeService?.cellularAccessTech ?? ""
+    property string cellularSignalIcon: activeService?.cellularSignalIcon ?? "signal_cellular_off"
+
     property string wifiIP: activeService?.wifiIP ?? ""
     property string wifiInterface: activeService?.wifiInterface ?? ""
     property bool wifiConnected: activeService?.wifiConnected ?? false
@@ -42,6 +55,7 @@ Singleton {
 
     property string userPreference: activeService?.userPreference ?? "auto"
     property bool isConnecting: activeService?.isConnecting ?? false
+    readonly property bool isWifiConnecting: isConnecting && !ethernetConnected && !wifiToggling
     property string connectingSSID: activeService?.connectingSSID ?? ""
     property string connectionError: activeService?.connectionError ?? ""
 
@@ -50,9 +64,24 @@ Singleton {
 
     property bool wifiAvailable: activeService?.wifiAvailable ?? true
     property bool wifiToggling: activeService?.wifiToggling ?? false
+    property bool cellularToggling: activeService?.cellularToggling ?? false
     property bool changingPreference: activeService?.changingPreference ?? false
     property string targetPreference: activeService?.targetPreference ?? ""
     property var savedWifiNetworks: activeService?.savedWifiNetworks ?? []
+    readonly property int savedWifiStateApiVersion: activeService?.savedWifiStateApiVersion ?? 26
+    readonly property int hotspotApiVersion: activeService?.hotspotApiVersion ?? 28
+    property bool hotspotSupported: activeService?.hotspotSupported ?? false
+    property bool hotspotAvailable: activeService?.hotspotAvailable ?? false
+    property bool hotspotConfigured: activeService?.hotspotConfigured ?? false
+    property bool hotspotEnabled: activeService?.hotspotEnabled ?? false
+    property bool hotspotActivating: activeService?.hotspotActivating ?? false
+    property bool hotspotSecured: activeService?.hotspotSecured ?? false
+    property bool hotspotWouldDisconnectWifi: activeService?.hotspotWouldDisconnectWifi ?? false
+    property string hotspotSSID: activeService?.hotspotSSID ?? ""
+    property string hotspotDevice: activeService?.hotspotDevice ?? ""
+    property string hotspotBand: activeService?.hotspotBand ?? ""
+    property bool hotspotBusy: activeService?.hotspotBusy ?? false
+    property string hotspotError: activeService?.hotspotError ?? ""
     property string connectionStatus: activeService?.connectionStatus ?? ""
     property string lastConnectionError: activeService?.lastConnectionError ?? ""
     property bool passwordDialogShouldReopen: activeService?.passwordDialogShouldReopen ?? false
@@ -93,19 +122,26 @@ Singleton {
     signal connectionChanged
     signal credentialsNeeded(string token, string ssid, string setting, var fields, var hints, string reason, string connType, string connName, string vpnService, var fieldsInfo)
 
-    property bool usingLegacy: false
     property var activeService: null
 
     readonly property string socketPath: Quickshell.env("DMS_SOCKET")
 
+    // Backend adoption must be state-checked here, not only edge-triggered below:
+    // with staged shell loading this singleton can be instantiated after
+    // DMSNetworkService already resolved its capabilities, so the change signal
+    // may never fire again.
     Component.onCompleted: {
         log.info("Initializing...");
         if (!socketPath || socketPath.length === 0) {
-            log.info("DMS_SOCKET not set, using LegacyNetworkService");
-            useLegacyService();
-        } else {
-            log.debug("DMS_SOCKET found, waiting for capabilities...");
+            log.info("DMS_SOCKET not set, network backend unavailable");
+            return;
         }
+        if (DMSNetworkService.networkAvailable) {
+            log.info("Network capability already available, using DMSNetworkService");
+            useDMSService();
+            return;
+        }
+        log.debug("DMS_SOCKET found, waiting for capabilities...");
     }
 
     Connections {
@@ -114,24 +150,14 @@ Singleton {
         function onNetworkAvailableChanged() {
             if (!activeService && DMSNetworkService.networkAvailable) {
                 log.info("Network capability detected, using DMSNetworkService");
-                activeService = DMSNetworkService;
-                usingLegacy = false;
-                log.info("Switched to DMSNetworkService, networkAvailable:", networkAvailable);
-                connectSignals();
-            } else if (!activeService && !DMSNetworkService.networkAvailable && socketPath && socketPath.length > 0) {
-                log.info("Network capability not available in DMS, using LegacyNetworkService");
-                useLegacyService();
+                useDMSService();
             }
         }
     }
 
-    function useLegacyService() {
-        activeService = LegacyNetworkService;
-        usingLegacy = true;
-        log.info("Switched to LegacyNetworkService, networkAvailable:", networkAvailable);
-        if (LegacyNetworkService.activate) {
-            LegacyNetworkService.activate();
-        }
+    function useDMSService() {
+        activeService = DMSNetworkService;
+        log.info("Switched to DMSNetworkService, networkAvailable:", networkAvailable);
         connectSignals();
     }
 
@@ -179,9 +205,15 @@ Singleton {
         }
     }
 
-    function connectToWifi(ssid, password = "", username = "", anonymousIdentity = "", domainSuffixMatch = "") {
+    function refreshSavedWifiNetworks() {
+        if (activeService && activeService.refreshSavedWifiNetworks) {
+            activeService.refreshSavedWifiNetworks();
+        }
+    }
+
+    function connectToWifi(ssid, password = "", username = "", anonymousIdentity = "", domainSuffixMatch = "", hidden = false, eapMethod = "", phase2Auth = "") {
         if (activeService && activeService.connectToWifi) {
-            activeService.connectToWifi(ssid, password, username, anonymousIdentity, domainSuffixMatch);
+            activeService.connectToWifi(ssid, password, username, anonymousIdentity, domainSuffixMatch, hidden, eapMethod, phase2Auth);
         }
     }
 
@@ -203,6 +235,12 @@ Singleton {
         }
     }
 
+    function toggleCellularRadio() {
+        if (activeService && activeService.toggleCellularRadio) {
+            activeService.toggleCellularRadio();
+        }
+    }
+
     function enableWifiDevice() {
         if (activeService && activeService.enableWifiDevice) {
             activeService.enableWifiDevice();
@@ -215,18 +253,6 @@ Singleton {
         }
     }
 
-    function setConnectionPriority(type) {
-        if (activeService && activeService.setConnectionPriority) {
-            activeService.setConnectionPriority(type);
-        }
-    }
-
-    function connectToWifiAndSetPreference(ssid, password, username = "", anonymousIdentity = "", domainSuffixMatch = "") {
-        if (activeService && activeService.connectToWifiAndSetPreference) {
-            activeService.connectToWifiAndSetPreference(ssid, password, username, anonymousIdentity, domainSuffixMatch);
-        }
-    }
-
     function toggleNetworkConnection(type) {
         if (activeService && activeService.toggleNetworkConnection) {
             activeService.toggleNetworkConnection(type);
@@ -236,6 +262,24 @@ Singleton {
     function disconnectEthernetDevice(deviceName) {
         if (activeService && activeService.disconnectEthernetDevice) {
             activeService.disconnectEthernetDevice(deviceName);
+        }
+    }
+
+    function disconnectCellularDevice(deviceName) {
+        if (activeService && activeService.disconnectCellularDevice) {
+            activeService.disconnectCellularDevice(deviceName);
+        }
+    }
+
+    function connectCellular() {
+        if (activeService && activeService.connectCellular) {
+            activeService.connectCellular();
+        }
+    }
+
+    function connectToSpecificCellularConfig(uuid) {
+        if (activeService && activeService.connectToSpecificCellularConfig) {
+            activeService.connectToSpecificCellularConfig(uuid);
         }
     }
 
@@ -305,6 +349,48 @@ Singleton {
         if (activeService && activeService.setWifiAutoconnect) {
             activeService.setWifiAutoconnect(ssid, autoconnect);
         }
+    }
+
+    function configureHotspot(ssid, password = "", device = "", band = "", callback = null) {
+        if (activeService && activeService.configureHotspot) {
+            return activeService.configureHotspot(ssid, password, device, band, callback);
+        }
+        return false;
+    }
+
+    function startHotspot(callback = null) {
+        if (activeService && activeService.startHotspot) {
+            return activeService.startHotspot(callback);
+        }
+        return false;
+    }
+
+    function stopHotspot(callback = null) {
+        if (activeService && activeService.stopHotspot) {
+            return activeService.stopHotspot(callback);
+        }
+        return false;
+    }
+
+    function configureAndStartHotspot(ssid, password = "", device = "", band = "", callback = null) {
+        if (activeService && activeService.configureAndStartHotspot) {
+            return activeService.configureAndStartHotspot(ssid, password, device, band, callback);
+        }
+        return false;
+    }
+
+    function getHotspotSecrets(callback) {
+        if (activeService && activeService.getHotspotSecrets) {
+            return activeService.getHotspotSecrets(callback);
+        }
+        return false;
+    }
+
+    function hotspotTargetWouldDisconnectWifi(device, band = "") {
+        if (activeService && activeService.hotspotTargetWouldDisconnectWifi) {
+            return activeService.hotspotTargetWouldDisconnectWifi(device, band);
+        }
+        return false;
     }
 
     function setWifiDeviceOverride(deviceName) {

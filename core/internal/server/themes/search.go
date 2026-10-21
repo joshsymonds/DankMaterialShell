@@ -2,28 +2,27 @@ package themes
 
 import (
 	"fmt"
-	"net"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/themes"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/themes"
 )
 
-func HandleSearch(conn net.Conn, req models.Request) {
-	query, ok := models.Get[string](req, "query")
+func HandleSearch(conn *ipc.ConnWriter, req ipc.Request) {
+	query, ok := req.Get[string]("query")
 	if !ok {
-		models.RespondError(conn, req.ID, "missing or invalid 'query' parameter")
+		conn.RespondError(req.ID, "missing or invalid 'query' parameter")
 		return
 	}
 
 	registry, err := themes.NewRegistry()
 	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to create registry: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to create registry: %v", err))
 		return
 	}
 
 	themeList, err := registry.List()
 	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to list themes: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to list themes: %v", err))
 		return
 	}
 
@@ -31,7 +30,7 @@ func HandleSearch(conn net.Conn, req models.Request) {
 
 	manager, err := themes.NewManager()
 	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to create manager: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to create manager: %v", err))
 		return
 	}
 
@@ -46,8 +45,9 @@ func HandleSearch(conn net.Conn, req models.Request) {
 			Description: t.Description,
 			Installed:   installed,
 			FirstParty:  isFirstParty(t.Author),
+			WCAG:        t.WCAG,
 		}
 	}
 
-	models.Respond(conn, req.ID, result)
+	conn.Respond(req.ID, result)
 }

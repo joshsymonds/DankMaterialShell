@@ -6,11 +6,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/config"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/deps"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/distros"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/greeter"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/privesc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/config"
+	"github.com/duxlabs-dev/dux-shell/core/internal/deps"
+	"github.com/duxlabs-dev/dux-shell/core/internal/distros"
+	"github.com/duxlabs-dev/dux-shell/core/internal/privesc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/utils"
 )
 
 // ErrConfirmationRequired is returned when --yes is not set and the user
@@ -34,13 +34,20 @@ var orderedConfigNames = []string{"niri", "hyprland", "ghostty", "kitty", "alacr
 
 // Config holds all CLI parameters for unattended installation.
 type Config struct {
-	Compositor        string // "niri" or "hyprland"
-	Terminal          string // "ghostty", "kitty", or "alacritty"
+	Compositor        string   // "niri", "hyprland", or "mango"
+	Terminal          string   // "ghostty", "kitty", or "alacritty"
+	PrivescTool       string   // "sudo", "doas", or "run0"; empty means autodetect
+	GitAll            bool     // git variant for every dep that supports it
+	GitDeps           []string // deps to force the git variant of
+	AllFeatures       bool     // enable all optional deps
 	IncludeDeps       []string
 	ExcludeDeps       []string
 	ReplaceConfigs    []string // specific configs to deploy (e.g. "niri", "ghostty")
 	ReplaceConfigsAll bool     // deploy/replace all configurations
 	Yes               bool
+	DankSearch        bool // install danksearch and enable its user service
+	DankCalendar      bool // install dankcalendar
+	DmsGreeter        bool // install dms-greeter
 }
 
 // Runner orchestrates unattended (headless) installation.
@@ -65,6 +72,10 @@ func (r *Runner) GetLogChan() <-chan string {
 // Run executes the full unattended installation flow.
 func (r *Runner) Run() error {
 	r.log("Starting headless installation")
+
+	if err := r.applyPrivescTool(); err != nil {
+		return err
+	}
 
 	// 1. Parse compositor and terminal selections
 	wm, err := r.parseWindowManager()
@@ -110,14 +121,16 @@ func (r *Runner) Run() error {
 		return fmt.Errorf("dependency detection failed: %w", err)
 	}
 
+	reinstallItems, err := r.applyGitVariants(dependencies, gitVariantChecker(distro, wm, dependencies))
+	if err != nil {
+		return err
+	}
+
 	// 5. Apply include/exclude filters and build the disabled-items map.
-	// Headless mode does not currently collect any explicit reinstall selections,
-	// so keep reinstallItems nil instead of constructing an always-empty map.
 	disabledItems, err := r.buildDisabledItems(dependencies)
 	if err != nil {
 		return err
 	}
-	var reinstallItems map[string]bool
 
 	// Print dependency summary
 	fmt.Fprintln(os.Stdout, "\nDependencies:")
@@ -127,6 +140,9 @@ func (r *Runner) Run() error {
 		if disabledItems[dep.Name] {
 			marker = "  SKIP "
 			status = "(disabled)"
+		} else if reinstallItems[dep.Name] {
+			marker = "  RE   "
+			status = "(will reinstall)"
 		} else {
 			switch dep.Status {
 			case deps.StatusInstalled:
@@ -214,20 +230,34 @@ func (r *Runner) Run() error {
 		return fmt.Errorf("package installation failed: %w", err)
 	}
 
+	useSystemd := true
+	if distroConfig, exists := distros.Registry[osInfo.Distribution.ID]; exists && distroConfig.Family == distros.FamilyVoid {
+		useSystemd = false
+	}
+
 	// 9. Greeter setup (if dms-greeter was included)
 	if !disabledItems["dms-greeter"] && r.depExists(dependencies, "dms-greeter") {
-		compositorName := "niri"
-		if wm == deps.WindowManagerHyprland {
-			compositorName = "Hyprland"
-		}
 		fmt.Fprintln(os.Stdout, "Configuring DMS greeter...")
 		logFunc := func(line string) {
 			r.log(line)
 			fmt.Fprintf(os.Stdout, "  greeter: %s\n", line)
 		}
-		if err := greeter.AutoSetupGreeter(compositorName, sudoPassword, logFunc); err != nil {
+		if err := utils.RunDmsGreeterInstall(sudoPassword, logFunc); err != nil {
 			// Non-fatal, matching TUI behavior
 			fmt.Fprintf(os.Stderr, "Warning: greeter setup issue (non-fatal): %v\n", err)
+		}
+	}
+
+	// 9b. danksearch service setup (if danksearch was included)
+	if useSystemd && !disabledItems["danksearch"] && r.depExists(dependencies, "danksearch") {
+		fmt.Fprintln(os.Stdout, "Enabling danksearch service...")
+		logFunc := func(line string) {
+			r.log(line)
+			fmt.Fprintf(os.Stdout, "  danksearch: %s\n", line)
+		}
+		if err := distros.SetupDsearchService(context.Background(), logFunc); err != nil {
+			// Non-fatal, matching greeter behavior
+			fmt.Fprintf(os.Stderr, "Warning: danksearch service setup issue (non-fatal): %v\n", err)
 		}
 	}
 
@@ -236,13 +266,14 @@ func (r *Runner) Run() error {
 	r.log("Starting configuration deployment")
 
 	deployer := config.NewConfigDeployer(r.logChan)
-	results, err := deployer.DeployConfigurationsSelectiveWithReinstalls(
+	results, err := deployer.DeployConfigurationsSelectiveWithReinstallsAndSystemd(
 		context.Background(),
 		wm,
 		terminal,
 		dependencies,
 		replaceConfigs,
 		reinstallItems,
+		useSystemd,
 	)
 	if err != nil {
 		return fmt.Errorf("configuration deployment failed: %w", err)
@@ -266,18 +297,117 @@ func (r *Runner) Run() error {
 	return nil
 }
 
+func (r *Runner) applyPrivescTool() error {
+	if r.cfg.PrivescTool == "" {
+		return nil
+	}
+	switch tool := privesc.Tool(strings.ToLower(r.cfg.PrivescTool)); tool {
+	case privesc.ToolSudo, privesc.ToolDoas, privesc.ToolRun0:
+		if err := privesc.SetTool(tool); err != nil {
+			return fmt.Errorf("--privesc: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid --privesc value %q: must be 'sudo', 'doas', or 'run0'", r.cfg.PrivescTool)
+	}
+}
+
+// CanToggle is not enough: some distros discard the variant (hyprland on Arch maps to stable either way)
+func gitVariantChecker(distro distros.Distribution, wm deps.WindowManager, dependencies []deps.Dependency) func(name string) bool {
+	stable := distro.GetPackageMappingWithVariants(wm, map[string]deps.PackageVariant{})
+	allGit := make(map[string]deps.PackageVariant, len(dependencies))
+	for _, dep := range dependencies {
+		allGit[dep.Name] = deps.VariantGit
+	}
+	git := distro.GetPackageMappingWithVariants(wm, allGit)
+	return func(name string) bool {
+		mapping, ok := git[name]
+		return ok && mapping != stable[name]
+	}
+}
+
+func (r *Runner) applyGitVariants(dependencies []deps.Dependency, hasGitVariant func(name string) bool) (map[string]bool, error) {
+	reinstallItems := make(map[string]bool)
+
+	// InstallPackages skips StatusInstalled deps unless marked for reinstall
+	markGit := func(dep *deps.Dependency) {
+		if dep.Variant == deps.VariantStable && dep.Status != deps.StatusMissing {
+			reinstallItems[dep.Name] = true
+		}
+		dep.Variant = deps.VariantGit
+	}
+
+	for _, name := range r.cfg.GitDeps {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		dep := findDepFold(dependencies, name)
+		if dep == nil {
+			return nil, fmt.Errorf("--git-deps: unknown dependency %q", name)
+		}
+		if !dep.CanToggle || !hasGitVariant(dep.Name) {
+			return nil, fmt.Errorf("--git-deps: %q does not have a git variant on this distribution", dep.Name)
+		}
+		markGit(dep)
+	}
+
+	if !r.cfg.GitAll {
+		return reinstallItems, nil
+	}
+
+	for i := range dependencies {
+		if dependencies[i].CanToggle && hasGitVariant(dependencies[i].Name) {
+			markGit(&dependencies[i])
+		}
+	}
+	return reinstallItems, nil
+}
+
+func findDepFold(dependencies []deps.Dependency, lowerName string) *deps.Dependency {
+	if lowerName == "dms" {
+		lowerName = "dms (dux shell)"
+	}
+	for i := range dependencies {
+		if strings.ToLower(dependencies[i].Name) == lowerName {
+			return &dependencies[i]
+		}
+	}
+	return nil
+}
+
 // buildDisabledItems computes the set of dependencies that should be skipped
-// during installation, applying the --include-deps and --exclude-deps filters.
-// dms-greeter is disabled by default (opt-in), matching TUI behavior.
+// during installation. Optional components are opt-in (disabled by default),
+// then re-enabled by --all-features, the dedicated flags, and --include-deps.
 func (r *Runner) buildDisabledItems(dependencies []deps.Dependency) (map[string]bool, error) {
 	disabledItems := make(map[string]bool)
 
-	// dms-greeter is opt-in (disabled by default), matching TUI behavior
-	for i := range dependencies {
-		if dependencies[i].Name == "dms-greeter" {
-			disabledItems["dms-greeter"] = true
-			break
+	if !r.cfg.AllFeatures {
+		for i := range dependencies {
+			if !dependencies[i].Required {
+				disabledItems[dependencies[i].Name] = true
+			}
 		}
+	}
+
+	// Dedicated flags resolve before include/exclude
+	if r.cfg.DankSearch {
+		if !r.depExists(dependencies, "danksearch") {
+			return nil, fmt.Errorf("--danksearch: not available on this distribution")
+		}
+		delete(disabledItems, "danksearch")
+	}
+	if r.cfg.DankCalendar {
+		if !r.depExists(dependencies, "dankcalendar") {
+			return nil, fmt.Errorf("--dankcalendar: not available on this distribution")
+		}
+		delete(disabledItems, "dankcalendar")
+	}
+	if r.cfg.DmsGreeter {
+		if !r.depExists(dependencies, "dms-greeter") {
+			return nil, fmt.Errorf("--dms-greeter: not available on this distribution")
+		}
+		delete(disabledItems, "dms-greeter")
 	}
 
 	// Process --include-deps (enable items that are disabled by default)
@@ -302,7 +432,7 @@ func (r *Runner) buildDisabledItems(dependencies []deps.Dependency) (map[string]
 			return nil, fmt.Errorf("--exclude-deps: unknown dependency %q", name)
 		}
 		// Don't allow excluding DMS itself
-		if name == "dms (DankMaterialShell)" {
+		if name == "dms (Dux Shell)" {
 			return nil, fmt.Errorf("--exclude-deps: cannot exclude required package %q", name)
 		}
 		disabledItems[name] = true
@@ -364,8 +494,10 @@ func (r *Runner) parseWindowManager() (deps.WindowManager, error) {
 		return deps.WindowManagerNiri, nil
 	case "hyprland":
 		return deps.WindowManagerHyprland, nil
+	case "mango", "mangowc":
+		return deps.WindowManagerMango, nil
 	default:
-		return 0, fmt.Errorf("invalid --compositor value %q: must be 'niri' or 'hyprland'", r.cfg.Compositor)
+		return 0, fmt.Errorf("invalid --compositor value %q: must be 'niri', 'hyprland', or 'mango'", r.cfg.Compositor)
 	}
 }
 

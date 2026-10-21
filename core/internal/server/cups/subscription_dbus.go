@@ -5,10 +5,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/ipp"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/pkg/ipp"
 	"github.com/godbus/dbus/v5"
 )
+
+var cupsNotifierMatch = dbus.WithMatchInterface("org.cups.cupsd.Notifier")
 
 type DBusSubscriptionManager struct {
 	client         CUPSClientInterface
@@ -38,9 +40,11 @@ func (sm *DBusSubscriptionManager) Start() error {
 		return fmt.Errorf("subscription manager already running")
 	}
 	sm.running = true
+	// replaced here rather than in Stop(); see SubscriptionManager.Start()
+	sm.eventChan = make(chan SubscriptionEvent, 100)
 	sm.mu.Unlock()
 
-	conn, err := dbus.ConnectSystemBus()
+	conn, err := dbus.SystemBus()
 	if err != nil {
 		sm.mu.Lock()
 		sm.running = false
@@ -51,7 +55,6 @@ func (sm *DBusSubscriptionManager) Start() error {
 
 	subID, err := sm.createDBusSubscription()
 	if err != nil {
-		sm.conn.Close()
 		sm.mu.Lock()
 		sm.running = false
 		sm.mu.Unlock()
@@ -61,11 +64,8 @@ func (sm *DBusSubscriptionManager) Start() error {
 	sm.subscriptionID = subID
 	log.Infof("[CUPS] Created D-Bus subscription with ID %d", subID)
 
-	if err := sm.conn.AddMatchSignal(
-		dbus.WithMatchInterface("org.cups.cupsd.Notifier"),
-	); err != nil {
+	if err := sm.conn.AddMatchSignal(cupsNotifierMatch); err != nil {
 		sm.cancelSubscription()
-		sm.conn.Close()
 		sm.mu.Lock()
 		sm.running = false
 		sm.mu.Unlock()
@@ -252,6 +252,8 @@ func (sm *DBusSubscriptionManager) parseDBusSignal(sig *dbus.Signal) Subscriptio
 }
 
 func (sm *DBusSubscriptionManager) Events() <-chan SubscriptionEvent {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	return sm.eventChan
 }
 
@@ -273,11 +275,17 @@ func (sm *DBusSubscriptionManager) Stop() {
 	}
 
 	if sm.conn != nil {
-		sm.conn.Close()
+		_ = sm.conn.RemoveMatchSignal(cupsNotifierMatch)
 		sm.conn = nil
 	}
 
 	sm.stopChan = make(chan struct{})
+
+	// the writer (dbusListenerLoop) joined above, so closing is safe; see
+	// SubscriptionManager.Stop()
+	sm.mu.Lock()
+	close(sm.eventChan)
+	sm.mu.Unlock()
 }
 
 func (sm *DBusSubscriptionManager) cancelSubscription() {

@@ -2,11 +2,12 @@ import QtQuick
 import qs.Common
 import qs.Widgets
 
-DankPopout {
+DPopout {
     id: root
 
     layerNamespace: "dms:plugins:" + layerNamespacePlugin
 
+    property string pluginId: ""
     property var triggerScreen: null
     property Component pluginContent: null
     property real contentWidth: 400
@@ -23,9 +24,11 @@ DankPopout {
         Rectangle {
             id: popoutContainer
 
-            implicitHeight: popoutColumn.implicitHeight + Theme.spacingL * 2
+            implicitHeight: popoutColumn.implicitHeight + PopoutMetrics.contentPadding * 2
             color: "transparent"
             focus: true
+
+            readonly property bool rootShouldBeVisible: root.shouldBeVisible
 
             Component.onCompleted: {
                 if (root.shouldBeVisible) {
@@ -40,26 +43,24 @@ DankPopout {
                 }
             }
 
-            Connections {
-                target: root
-                function onShouldBeVisibleChanged() {
-                    if (root.shouldBeVisible) {
-                        Qt.callLater(() => {
-                            popoutContainer.forceActiveFocus();
-                        });
-                    }
+            onRootShouldBeVisibleChanged: {
+                if (rootShouldBeVisible) {
+                    Qt.callLater(() => {
+                        popoutContainer.forceActiveFocus();
+                    });
                 }
             }
 
             Column {
                 id: popoutColumn
-                width: parent.width - Theme.spacingS * 2
-                x: Theme.spacingS
-                y: Theme.spacingS
+                width: parent.width - PopoutMetrics.contentPadding * 2
+                x: PopoutMetrics.contentPadding
+                y: PopoutMetrics.contentPadding
                 spacing: Theme.spacingS
 
                 Loader {
                     id: popoutContentLoader
+                    property string pluginId: root.pluginId
                     width: parent.width
                     sourceComponent: root.pluginContent
 
@@ -73,7 +74,7 @@ DankPopout {
                             item.parentPopout = root;
                         }
                         if (item) {
-                            root.contentHeight = Qt.binding(() => item.implicitHeight + Theme.spacingS * 2);
+                            root.contentHeight = Qt.binding(() => item.implicitHeight + PopoutMetrics.contentPadding * 2);
                         }
                     }
                 }

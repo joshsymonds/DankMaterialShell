@@ -1,17 +1,16 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
-import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell
 import qs.Common
 import qs.Modals.Common
 import qs.Services
+import qs.DCommon.Widgets
 import qs.Widgets
 
-DankModal {
+DModal {
     id: muxModal
 
     layerNamespace: "dms:mux"
@@ -21,18 +20,18 @@ DankModal {
     property var filteredSessions: []
 
     function updateFilteredSessions() {
-        var filtered = []
-        var lowerSearch = searchText.trim().toLowerCase()
+        var filtered = [];
+        var lowerSearch = searchText.trim().toLowerCase();
         for (var i = 0; i < MuxService.sessions.length; i++) {
-            var session = MuxService.sessions[i]
+            var session = MuxService.sessions[i];
             if (lowerSearch.length > 0 && !session.name.toLowerCase().includes(lowerSearch))
-                continue
-            filtered.push(session)
+                continue;
+            filtered.push(session);
         }
-        filteredSessions = filtered
+        filteredSessions = filtered;
 
         if (selectedIndex >= filteredSessions.length) {
-            selectedIndex = Math.max(0, filteredSessions.length - 1)
+            selectedIndex = Math.max(0, filteredSessions.length - 1);
         }
     }
 
@@ -41,106 +40,97 @@ DankModal {
     Connections {
         target: MuxService
         function onSessionsChanged() {
-            updateFilteredSessions()
+            updateFilteredSessions();
         }
-    }
-
-    HyprlandFocusGrab {
-        id: grab
-        windows: [muxModal.contentWindow]
-        active: CompositorService.isHyprland && muxModal.shouldHaveFocus
     }
 
     function toggle() {
         if (shouldBeVisible) {
-            hide()
+            hide();
         } else {
-            show()
+            show();
         }
     }
 
     function show() {
-        open()
-        selectedIndex = -1
-        searchText = ""
-        MuxService.refreshSessions()
-        shouldHaveFocus = true
+        open();
+        selectedIndex = -1;
+        searchText = "";
+        MuxService.refreshSessions();
+        shouldHaveFocus = true;
 
         Qt.callLater(() => {
             if (muxPanel && muxPanel.searchField) {
                 muxPanel.searchField.forceActiveFocus();
             }
-        })
+        });
     }
 
     function hide() {
-        close()
-        selectedIndex = -1
-        searchText = ""
+        close();
+        selectedIndex = -1;
+        searchText = "";
     }
 
     function attachToSession(name) {
-        MuxService.attachToSession(name)
-        hide()
+        MuxService.attachToSession(name);
+        hide();
     }
 
     function renameSession(name) {
         inputModal.showWithOptions({
             title: I18n.tr("Rename Session"),
-            message: I18n.tr("Enter a new name for session \"%1\"").arg(name),
+            message: I18n.tr("Enter a new name for session \"%1\"", "rename session dialog, %1 is the current session name").arg(name),
             initialText: name,
             onConfirm: function (newName) {
-                MuxService.renameSession(name, newName)
+                MuxService.renameSession(name, newName);
             }
-        })
+        });
     }
 
     function killSession(name) {
         confirmModal.showWithOptions({
             title: I18n.tr("Kill Session"),
-            message: I18n.tr("Are you sure you want to kill session \"%1\"?").arg(name),
-            confirmText: I18n.tr("Kill"),
+            message: I18n.tr("Are you sure you want to kill session \"%1\"?", "kill session confirmation, %1 is the session name").arg(name),
+            confirmText: I18n.tr("Kill", "verb, terminate a multiplexer session"),
             confirmColor: Theme.primary,
             onConfirm: function () {
-                MuxService.killSession(name)
+                MuxService.killSession(name);
             }
-        })
+        });
     }
 
     function createNewSession() {
         inputModal.showWithOptions({
             title: I18n.tr("New Session"),
-            message: I18n.tr("Please write a name for your new %1 session").arg(MuxService.displayName),
+            message: I18n.tr("Please write a name for your new %1 session", "new session dialog, %1 is the terminal multiplexer name").arg(MuxService.displayName),
             onConfirm: function (name) {
-                MuxService.createSession(name)
-                hide()
+                MuxService.createSession(name);
+                hide();
             }
-        })
+        });
     }
 
     function selectNext() {
-        selectedIndex = Math.min(selectedIndex + 1, filteredSessions.length - 1)
+        selectedIndex = Math.min(selectedIndex + 1, filteredSessions.length - 1);
     }
 
     function selectPrevious() {
-        selectedIndex = Math.max(selectedIndex - 1, -1)
+        selectedIndex = Math.max(selectedIndex - 1, -1);
     }
 
     function activateSelected() {
         if (selectedIndex === -1) {
-            createNewSession()
+            createNewSession();
         } else if (selectedIndex >= 0 && selectedIndex < filteredSessions.length) {
-            attachToSession(filteredSessions[selectedIndex].name)
+            attachToSession(filteredSessions[selectedIndex].name);
         }
     }
 
     visible: false
     modalWidth: 600
     modalHeight: 600
-    backgroundColor: Theme.withAlpha(Theme.surfaceContainer, Theme.popupTransparency)
-    cornerRadius: Theme.cornerRadius
-    borderColor: Theme.outlineMedium
-    borderWidth: 1
+    backgroundColor: Theme.floatingWindowSurface
     enableShadow: true
     keepContentLoaded: true
 
@@ -155,18 +145,18 @@ DankModal {
 
     IpcHandler {
         function open(): string {
-            muxModal.show()
-            return "MUX_OPEN_SUCCESS"
+            muxModal.show();
+            return "MUX_OPEN_SUCCESS";
         }
 
         function close(): string {
-            muxModal.hide()
-            return "MUX_CLOSE_SUCCESS"
+            muxModal.hide();
+            return "MUX_CLOSE_SUCCESS";
         }
 
         function toggle(): string {
-            muxModal.toggle()
-            return "MUX_TOGGLE_SUCCESS"
+            muxModal.toggle();
+            return "MUX_TOGGLE_SUCCESS";
         }
 
         target: "mux"
@@ -175,18 +165,18 @@ DankModal {
     // Backwards compatibility
     IpcHandler {
         function open(): string {
-            muxModal.show()
-            return "TMUX_OPEN_SUCCESS"
+            muxModal.show();
+            return "TMUX_OPEN_SUCCESS";
         }
 
         function close(): string {
-            muxModal.hide()
-            return "TMUX_CLOSE_SUCCESS"
+            muxModal.hide();
+            return "TMUX_CLOSE_SUCCESS";
         }
 
         function toggle(): string {
-            muxModal.toggle()
-            return "TMUX_TOGGLE_SUCCESS"
+            muxModal.toggle();
+            return "TMUX_TOGGLE_SUCCESS";
         }
 
         target: "tmux"
@@ -248,33 +238,31 @@ DankModal {
         property alias searchField: searchField
 
         Keys.onPressed: event => {
-            if ((event.key === Qt.Key_J && (event.modifiers & Qt.ControlModifier)) ||
-                (event.key === Qt.Key_Down)) {
-                selectNext()
-                event.accepted = true
-            } else if ((event.key === Qt.Key_K && (event.modifiers & Qt.ControlModifier)) ||
-                    (event.key === Qt.Key_Up)) {
-                selectPrevious()
-                event.accepted = true
+            if ((event.key === Qt.Key_J && (event.modifiers & Qt.ControlModifier)) || (event.key === Qt.Key_Down)) {
+                selectNext();
+                event.accepted = true;
+            } else if ((event.key === Qt.Key_K && (event.modifiers & Qt.ControlModifier)) || (event.key === Qt.Key_Up)) {
+                selectPrevious();
+                event.accepted = true;
             } else if (event.key === Qt.Key_N && (event.modifiers & Qt.ControlModifier)) {
-                createNewSession()
-                event.accepted = true
+                createNewSession();
+                event.accepted = true;
             } else if (event.key === Qt.Key_R && (event.modifiers & Qt.ControlModifier)) {
                 if (MuxService.supportsRename && selectedIndex >= 0 && selectedIndex < filteredSessions.length) {
-                    renameSession(filteredSessions[selectedIndex].name)
+                    renameSession(filteredSessions[selectedIndex].name);
                 }
-                event.accepted = true
+                event.accepted = true;
             } else if (event.key === Qt.Key_D && (event.modifiers & Qt.ControlModifier)) {
                 if (selectedIndex >= 0 && selectedIndex < filteredSessions.length) {
-                    killSession(filteredSessions[selectedIndex].name)
+                    killSession(filteredSessions[selectedIndex].name);
                 }
-                event.accepted = true
+                event.accepted = true;
             } else if (event.key === Qt.Key_Escape) {
-                hide()
-                event.accepted = true
+                hide();
+                event.accepted = true;
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                activateSelected()
-                event.accepted = true
+                activateSelected();
+                event.accepted = true;
             }
         }
 
@@ -294,9 +282,8 @@ DankModal {
                     anchors.left: parent.left
                     anchors.leftMargin: Theme.spacingS
                     anchors.verticalCenter: parent.verticalCenter
-                    text: I18n.tr("%1 Sessions").arg(MuxService.displayName)
+                    text: I18n.tr("%1 Sessions", "session manager title, %1 is the terminal multiplexer name").arg(MuxService.displayName)
                     font.pixelSize: Theme.fontSizeLarge + 4
-                    font.weight: Font.Bold
                     color: Theme.surfaceText
                 }
 
@@ -307,12 +294,8 @@ DankModal {
                     text: {
                         const total = MuxService.sessions.length;
                         const filtered = muxModal.filteredSessions.length;
-                        const activePart = total === 1
-                            ? I18n.tr("%1 active session").arg(total)
-                            : I18n.tr("%1 active sessions").arg(total);
-                        const filteredPart = filtered === 1
-                            ? I18n.tr("%1 filtered").arg(filtered)
-                            : I18n.tr("%1 filtered").arg(filtered);
+                        const activePart = total === 1 ? I18n.tr("%1 active session", "singular, %1 is 1, multiplexer session count").arg(total) : I18n.tr("%1 active sessions", "plural, %1 is a count of multiplexer sessions").arg(total);
+                        const filteredPart = filtered === 1 ? I18n.tr("%1 filtered", "%1 is a count of sessions matching the search").arg(filtered) : I18n.tr("%1 filtered").arg(filtered);
                         return activePart + ", " + filteredPart;
                     }
                     font.pixelSize: Theme.fontSizeMedium
@@ -321,27 +304,18 @@ DankModal {
             }
 
             // Search field
-            DankTextField {
+            DSearchField {
                 id: searchField
 
                 width: parent.width
                 height: 48
-                cornerRadius: Theme.cornerRadius
-                backgroundColor: Theme.surfaceContainerHigh
-                normalBorderColor: Theme.outlineMedium
-                focusedBorderColor: Theme.primary
-                leftIconName: "search"
-                leftIconSize: Theme.iconSize
-                leftIconColor: Theme.surfaceVariantText
-                leftIconFocusedColor: Theme.primary
-                showClearButton: true
                 font.pixelSize: Theme.fontSizeMedium
                 placeholderText: I18n.tr("Search sessions...")
                 keyForwardTargets: [muxPanel]
 
                 onTextEdited: {
-                    muxModal.searchText = text
-                    muxModal.selectedIndex = 0
+                    muxModal.searchText = text;
+                    muxModal.selectedIndex = 0;
                 }
             }
 
@@ -350,8 +324,9 @@ DankModal {
                 width: parent.width
                 height: 56
                 radius: Theme.cornerRadius
-                color: muxModal.selectedIndex === -1 ? Theme.primaryContainer :
-                        (newMouse.containsMouse ? Theme.surfaceContainerHigh : Theme.surfaceContainer)
+                color: muxModal.selectedIndex === -1 ? Theme.selectedContainer : (newMouse.containsMouse ? Theme.foregroundColor(Theme.chipSurface, true) : Theme.floatingWindowNestedSurface)
+                border.width: Theme.layerOutlineWidth
+                border.color: Theme.outlineMedium
 
                 RowLayout {
                     anchors.fill: parent
@@ -362,30 +337,30 @@ DankModal {
                     Rectangle {
                         Layout.preferredWidth: 40
                         Layout.preferredHeight: 40
-                        radius: 20
+                        radius: Theme.fullRadius(width, height)
                         color: Theme.primaryContainer
 
-                        DankIcon {
+                        DIcon {
                             anchors.centerIn: parent
                             name: "add"
                             size: Theme.iconSize
-                            color: Theme.primary
+                            color: Theme.accentOnPrimaryContainer
                         }
                     }
 
                     Column {
                         Layout.fillWidth: true
-                        spacing: 2
+                        spacing: Theme.spacingXXS
 
                         StyledText {
                             text: I18n.tr("New Session")
                             font.pixelSize: Theme.fontSizeMedium
-                            font.weight: Font.Medium
+                            font.weight: Theme.fontWeightMedium
                             color: Theme.surfaceText
                         }
 
                         StyledText {
-                            text: I18n.tr("Create a new %1 session (n)").arg(MuxService.displayName)
+                            text: I18n.tr("Create a new %1 session (^N)", "button label, %1 is the terminal multiplexer name").arg(MuxService.displayName)
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.surfaceVariantText
                         }
@@ -408,11 +383,13 @@ DankModal {
                 radius: Theme.cornerRadius
                 color: "transparent"
 
-                ScrollView {
+                DFlickable {
                     anchors.fill: parent
                     clip: true
+                    contentHeight: sessionsColumn.height
 
                     Column {
+                        id: sessionsColumn
                         width: parent.width
                         spacing: Theme.spacingXS
 
@@ -428,8 +405,9 @@ DankModal {
                                 width: parent.width
                                 height: 64
                                 radius: Theme.cornerRadius
-                                color: muxModal.selectedIndex === index ? Theme.primaryContainer :
-                                        (sessionMouse.containsMouse ? Theme.surfaceContainerHigh : "transparent")
+                                color: muxModal.selectedIndex === index ? Theme.selectedContainer : (sessionMouse.containsMouse ? Theme.cardSurface : Theme.withAlpha(Theme.cardSurface, 0))
+                                border.width: muxModal.selectedIndex === index || sessionMouse.containsMouse ? Theme.layerOutlineWidth : 0
+                                border.color: Theme.outlineMedium
 
                                 MouseArea {
                                     id: sessionMouse
@@ -449,40 +427,38 @@ DankModal {
                                     Rectangle {
                                         Layout.preferredWidth: 40
                                         Layout.preferredHeight: 40
-                                        radius: 20
-                                        color: modelData.attached ? Theme.primaryContainer : Theme.surfaceContainerHigh
+                                        radius: Theme.fullRadius(width, height)
+                                        color: modelData.attached ? Theme.primaryContainer : Theme.chipSurface
 
                                         StyledText {
                                             anchors.centerIn: parent
                                             text: modelData.name.charAt(0).toUpperCase()
                                             font.pixelSize: Theme.fontSizeLarge
-                                            font.weight: Font.Bold
-                                            color: modelData.attached ? Theme.primary : Theme.surfaceText
+                                            font.weight: Theme.fontWeightMedium
+                                            color: modelData.attached ? Theme.accentOnPrimaryContainer : Theme.surfaceText
                                         }
                                     }
 
                                     // Info
                                     Column {
                                         Layout.fillWidth: true
-                                        spacing: 2
+                                        spacing: Theme.spacingXXS
 
                                         StyledText {
                                             text: modelData.name
                                             font.pixelSize: Theme.fontSizeMedium
-                                            font.weight: Font.Medium
+                                            font.weight: Theme.fontWeightMedium
                                             color: Theme.surfaceText
                                             elide: Text.ElideRight
                                         }
 
                                         StyledText {
                                             text: {
-                                                var parts = []
+                                                var parts = [];
                                                 if (modelData.windows !== "N/A")
-                                                    parts.push(modelData.windows === 1
-                                                        ? I18n.tr("%1 window").arg(modelData.windows)
-                                                        : I18n.tr("%1 windows").arg(modelData.windows))
-                                                parts.push(modelData.attached ? I18n.tr("attached") : I18n.tr("detached"))
-                                                return parts.join(" \u2022 ")
+                                                    parts.push(modelData.windows === 1 ? I18n.tr("%1 window", "singular, %1 is 1, windows in a multiplexer session").arg(modelData.windows) : I18n.tr("%1 windows", "plural, %1 is a count of windows in a multiplexer session").arg(modelData.windows));
+                                                parts.push(modelData.attached ? I18n.tr("attached", "multiplexer session state, a client is attached") : I18n.tr("detached", "multiplexer session state, no client attached"));
+                                                return parts.join(" \u2022 ");
                                             }
                                             font.pixelSize: Theme.fontSizeSmall
                                             color: Theme.surfaceVariantText
@@ -491,13 +467,15 @@ DankModal {
 
                                     // Rename button (tmux only)
                                     Rectangle {
+                                        Accessible.role: Accessible.Button
+                                        Accessible.name: I18n.tr("Rename")
                                         Layout.preferredWidth: 36
                                         Layout.preferredHeight: 36
-                                        radius: 18
+                                        radius: Theme.fullRadius(width, height)
                                         visible: MuxService.supportsRename
-                                        color: renameMouse.containsMouse ? Theme.surfaceContainerHighest : "transparent"
+                                        color: renameMouse.containsMouse ? Theme.chipSurface : Theme.withAlpha(Theme.chipSurface, 0)
 
-                                        DankIcon {
+                                        DIcon {
                                             anchors.centerIn: parent
                                             name: "edit"
                                             size: Theme.iconSizeSmall
@@ -515,12 +493,14 @@ DankModal {
 
                                     // Delete button
                                     Rectangle {
+                                        Accessible.role: Accessible.Button
+                                        Accessible.name: I18n.tr("Delete")
                                         Layout.preferredWidth: 36
                                         Layout.preferredHeight: 36
-                                        radius: 18
-                                        color: deleteMouse.containsMouse ? Theme.errorContainer : "transparent"
+                                        radius: Theme.fullRadius(width, height)
+                                        color: deleteMouse.containsMouse ? Theme.errorContainer : Theme.withAlpha(Theme.errorContainer, 0)
 
-                                        DankIcon {
+                                        DIcon {
                                             anchors.centerIn: parent
                                             name: "delete"
                                             size: Theme.iconSizeSmall
@@ -533,7 +513,7 @@ DankModal {
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
                                             onClicked: {
-                                                muxModal.killSession(modelData.name)
+                                                muxModal.killSession(modelData.name);
                                             }
                                         }
                                     }
@@ -551,7 +531,7 @@ DankModal {
                                 anchors.centerIn: parent
                                 spacing: Theme.spacingM
 
-                                DankIcon {
+                                DIcon {
                                     name: muxModal.searchText.length > 0 ? "search_off" : "terminal"
                                     size: 48
                                     color: Theme.surfaceVariantText
@@ -559,14 +539,14 @@ DankModal {
                                 }
 
                                 StyledText {
-                                    text: muxModal.searchText.length > 0 ? I18n.tr("No sessions found") : I18n.tr("No active %1 sessions").arg(MuxService.displayName)
+                                    text: muxModal.searchText.length > 0 ? I18n.tr("No sessions found") : I18n.tr("No active %1 sessions", "empty state, %1 is the terminal multiplexer name").arg(MuxService.displayName)
                                     font.pixelSize: Theme.fontSizeMedium
                                     color: Theme.surfaceVariantText
                                     anchors.horizontalCenter: parent.horizontalCenter
                                 }
 
                                 StyledText {
-                                    text: muxModal.searchText.length > 0 ? I18n.tr("Try a different search") : I18n.tr("Press 'n' or click 'New Session' to create one")
+                                    text: muxModal.searchText.length > 0 ? I18n.tr("Try a different search") : I18n.tr("Press Ctrl+N or click 'New Session' to create one")
                                     font.pixelSize: Theme.fontSizeSmall
                                     color: Theme.surfaceVariantText
                                     anchors.horizontalCenter: parent.horizontalCenter
@@ -577,55 +557,40 @@ DankModal {
                 }
             }
 
-            // Shortcuts bar
-            Row {
+            DKeyHints {
                 id: shortcutsBar
+
                 width: parent.width
-                spacing: Theme.spacingM
-                bottomPadding: Theme.spacingS
-
-                Repeater {
-                    model: {
-                        var shortcuts = [
-                            { key: "↑↓", label: I18n.tr("Navigate") },
-                            { key: "↵", label: I18n.tr("Attach") },
-                            { key: "^N", label: I18n.tr("New") },
-                            { key: "^D", label: I18n.tr("Kill") },
-                            { key: "Esc", label: I18n.tr("Close") }
-                        ]
-                        if (MuxService.supportsRename)
-                            shortcuts.splice(3, 0, { key: "^R", label: I18n.tr("Rename") })
-                        return shortcuts
-                    }
-
-                    delegate: Row {
-                        required property var modelData
-                        spacing: 4
-
-                        Rectangle {
-                            width: keyText.width + Theme.spacingS
-                            height: keyText.height + 4
-                            radius: 4
-                            color: Theme.surfaceContainerHighest
-                            anchors.verticalCenter: parent.verticalCenter
-
-                            StyledText {
-                                id: keyText
-                                anchors.centerIn: parent
-                                text: modelData.key
-                                font.pixelSize: Theme.fontSizeSmall - 1
-                                font.weight: Font.Medium
-                                color: Theme.surfaceVariantText
-                            }
+                height: implicitHeight + Theme.spacingS
+                hints: {
+                    const shortcuts = [
+                        {
+                            keys: ["Up", "Down"],
+                            label: I18n.tr("Navigate", "verb, keyboard shortcut hint for arrow keys")
+                        },
+                        {
+                            keys: ["Return"],
+                            label: I18n.tr("Attach", "verb, shortcut hint, attach to the selected multiplexer session")
+                        },
+                        {
+                            keys: ["Ctrl+N"],
+                            label: I18n.tr("New", "adjective, shortcut or button that creates a new session or note")
+                        },
+                        {
+                            keys: ["Ctrl+D"],
+                            label: I18n.tr("Kill")
+                        },
+                        {
+                            keys: ["Escape"],
+                            label: I18n.tr("Close")
                         }
-
-                        StyledText {
-                            text: modelData.label
-                            font.pixelSize: Theme.fontSizeSmall
-                            color: Theme.surfaceVariantText
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                    }
+                    ];
+                    if (MuxService.supportsRename)
+                        shortcuts.splice(3, 0, {
+                            keys: ["Ctrl+R"],
+                            label: I18n.tr("Rename")
+                        });
+                    return shortcuts;
                 }
             }
         }

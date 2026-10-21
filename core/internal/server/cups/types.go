@@ -2,11 +2,12 @@ package cups
 
 import (
 	"io"
+	"net"
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/ipp"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/syncmap"
+	"github.com/duxlabs-dev/dux-shell/core/pkg/ipp"
 )
 
 type CUPSState struct {
@@ -79,6 +80,7 @@ type Manager struct {
 	client            CUPSClientInterface
 	pkHelper          PkHelper
 	subscription      SubscriptionManagerInterface
+	subLifecycleMu    sync.Mutex
 	stateMutex        sync.RWMutex
 	subscribers       syncmap.Map[string, chan CUPSState]
 	stopChan          chan struct{}
@@ -88,6 +90,7 @@ type Manager struct {
 	lastNotifiedState *CUPSState
 	baseURL           string
 	probeRemoteFn     func(host string, port int, useTLS bool) (*RemotePrinterInfo, error)
+	dialFn            func(network, addr string, timeout time.Duration) (net.Conn, error)
 }
 
 type SubscriptionManagerInterface interface {

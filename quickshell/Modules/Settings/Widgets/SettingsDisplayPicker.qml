@@ -3,104 +3,76 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import qs.Common
-import qs.Widgets
 
-Item {
+Column {
     id: root
 
     property var displayPreferences: []
+    property bool emptyMeansAll: true
+    property bool allowEmpty: false
+    property bool showLastDisplay: false
+    property bool showOnLastDisplay: false
+    property bool allowHideOnLastDisplay: false
+    property bool hideOnLastDisplay: false
+    readonly property bool localAllDisplays: !Array.isArray(displayPreferences) || displayPreferences.includes("all") || (emptyMeansAll && displayPreferences.length === 0)
 
-    signal preferencesChanged(var preferences)
-
-    property bool localAllDisplays: true
-
-    onDisplayPreferencesChanged: {
-        if (!Array.isArray(displayPreferences) || displayPreferences.length === 0) {
-            localAllDisplays = true;
-            return;
-        }
-        localAllDisplays = displayPreferences.includes("all");
-    }
+    // A callback, not a signal: Qt 6.12 hands signal array parameters over as a V4Sequence that fails Array.isArray.
+    property var preferencesHandler: null
+    signal lastDisplayToggled(bool checked)
+    signal hideOnLastDisplayToggled(bool checked)
 
     width: parent?.width ?? 0
-    height: displayColumn.height + Theme.spacingM * 2
+    spacing: Theme.groupedListGap
 
-    Column {
-        id: displayColumn
-        width: parent.width - Theme.spacingM * 2
-        x: Theme.spacingM
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: Theme.spacingM
+    function screenPref(screen) {
+        const pref = {
+            name: screen.name,
+            model: screen.model || ""
+        };
+        const modelIndex = SettingsData.getScreenModelIndex(screen);
+        if (modelIndex >= 0)
+            pref.modelIndex = modelIndex;
+        return pref;
+    }
 
-        StyledText {
-            text: I18n.tr("Displays")
-            font.pixelSize: Theme.fontSizeMedium
-            color: Theme.surfaceText
-        }
+    SettingsToggleRow {
+        text: I18n.tr("All displays")
+        checked: root.localAllDisplays
+        onToggled: checked => root.preferencesHandler?.(checked ? ["all"] : Quickshell.screens.map(screen => root.screenPref(screen)))
+    }
 
-        DankToggle {
-            width: parent.width
-            text: I18n.tr("All displays")
-            checked: root.localAllDisplays
-            onToggled: isChecked => {
-                root.localAllDisplays = isChecked;
-                if (isChecked) {
-                    root.preferencesChanged(["all"]);
+    SettingsToggleRow {
+        text: I18n.tr("Show on last display")
+        visible: root.showLastDisplay
+        enabled: !root.localAllDisplays
+        checked: root.showOnLastDisplay
+        onToggled: checked => root.lastDisplayToggled(checked)
+    }
+
+    SettingsToggleRow {
+        text: I18n.tr("Hide on last display", "bar display assignment option")
+        visible: root.allowHideOnLastDisplay
+        checked: root.hideOnLastDisplay
+        onToggled: checked => root.hideOnLastDisplayToggled(checked)
+    }
+
+    Repeater {
+        model: Quickshell.screens
+
+        SettingsToggleRow {
+            required property var modelData
+
+            text: SettingsData.getScreenDisplayName(modelData)
+            description: modelData.width + "×" + modelData.height + " · " + (SettingsData.displayNameMode === "system" ? (modelData.model || I18n.tr("Unknown Model")) : modelData.name)
+            enabled: !root.localAllDisplays
+            checked: root.localAllDisplays || SettingsData.isScreenInPreferences(modelData, root.displayPreferences)
+            onToggled: checked => {
+                const prefs = (Array.isArray(root.displayPreferences) ? root.displayPreferences : []).filter(pref => pref !== "all" && !SettingsData.isScreenInPreferences(modelData, [pref]));
+                if (checked)
+                    prefs.push(root.screenPref(modelData));
+                if (!root.allowEmpty && prefs.length === 0)
                     return;
-                }
-                var screens = [];
-                for (var i = 0; i < Quickshell.screens.length; i++) {
-                    var s = Quickshell.screens[i];
-                    screens.push({
-                        name: s.name,
-                        model: s.model || ""
-                    });
-                }
-                root.preferencesChanged(screens);
-            }
-        }
-
-        Column {
-            width: parent.width
-            spacing: Theme.spacingXS
-            visible: !root.localAllDisplays
-
-            Repeater {
-                model: Quickshell.screens
-
-                DankToggle {
-                    required property var modelData
-
-                    property bool localChecked: {
-                        const prefs = root.displayPreferences;
-                        if (!Array.isArray(prefs) || prefs.includes("all"))
-                            return true;
-                        return prefs.some(p => p.name === modelData.name);
-                    }
-
-                    width: parent.width
-                    text: SettingsData.getScreenDisplayName(modelData)
-                    description: modelData.width + "×" + modelData.height
-                    checked: localChecked
-                    onToggled: isChecked => {
-                        var prefs = JSON.parse(JSON.stringify(root.displayPreferences));
-                        if (!Array.isArray(prefs) || prefs.includes("all"))
-                            prefs = [];
-                        prefs = prefs.filter(p => p.name !== modelData.name);
-                        if (isChecked) {
-                            prefs.push({
-                                name: modelData.name,
-                                model: modelData.model || ""
-                            });
-                        }
-                        if (prefs.length === 0) {
-                            localChecked = true;
-                            return;
-                        }
-                        localChecked = isChecked;
-                        root.preferencesChanged(prefs);
-                    }
-                }
+                root.preferencesHandler?.(prefs);
             }
         }
     }

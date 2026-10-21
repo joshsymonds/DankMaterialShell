@@ -1,9 +1,7 @@
 import QtQuick
-import qs.Common
+import qs.DCommon.Common as DCommon
 
-// Reusable ColorAnimation wrapper
-ColorAnimation {
-    duration: Theme.expressiveDurations.normal
-    easing.type: Easing.BezierSpline
-    easing.bezierCurve: Theme.expressiveCurves.standard
+DCommon.DColorAnim {
+    id: shim
+    Component.onCompleted: Deprecation.type(shim, "DankColorAnim", "DColorAnim", "qs.DCommon.Common")
 }

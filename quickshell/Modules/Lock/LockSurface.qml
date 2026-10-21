@@ -11,12 +11,28 @@ FocusScope {
     required property var pam
     required property string sharedPasswordBuffer
     required property string screenName
+    property bool inputRevealed: false
+    signal inputRevealRequested(bool revealed)
+
     required property bool isLocked
 
     signal passwordChanged(string newPassword)
     signal unlockRequested
 
+    HoverHandler {
+        enabled: root.pam.awaitingActivityRetry
+        onPointChanged: root.pam.retryFprintOnActivity()
+    }
+
+    PointHandler {
+        onActiveChanged: {
+            if (active)
+                root.pam.retryFprintOnActivity();
+        }
+    }
+
     Keys.onPressed: event => {
+        root.pam.retryFprintOnActivity();
         if (videoScreensaver.active && videoScreensaver.inputEnabled) {
             videoScreensaver.dismiss();
             event.accepted = true;
@@ -33,18 +49,17 @@ FocusScope {
 
         anchors.fill: parent
         demoMode: false
+        sessionLock: root.lock
         pam: root.pam
         passwordBuffer: root.sharedPasswordBuffer
+        inputRevealed: root.inputRevealed
+        onInputRevealRequested: revealed => root.inputRevealRequested(revealed)
         screenName: root.screenName
         enabled: !videoScreensaver.active
         focus: !videoScreensaver.active
         opacity: videoScreensaver.active ? 0 : 1
         onUnlockRequested: root.unlockRequested()
-        onPasswordBufferChanged: {
-            if (root.sharedPasswordBuffer !== passwordBuffer) {
-                root.passwordChanged(passwordBuffer);
-            }
-        }
+        onPasswordEdited: text => root.passwordChanged(text)
 
         Behavior on opacity {
             NumberAnimation {
@@ -57,6 +72,7 @@ FocusScope {
         id: videoScreensaver
         anchors.fill: parent
         screenName: root.screenName
+        onDismissed: Qt.callLater(() => lockContent.focusPasswordField())
     }
 
     Component.onCompleted: forceActiveFocus()

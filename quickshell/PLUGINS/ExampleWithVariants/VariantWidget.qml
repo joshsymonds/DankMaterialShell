@@ -1,7 +1,7 @@
 import QtQuick
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginComponent {
@@ -15,19 +15,19 @@ PluginComponent {
 
     horizontalBarPill: Component {
         Row {
-            spacing: 3
+            spacing: Theme.spacingXS
 
-            DankIcon {
+            DIcon {
                 name: root.displayIcon
-                size: Theme.iconSize - 8
+                size: root.iconSize
                 color: Theme.surfaceText
                 anchors.verticalCenter: parent.verticalCenter
             }
 
             StyledText {
                 text: root.displayText
-                font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.Medium
+                font.pixelSize: root.textSize
+                font.weight: Theme.fontWeightMedium
                 color: Theme.surfaceText
                 anchors.verticalCenter: parent.verticalCenter
             }
@@ -38,17 +38,17 @@ PluginComponent {
         Column {
             spacing: 1
 
-            DankIcon {
+            DIcon {
                 name: root.displayIcon
-                size: Theme.iconSize - 8
+                size: root.iconSize
                 color: Theme.surfaceText
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
             StyledText {
                 text: root.displayText
-                font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.Medium
+                font.pixelSize: root.textSize
+                font.weight: Theme.fontWeightMedium
                 color: Theme.surfaceText
                 anchors.horizontalCenter: parent.horizontalCenter
             }

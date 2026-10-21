@@ -1,9 +1,9 @@
 import QtQuick
 import qs.Common
-import qs.Modals.DankLauncherV2
+import qs.Modals.DLauncherV2
 import qs.Widgets
 
-DankPopout {
+DPopout {
     id: appDrawerPopout
 
     layerNamespace: "dms:app-launcher"
@@ -70,6 +70,7 @@ DankPopout {
             lc.searchField.forceActiveFocus();
         }
         if (lc.controller) {
+            lc.controller.explicitQuerySession = !!query;
             lc.controller.searchMode = mode;
             lc.controller.pluginFilter = "";
             lc.controller.searchQuery = "";
@@ -107,6 +108,9 @@ DankPopout {
                 id: modalAdapter
                 property bool spotlightOpen: appDrawerPopout.shouldBeVisible
                 property bool isClosing: appDrawerPopout.isClosing
+                readonly property var effectiveScreen: appDrawerPopout.screen
+                readonly property real alignedX: appDrawerPopout.renderedAlignedX
+                readonly property real alignedY: appDrawerPopout.renderedAlignedY
 
                 function hide() {
                     appDrawerPopout.close();
@@ -122,6 +126,7 @@ DankPopout {
                     anchors.fill: parent
                     parentModal: modalAdapter
                     viewModeContext: "appDrawer"
+                    transientSurfaceTracker: appDrawerPopout.transientSurfaceTracker
                 }
 
                 Keys.onEscapePressed: event => {

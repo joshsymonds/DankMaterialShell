@@ -5,13 +5,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/loginctl"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/loginctl"
 	"github.com/godbus/dbus/v5"
-	"golang.org/x/sys/unix"
 )
 
-const resumeDelay = 3 * time.Second
+const (
+	resumeDelay    = 3 * time.Second
+	firstBootDelay = 15 * time.Second
+)
 
 type Manager struct {
 	conn     *dbus.Conn
@@ -20,7 +22,7 @@ type Manager struct {
 }
 
 func NewManager() (*Manager, error) {
-	conn, err := dbus.ConnectSessionBus()
+	conn, err := dbus.SessionBus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to session bus: %w", err)
 	}
@@ -36,7 +38,7 @@ func NewManager() (*Manager, error) {
 	// sleeping.  This avoids duplicate registrations on normal boot where apps
 	// are still starting up and will register their own tray icons shortly.
 	if timeSuspended() > 5*time.Second {
-		go m.scheduleRecovery()
+		go m.scheduleRecovery(resumeDelay)
 	}
 
 	return m, nil
@@ -47,9 +49,7 @@ func NewManager() (*Manager, error) {
 // This handles the case where the process survives suspend.
 func (m *Manager) WatchLoginctl(lm *loginctl.Manager) {
 	ch := lm.Subscribe("tray-recovery")
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
+	m.wg.Go(func() {
 		defer lm.Unsubscribe("tray-recovery")
 
 		wasSleeping := false
@@ -67,16 +67,66 @@ func (m *Manager) WatchLoginctl(lm *loginctl.Manager) {
 				}
 				if wasSleeping {
 					wasSleeping = false
-					go m.scheduleRecovery()
+					go m.scheduleRecovery(resumeDelay)
 				}
 			}
 		}
-	}()
+	})
 }
 
-func (m *Manager) scheduleRecovery() {
+// A restarted shell brings up an empty watcher, and clients that ignore
+// NameOwnerChanged never re-register (#1142).
+func (m *Manager) WatchWatcherOwner() {
+	if err := m.conn.AddMatchSignal(
+		dbus.WithMatchInterface(dbusIface),
+		dbus.WithMatchMember("NameOwnerChanged"),
+		dbus.WithMatchArg(0, sniWatcherDest),
+	); err != nil {
+		log.Warnf("TrayRecoveryService: NameOwnerChanged match failed: %v", err)
+		return
+	}
+
+	ch := make(chan *dbus.Signal, 16)
+	m.conn.Signal(ch)
+
+	m.wg.Go(func() {
+		defer m.conn.RemoveSignal(ch)
+		hadOwner := m.getNameOwner(sniWatcherDest) != ""
+		for {
+			select {
+			case <-m.stopChan:
+				return
+			case sig, ok := <-ch:
+				if !ok {
+					return
+				}
+				if sig.Name != dbusIface+".NameOwnerChanged" || len(sig.Body) < 3 {
+					continue
+				}
+				name, _ := sig.Body[0].(string)
+				newOwner, _ := sig.Body[2].(string)
+				if name != sniWatcherDest || newOwner == "" {
+					continue
+				}
+				if !hadOwner {
+					hadOwner = true
+					// First boot: autostart apps (e.g. KeePassXC) may have tried
+					// to register their SNI item before the watcher existed and
+					// never retry. A one-time delayed scan picks those up.
+					log.Info("TrayRecoveryService: StatusNotifierWatcher appeared for the first time, scheduling boot scan")
+					go m.scheduleRecovery(firstBootDelay)
+					continue
+				}
+				log.Info("TrayRecoveryService: StatusNotifierWatcher changed hands, scheduling rescan")
+				go m.scheduleRecovery(resumeDelay)
+			}
+		}
+	})
+}
+
+func (m *Manager) scheduleRecovery(delay time.Duration) {
 	select {
-	case <-time.After(resumeDelay):
+	case <-time.After(delay):
 		m.recoverTrayItems()
 	case <-m.stopChan:
 	}
@@ -90,26 +140,5 @@ func (m *Manager) Close() {
 		close(m.stopChan)
 	}
 	m.wg.Wait()
-	if m.conn != nil {
-		m.conn.Close()
-	}
 	log.Info("TrayRecovery manager closed")
-}
-
-// timeSuspended returns how long the system has spent in suspend since boot.
-// It is the difference between CLOCK_BOOTTIME (includes suspend) and
-// CLOCK_MONOTONIC (excludes suspend).
-func timeSuspended() time.Duration {
-	var bt, mt unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &bt); err != nil {
-		return 0
-	}
-	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &mt); err != nil {
-		return 0
-	}
-	diff := (bt.Sec-mt.Sec)*int64(time.Second) + (bt.Nsec - mt.Nsec)
-	if diff < 0 {
-		return 0
-	}
-	return time.Duration(diff)
 }

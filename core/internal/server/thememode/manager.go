@@ -5,10 +5,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/geolocation"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/loginctl"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/wayland"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/syncmap"
+	"github.com/duxlabs-dev/dux-shell/core/internal/geolocation"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/loginctl"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/wayland"
 )
 
 const (
@@ -193,9 +193,7 @@ func (m *Manager) Close() {
 
 func (m *Manager) WatchLoginctl(lm *loginctl.Manager) {
 	ch := lm.Subscribe("thememode")
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
+	m.wg.Go(func() {
 		defer lm.Unsubscribe("thememode")
 		for {
 			select {
@@ -211,7 +209,7 @@ func (m *Manager) WatchLoginctl(lm *loginctl.Manager) {
 				m.TriggerUpdate()
 			}
 		}
-	}()
+	})
 }
 
 func (m *Manager) schedulerLoop() {

@@ -1,15 +1,19 @@
 package providers
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/keybinds"
+	"github.com/duxlabs-dev/dux-shell/core/internal/keybinds"
 	"github.com/sblinch/kdl-go/document"
 )
 
@@ -17,6 +21,22 @@ type NiriProvider struct {
 	configDir        string
 	dmsBindsIncluded bool
 	parsed           bool
+}
+
+type niriActionPart struct {
+	value  string
+	quoted bool
+}
+
+var niriActionPropertyOrder = []string{"focus", "show-pointer", "write-to-disk", "skip-confirmation", "delay-ms", "filter", "scope"}
+var niriActionProperties = map[string]struct{}{
+	"focus":             {},
+	"show-pointer":      {},
+	"write-to-disk":     {},
+	"skip-confirmation": {},
+	"delay-ms":          {},
+	"filter":            {},
+	"scope":             {},
 }
 
 func NewNiriProvider(configDir string) *NiriProvider {
@@ -58,18 +78,10 @@ func (n *NiriProvider) GetCheatSheet() (*keybinds.CheatSheet, error) {
 		Binds:            categorizedBinds,
 		DMSBindsIncluded: result.DMSBindsIncluded,
 	}
+	sheet.SetMod(niriModKey(result, niriNested()))
 
 	if result.DMSStatus != nil {
-		sheet.DMSStatus = &keybinds.DMSBindsStatus{
-			Exists:          result.DMSStatus.Exists,
-			Included:        result.DMSStatus.Included,
-			IncludePosition: result.DMSStatus.IncludePosition,
-			TotalIncludes:   result.DMSStatus.TotalIncludes,
-			BindsAfterDMS:   result.DMSStatus.BindsAfterDMS,
-			Effective:       result.DMSStatus.Effective,
-			OverriddenBy:    result.DMSStatus.OverriddenBy,
-			StatusMessage:   result.DMSStatus.StatusMessage,
-		}
+		sheet.DMSStatus = keybinds.DMSBindsStatusFrom(*result.DMSStatus)
 	}
 
 	return sheet, nil
@@ -121,6 +133,7 @@ func (n *NiriProvider) categorizeByAction(action string) string {
 		action == "suspend" ||
 		action == "do-screen-transition" ||
 		action == "toggle-keyboard-shortcuts-inhibit" ||
+		action == "toggle-touchpad" ||
 		strings.Contains(action, "dpms"):
 		return "System"
 	case action == "spawn":
@@ -149,7 +162,7 @@ func (n *NiriProvider) convertKeybind(kb *NiriKeyBinding, subcategory string, co
 
 	source := "config"
 	if strings.Contains(kb.Source, "dms/binds.kdl") {
-		source = "dms"
+		source = "dms-default"
 	}
 
 	bind := keybinds.Keybind{
@@ -165,8 +178,8 @@ func (n *NiriProvider) convertKeybind(kb *NiriKeyBinding, subcategory string, co
 		Repeat:          kb.Repeat,
 	}
 
-	if source == "dms" && conflicts != nil {
-		if conflictKb, ok := conflicts[keyStr]; ok {
+	if source == "dms-default" && conflicts != nil {
+		if conflictKb, ok := conflicts[normalizeNiriBindKey(keyStr)]; ok {
 			bind.Conflict = &keybinds.Keybind{
 				Key:         keyStr,
 				Description: conflictKb.Description,
@@ -210,6 +223,63 @@ func (n *NiriProvider) formatKey(kb *NiriKeyBinding) string {
 	return strings.Join(parts, "+")
 }
 
+func (n *NiriProvider) ModKey() keybinds.ModKey {
+	result, err := ParseNiriKeys(n.configDir)
+	if err != nil {
+		return keybinds.DefaultModKey()
+	}
+	return niriModKey(result, niriNested())
+}
+
+// Mirrors niri's Backend::mod_key: nested (winit) sessions use mod-key-nested,
+// falling back to Alt, or to Super when mod-key itself is Alt.
+func niriModKey(result *NiriParseResult, nested bool) keybinds.ModKey {
+	if !nested {
+		return keybinds.ConfiguredModKey("Mod", result.ModKey)
+	}
+	if result.ModKeyNested != "" {
+		return keybinds.ConfiguredModKey("Mod", result.ModKeyNested)
+	}
+	resolved := "Alt"
+	if keybinds.CanonicalModifier(result.ModKey) == "Alt" {
+		resolved = "Super"
+	}
+	return keybinds.ModKey{Symbol: "Mod", Resolved: resolved, Source: keybinds.ModSourceRuntime}
+}
+
+var niriNested = detectNiriNested
+
+// The winit backend exposes a single output named "winit"; niri has no IPC query for its backend.
+func detectNiriNested() bool {
+	socket := os.Getenv("NIRI_SOCKET")
+	if socket == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("unix", socket, time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Write([]byte("\"Outputs\"\n")); err != nil {
+		return false
+	}
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		return false
+	}
+	var reply struct {
+		Ok struct {
+			Outputs map[string]json.RawMessage `json:"Outputs"`
+		} `json:"Ok"`
+	}
+	if err := json.Unmarshal(line, &reply); err != nil {
+		return false
+	}
+	_, nested := reply.Ok.Outputs["winit"]
+	return nested
+}
+
 func (n *NiriProvider) GetOverridePath() string {
 	return filepath.Join(n.configDir, "dms", "binds.kdl")
 }
@@ -249,7 +319,7 @@ func (n *NiriProvider) SetBind(key, action, description string, options map[stri
 		existingBinds = make(map[string]*overrideBind)
 	}
 
-	existingBinds[key] = &overrideBind{
+	existingBinds[normalizeNiriBindKey(key)] = &overrideBind{
 		Key:         key,
 		Action:      action,
 		Description: description,
@@ -265,8 +335,12 @@ func (n *NiriProvider) RemoveBind(key string) error {
 		return nil
 	}
 
-	delete(existingBinds, key)
+	delete(existingBinds, normalizeNiriBindKey(key))
 	return n.writeOverrideBinds(existingBinds)
+}
+
+func (n *NiriProvider) ResetBind(key string) error {
+	return n.RemoveBind(key)
 }
 
 type overrideBind struct {
@@ -312,7 +386,7 @@ func (n *NiriProvider) loadOverrideBinds() (map[string]*overrideBind, error) {
 				action = n.formatRawAction(kb.Action, kb.Args)
 			}
 
-			binds[keyStr] = &overrideBind{
+			binds[normalizeNiriBindKey(keyStr)] = &overrideBind{
 				Key:         keyStr,
 				Action:      action,
 				Description: kb.Description,
@@ -348,7 +422,7 @@ func (n *NiriProvider) buildActionFromNode(bindNode *document.Node) string {
 	}
 
 	if actionNode.Properties != nil {
-		for _, propName := range []string{"focus", "show-pointer", "write-to-disk", "skip-confirmation", "delay-ms"} {
+		for _, propName := range niriActionPropertyOrder {
 			if val, ok := actionNode.Properties.Get(propName); ok {
 				parts = append(parts, propName+"="+val.String())
 			}
@@ -436,10 +510,10 @@ func (n *NiriProvider) buildActionNode(action string) *document.Node {
 		return node
 	}
 
-	node.SetName(parts[0])
+	node.SetName(parts[0].value)
 	for _, arg := range parts[1:] {
-		if strings.Contains(arg, "=") {
-			kv := strings.SplitN(arg, "=", 2)
+		if n.isNiriActionPropertyToken(arg) {
+			kv := strings.SplitN(arg.value, "=", 2)
 			switch kv[1] {
 			case "true":
 				node.AddProperty(kv[0], true, "")
@@ -450,13 +524,25 @@ func (n *NiriProvider) buildActionNode(action string) *document.Node {
 			}
 			continue
 		}
-		node.AddArgument(arg, "")
+		node.AddArgument(arg.value, "")
 	}
 	return node
 }
 
-func (n *NiriProvider) parseActionParts(action string) []string {
-	var parts []string
+func (n *NiriProvider) isNiriActionPropertyToken(part niriActionPart) bool {
+	if !strings.Contains(part.value, "=") {
+		return false
+	}
+	key, _, ok := strings.Cut(part.value, "=")
+	if !ok {
+		return false
+	}
+	_, ok = niriActionProperties[key]
+	return ok
+}
+
+func (n *NiriProvider) parseActionParts(action string) []niriActionPart {
+	var parts []niriActionPart
 	var current strings.Builder
 	var inQuote, escaped, wasQuoted bool
 
@@ -472,7 +558,7 @@ func (n *NiriProvider) parseActionParts(action string) []string {
 			inQuote = !inQuote
 		case r == ' ' && !inQuote:
 			if current.Len() > 0 || wasQuoted {
-				parts = append(parts, current.String())
+				parts = append(parts, niriActionPart{value: current.String(), quoted: wasQuoted})
 				current.Reset()
 				wasQuoted = false
 			}
@@ -481,7 +567,7 @@ func (n *NiriProvider) parseActionParts(action string) []string {
 		}
 	}
 	if current.Len() > 0 || wasQuoted {
-		parts = append(parts, current.String())
+		parts = append(parts, niriActionPart{value: current.String(), quoted: wasQuoted})
 	}
 	return parts
 }

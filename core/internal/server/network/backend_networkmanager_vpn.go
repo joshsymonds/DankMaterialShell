@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,10 +13,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
 	"github.com/Wifx/gonetworkmanager/v2"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/godbus/dbus/v5"
 )
+
+const nmVPNStateFailed = 6
+
+// vpnFailureMessage maps NMVpnConnectionStateReason to a user-facing message.
+func vpnFailureMessage(reason uint32) string {
+	switch reason {
+	case 9: // NO_SECRETS
+		return "Authentication required"
+	case 10: // LOGIN_FAILED
+		return "Authentication failed"
+	case 6: // CONNECT_TIMEOUT
+		return "Connection timed out"
+	case 7, 8: // SERVICE_START_TIMEOUT, SERVICE_START_FAILED
+		return "VPN service failed to start"
+	default:
+		return "VPN connection failed"
+	}
+}
 
 func (b *NetworkManagerBackend) ListVPNProfiles() ([]VPNProfile, error) {
 	s := b.settings
@@ -199,25 +218,38 @@ func (b *NetworkManagerBackend) ListActiveVPN() ([]VPNActive, error) {
 }
 
 func (b *NetworkManagerBackend) ConnectVPN(uuidOrName string, singleActive bool) error {
+	// Drop any stale connecting state from a prior attempt that never resolved;
+	// a leftover flag makes the secret agent refuse secrets for other VPNs.
+	b.stateMutex.Lock()
+	b.state.IsConnectingVPN = false
+	b.state.ConnectingVPNUUID = ""
+	b.state.VPNError = ""
+	b.state.VPNErrorUuid = ""
+	b.stateMutex.Unlock()
+
 	if singleActive {
 		active, err := b.ListActiveVPN()
 		if err == nil && len(active) > 0 {
 			alreadyConnected := false
 			for _, vpn := range active {
-				if vpn.UUID == uuidOrName || vpn.Name == uuidOrName {
-					alreadyConnected = true
-					break
+				if vpn.UUID != uuidOrName && vpn.Name != uuidOrName {
+					continue
 				}
+				switch vpn.State {
+				case "activated", "activating":
+					alreadyConnected = true
+				}
+				break
 			}
 
-			if !alreadyConnected {
-				if err := b.DisconnectAllVPN(); err != nil {
-					log.Warnf("Failed to disconnect existing VPNs: %v", err)
-				}
-				time.Sleep(500 * time.Millisecond)
-			} else {
+			if alreadyConnected {
 				return nil
 			}
+
+			if err := b.DisconnectAllVPN(); err != nil {
+				log.Warnf("Failed to disconnect existing VPNs: %v", err)
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 
@@ -295,6 +327,7 @@ func (b *NetworkManagerBackend) ConnectVPN(uuidOrName string, singleActive bool)
 	}
 
 	authAction := detectVPNAuthAction(vpnServiceType, vpnData)
+	var openConnectAuth *openConnectAuthResult
 
 	switch authAction {
 	case "openvpn_username":
@@ -303,6 +336,38 @@ func (b *NetworkManagerBackend) ConnectVPN(uuidOrName string, singleActive bool)
 		}
 		if err := b.handleOpenVPNUsernameAuth(targetConn, connName, targetUUID, vpnServiceType); err != nil {
 			return err
+		}
+	case "openconnect_password":
+		if err := b.ensureOpenConnectAgentFlags(targetConn, vpnData); err != nil {
+			return fmt.Errorf("failed to prepare OpenConnect connection: %w", err)
+		}
+
+		authCtx, authCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		openConnectAuth, err = b.handleOpenConnectPasswordAuth(
+			authCtx, targetConn, connName, targetUUID, vpnServiceType, vpnData,
+		)
+		authCancel()
+		if err != nil {
+			return fmt.Errorf("OpenConnect authentication failed: %w", err)
+		}
+	case "fortinet_saml":
+		if err := b.ensureOpenConnectAgentFlags(targetConn, vpnData); err != nil {
+			return fmt.Errorf("failed to prepare Fortinet connection: %w", err)
+		}
+
+		log.Infof("[ConnectVPN] Fortinet SAML/SSO authentication required for %s (gateway=%s)", connName, vpnData["gateway"])
+
+		samlCtx, samlCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		openConnectAuth, err = b.authenticateFortinetSAML(samlCtx, fortinetAuthTarget{
+			ConnName:       connName,
+			ConnUUID:       targetUUID,
+			ConnectionPath: string(targetConn.GetPath()),
+			VpnService:     vpnServiceType,
+			Data:           vpnData,
+		})
+		samlCancel()
+		if err != nil {
+			return fmt.Errorf("SAML authentication failed for the Fortinet gateway: %w", err)
 		}
 	case "gp_saml":
 		gateway := vpnData["gateway"]
@@ -314,7 +379,7 @@ func (b *NetworkManagerBackend) ConnectVPN(uuidOrName string, singleActive bool)
 		log.Infof("[ConnectVPN] GlobalProtect SAML/SSO authentication required for %s (gateway=%s)", connName, gateway)
 
 		samlCtx, samlCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		authResult, err := b.runGlobalProtectSAMLAuth(samlCtx, gateway, protocol)
+		openConnectAuth, err = b.runGlobalProtectSAMLAuth(samlCtx, gateway, protocol)
 		samlCancel()
 		if err != nil {
 			errMsg := err.Error()
@@ -332,16 +397,6 @@ func (b *NetworkManagerBackend) ConnectVPN(uuidOrName string, singleActive bool)
 			}
 		}
 
-		b.cachedGPSamlMu.Lock()
-		b.cachedGPSamlCookie = &cachedGPSamlCookie{
-			ConnectionUUID: targetUUID,
-			Cookie:         authResult.Cookie,
-			Host:           authResult.Host,
-			User:           authResult.User,
-			Fingerprint:    authResult.Fingerprint,
-		}
-		b.cachedGPSamlMu.Unlock()
-
 		if err := targetConn.ClearSecrets(); err != nil {
 			log.Warnf("[ConnectVPN] ClearSecrets failed (non-fatal): %v", err)
 		} else {
@@ -349,6 +404,19 @@ func (b *NetworkManagerBackend) ConnectVPN(uuidOrName string, singleActive bool)
 		}
 
 		log.Infof("[ConnectVPN] GlobalProtect SAML cookie cached for %s, proceeding with activation", connName)
+	}
+
+	if openConnectAuth != nil {
+		b.cachedOpenConnectMu.Lock()
+		b.cachedOpenConnectAuth = &cachedOpenConnectAuth{
+			ConnectionUUID: targetUUID,
+			Cookie:         openConnectAuth.Cookie,
+			Host:           openConnectAuth.Host,
+			User:           openConnectAuth.User,
+			Fingerprint:    openConnectAuth.Fingerprint,
+		}
+		b.cachedOpenConnectMu.Unlock()
+		log.Infof("[ConnectVPN] OpenConnect authentication cached for %s, proceeding with activation", connName)
 	}
 
 	b.stateMutex.Lock()
@@ -363,6 +431,13 @@ func (b *NetworkManagerBackend) ConnectVPN(uuidOrName string, singleActive bool)
 	nm := b.nmConn.(gonetworkmanager.NetworkManager)
 	_, err = nm.ActivateConnection(targetConn, nil, nil)
 	if err != nil {
+		b.cachedOpenConnectMu.Lock()
+		b.cachedOpenConnectAuth = nil
+		b.cachedOpenConnectMu.Unlock()
+		b.pendingVPNSaveMu.Lock()
+		b.pendingVPNSave = nil
+		b.pendingVPNSaveMu.Unlock()
+
 		b.stateMutex.Lock()
 		b.state.IsConnectingVPN = false
 		b.state.ConnectingVPNUUID = ""
@@ -390,15 +465,214 @@ func detectVPNAuthAction(serviceType string, data map[string]string) string {
 			switch protocol {
 			case "gp":
 				return "gp_saml"
+			case "fortinet":
+				return "fortinet_saml"
 			default:
-				log.Infof("[VPN] External browser auth detected for protocol '%s' but only GlobalProtect (gp) is currently supported", protocol)
+				log.Infof("[VPN] External browser auth detected for protocol '%s' but only GlobalProtect (gp) and Fortinet are currently supported", protocol)
 			}
+		}
+		if protocol == "fortinet" && data["authtype"] == "password" {
+			return "openconnect_password"
 		}
 	case strings.Contains(serviceType, "openvpn"):
 		connType := data["connection-type"]
 		username := data["username"]
 		if (connType == "password" || connType == "password-tls") && username == "" {
 			return "openvpn_username"
+		}
+	}
+	return ""
+}
+
+func setOpenConnectAgentFlags(data map[string]string) bool {
+	changed := false
+	for _, field := range []string{"cookie", "gateway", "gwcert"} {
+		key := field + "-flags"
+		if data[key] != "2" {
+			data[key] = "2"
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (b *NetworkManagerBackend) ensureOpenConnectAgentFlags(conn gonetworkmanager.Connection, data map[string]string) error {
+	if !setOpenConnectAgentFlags(data) {
+		return nil
+	}
+	if b.dbusConn == nil {
+		return fmt.Errorf("NetworkManager D-Bus connection is unavailable")
+	}
+
+	connObj := b.dbusConn.Object("org.freedesktop.NetworkManager", conn.GetPath())
+	var existingSettings map[string]map[string]dbus.Variant
+	if err := connObj.Call("org.freedesktop.NetworkManager.Settings.Connection.GetSettings", 0).Store(&existingSettings); err != nil {
+		return fmt.Errorf("failed to get connection settings: %w", err)
+	}
+
+	vpn, ok := existingSettings["vpn"]
+	if !ok {
+		return fmt.Errorf("VPN settings are missing")
+	}
+	vpn["data"] = dbus.MakeVariant(data)
+
+	var stored map[string]map[string]dbus.Variant
+	if err := connObj.Call("org.freedesktop.NetworkManager.Settings.Connection.GetSecrets", 0, "vpn").Store(&stored); err != nil {
+		return fmt.Errorf("failed to preserve VPN secrets: %w", err)
+	}
+	if storedVPN, ok := stored["vpn"]; ok {
+		if secrets, ok := storedVPN["secrets"]; ok {
+			vpn["secrets"] = secrets
+		}
+	}
+
+	settings := map[string]map[string]dbus.Variant{"vpn": vpn}
+	if connection, ok := existingSettings["connection"]; ok {
+		settings["connection"] = connection
+	}
+
+	var result map[string]dbus.Variant
+	if err := connObj.Call("org.freedesktop.NetworkManager.Settings.Connection.Update2", 0,
+		settings, uint32(0x1), map[string]dbus.Variant{}).Store(&result); err != nil {
+		return fmt.Errorf("failed to set NetworkManager secret-agent flags: %w", err)
+	}
+	return nil
+}
+
+func (b *NetworkManagerBackend) handleOpenConnectPasswordAuth(
+	ctx context.Context,
+	targetConn gonetworkmanager.Connection,
+	connName, targetUUID, vpnServiceType string,
+	data map[string]string,
+) (*openConnectAuthResult, error) {
+	username := data["username"]
+	secrets := map[string]string{}
+	if stored, err := targetConn.GetSecrets("vpn"); err == nil {
+		if vpn, ok := stored["vpn"]; ok {
+			if saved, ok := vpn["secrets"].(map[string]string); ok {
+				secrets = saved
+			}
+		}
+	}
+
+	password := secrets["password"]
+	serverCert := secrets["certificate:"+data["gateway"]]
+	if serverCert == "" {
+		serverCert = secrets["gwcert"]
+	}
+
+	var reply PromptReply
+	if username == "" || password == "" {
+		if b.promptBroker == nil {
+			return nil, fmt.Errorf("password authentication requires an interactive prompt")
+		}
+
+		fields := []string{}
+		fieldsInfo := []FieldInfo{}
+		if username == "" {
+			fields = append(fields, "username")
+			fieldsInfo = append(fieldsInfo, FieldInfo{Name: "username", Label: "Username", IsSecret: false})
+		}
+		if password == "" {
+			fields = append(fields, "password")
+			fieldsInfo = append(fieldsInfo, FieldInfo{Name: "password", Label: "Password", IsSecret: true})
+		}
+
+		token, err := b.promptBroker.Ask(ctx, PromptRequest{
+			Name:           connName,
+			ConnType:       "vpn",
+			VpnService:     vpnServiceType,
+			SettingName:    "vpn",
+			Fields:         fields,
+			FieldsInfo:     fieldsInfo,
+			Reason:         "required",
+			ConnectionId:   connName,
+			ConnectionUuid: targetUUID,
+			ConnectionPath: string(targetConn.GetPath()),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to request credentials: %w", err)
+		}
+
+		reply, err = b.promptBroker.Wait(ctx, token)
+		if err != nil {
+			return nil, fmt.Errorf("credentials prompt failed: %w", err)
+		}
+		if username == "" {
+			username = reply.Secrets["username"]
+		}
+		if password == "" {
+			password = reply.Secrets["password"]
+		}
+	}
+
+	auth, err := runOpenConnectPasswordAuth(ctx, data, username, password, serverCert)
+	persistentSecrets := map[string]string{}
+	var authErr *openConnectAuthError
+	if err != nil && errors.As(err, &authErr) && authErr.serverCert != "" && authErr.serverCert != serverCert {
+		if b.promptBroker == nil {
+			return nil, fmt.Errorf("VPN server certificate is untrusted: %s", authErr.serverCert)
+		}
+
+		reason := "server-certificate"
+		if serverCert != "" {
+			reason = "server-certificate-changed"
+		}
+
+		token, promptErr := b.promptBroker.Ask(ctx, PromptRequest{
+			Name:           connName,
+			ConnType:       "vpn",
+			VpnService:     vpnServiceType,
+			SettingName:    "vpn",
+			Hints:          []string{authErr.serverCert},
+			Reason:         reason,
+			ConnectionId:   connName,
+			ConnectionUuid: targetUUID,
+			ConnectionPath: string(targetConn.GetPath()),
+		})
+		if promptErr != nil {
+			return nil, fmt.Errorf("failed to request certificate confirmation: %w", promptErr)
+		}
+		if _, promptErr = b.promptBroker.Wait(ctx, token); promptErr != nil {
+			return nil, fmt.Errorf("certificate confirmation failed: %w", promptErr)
+		}
+
+		auth, err = runOpenConnectPasswordAuth(ctx, data, username, password, authErr.serverCert)
+		if err == nil {
+			persistentSecrets["certificate:"+data["gateway"]] = authErr.serverCert
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if len(reply.Secrets) > 0 || len(persistentSecrets) > 0 {
+		creds := &pendingVPNCredentials{
+			ConnectionPath:    string(targetConn.GetPath()),
+			PersistentSecrets: persistentSecrets,
+		}
+		if _, ok := reply.Secrets["username"]; ok {
+			creds.Username = username
+		}
+		if reply.Save {
+			creds.Username = username
+			creds.Password = password
+			creds.Secrets = map[string]string{"password": password}
+			creds.SavePassword = true
+		}
+		b.pendingVPNSaveMu.Lock()
+		b.pendingVPNSave = creds
+		b.pendingVPNSaveMu.Unlock()
+	}
+
+	return auth, nil
+}
+
+func suggestedOpenConnectServerCert(output string) string {
+	for field := range strings.FieldsSeq(output) {
+		field = strings.Trim(field, "'\".,")
+		if strings.HasPrefix(field, "pin-sha256:") {
+			return field
 		}
 	}
 	return ""
@@ -456,9 +730,7 @@ func (b *NetworkManagerBackend) handleOpenVPNUsernameAuth(targetConn gonetworkma
 	if dataVariant, ok := vpn["data"]; ok {
 		if dm, ok := dataVariant.Value().(map[string]string); ok {
 			data = make(map[string]string)
-			for k, v := range dm {
-				data[k] = v
-			}
+			maps.Copy(data, dm)
 		} else {
 			data = make(map[string]string)
 		}
@@ -723,15 +995,17 @@ func (b *NetworkManagerBackend) updateVPNConnectionState() {
 				b.state.IsConnectingVPN = false
 				b.state.ConnectingVPNUUID = ""
 				b.state.LastError = ""
+				b.state.VPNError = ""
+				b.state.VPNErrorUuid = ""
 				b.stateMutex.Unlock()
 
-				// Clear cached PKCS11 PIN and SAML cookie on success
+				// Clear cached one-shot authentication values on success.
 				b.cachedPKCS11Mu.Lock()
 				b.cachedPKCS11PIN = nil
 				b.cachedPKCS11Mu.Unlock()
-				b.cachedGPSamlMu.Lock()
-				b.cachedGPSamlCookie = nil
-				b.cachedGPSamlMu.Unlock()
+				b.cachedOpenConnectMu.Lock()
+				b.cachedOpenConnectAuth = nil
+				b.cachedOpenConnectMu.Unlock()
 
 				b.pendingVPNSaveMu.Lock()
 				pending := b.pendingVPNSave
@@ -748,15 +1022,22 @@ func (b *NetworkManagerBackend) updateVPNConnectionState() {
 				b.state.IsConnectingVPN = false
 				b.state.ConnectingVPNUUID = ""
 				b.state.LastError = "VPN connection failed"
+				if b.state.VPNError == "" {
+					b.state.VPNError = "VPN connection failed"
+				}
+				b.state.VPNErrorUuid = connectingVPNUUID
 				b.stateMutex.Unlock()
 
-				// Clear cached PKCS11 PIN and SAML cookie on failure
+				// Clear cached one-shot authentication values on failure.
 				b.cachedPKCS11Mu.Lock()
 				b.cachedPKCS11PIN = nil
 				b.cachedPKCS11Mu.Unlock()
-				b.cachedGPSamlMu.Lock()
-				b.cachedGPSamlCookie = nil
-				b.cachedGPSamlMu.Unlock()
+				b.cachedOpenConnectMu.Lock()
+				b.cachedOpenConnectAuth = nil
+				b.cachedOpenConnectMu.Unlock()
+				b.pendingVPNSaveMu.Lock()
+				b.pendingVPNSave = nil
+				b.pendingVPNSaveMu.Unlock()
 				return
 			}
 		}
@@ -768,15 +1049,22 @@ func (b *NetworkManagerBackend) updateVPNConnectionState() {
 		b.state.IsConnectingVPN = false
 		b.state.ConnectingVPNUUID = ""
 		b.state.LastError = "VPN connection failed"
+		if b.state.VPNError == "" {
+			b.state.VPNError = "VPN connection failed"
+		}
+		b.state.VPNErrorUuid = connectingVPNUUID
 		b.stateMutex.Unlock()
 
-		// Clear cached PKCS11 PIN and SAML cookie
+		// Clear cached one-shot authentication values.
 		b.cachedPKCS11Mu.Lock()
 		b.cachedPKCS11PIN = nil
 		b.cachedPKCS11Mu.Unlock()
-		b.cachedGPSamlMu.Lock()
-		b.cachedGPSamlCookie = nil
-		b.cachedGPSamlMu.Unlock()
+		b.cachedOpenConnectMu.Lock()
+		b.cachedOpenConnectAuth = nil
+		b.cachedOpenConnectMu.Unlock()
+		b.pendingVPNSaveMu.Lock()
+		b.pendingVPNSave = nil
+		b.pendingVPNSaveMu.Unlock()
 	}
 }
 
@@ -806,9 +1094,7 @@ func (b *NetworkManagerBackend) saveVPNCredentials(creds *pendingVPNCredentials)
 	if dataVariant, ok := vpn["data"]; ok {
 		if dm, ok := dataVariant.Value().(map[string]string); ok {
 			data = make(map[string]string)
-			for k, v := range dm {
-				data[k] = v
-			}
+			maps.Copy(data, dm)
 		} else {
 			data = make(map[string]string)
 		}
@@ -822,13 +1108,40 @@ func (b *NetworkManagerBackend) saveVPNCredentials(creds *pendingVPNCredentials)
 		log.Infof("[saveVPNCredentials] Saving username")
 	}
 
-	// Save password if requested
+	maps.Copy(data, creds.PersistentData)
+
+	secs := map[string]string{}
+	if len(creds.PersistentSecrets) > 0 {
+		var stored map[string]map[string]dbus.Variant
+		if err := connObj.Call("org.freedesktop.NetworkManager.Settings.Connection.GetSecrets", 0, "vpn").Store(&stored); err != nil {
+			log.Warnf("[saveVPNCredentials] GetSecrets failed: %v", err)
+			return
+		}
+		if storedVPN, ok := stored["vpn"]; ok {
+			if storedSecrets, ok := storedVPN["secrets"]; ok {
+				saved, _ := storedSecrets.Value().(map[string]string)
+				maps.Copy(secs, saved)
+			}
+		}
+		for field, value := range creds.PersistentSecrets {
+			secs[field] = value
+			data[field+"-flags"] = "0"
+		}
+	}
+
 	if creds.SavePassword {
-		data["password-flags"] = "0"
-		secs := make(map[string]string)
-		secs["password"] = creds.Password
+		toSave := creds.Secrets
+		if len(toSave) == 0 {
+			toSave = map[string]string{"password": creds.Password}
+		}
+		for field, value := range toSave {
+			secs[field] = value
+			data[field+"-flags"] = "0"
+		}
+	}
+	if len(secs) > 0 {
 		vpn["secrets"] = dbus.MakeVariant(secs)
-		log.Infof("[saveVPNCredentials] Saving password with password-flags=0")
+		log.Infof("[saveVPNCredentials] Saving %d secret field(s)", len(secs))
 	}
 
 	vpn["data"] = dbus.MakeVariant(data)
@@ -963,14 +1276,14 @@ func (b *NetworkManagerBackend) ImportVPN(filePath string, name string) (*VPNImp
 		}, nil
 	}
 
-	ext := strings.ToLower(filepath.Ext(filePath))
-
-	switch ext {
-	case ".ovpn", ".conf":
-		return b.importVPNWithNmcli(filePath, name)
-	default:
-		return b.importVPNWithNmcli(filePath, name)
+	if cfg := readOpenfortivpnConfig(filePath); cfg != nil {
+		if name == "" {
+			name = vpnNameFromPath(filePath)
+		}
+		return b.importOpenfortivpnConfig(cfg, name)
 	}
+
+	return b.importVPNWithNmcli(filePath, name)
 }
 
 func (b *NetworkManagerBackend) importVPNWithNmcli(filePath string, name string) (*VPNImportResult, error) {
@@ -996,8 +1309,8 @@ func (b *NetworkManagerBackend) importVPNWithNmcli(filePath string, name string)
 	}
 	var connUUID, connName string
 
-	lines := strings.Split(outputStr, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(outputStr, "\n")
+	for line := range lines {
 		if strings.Contains(line, "successfully added") {
 			parts := strings.Fields(line)
 			for i, part := range parts {
@@ -1217,6 +1530,8 @@ func (b *NetworkManagerBackend) UpdateVPNConfig(connUUID string, updates map[str
 			delete(ipv6, "dns")
 		}
 
+		mergeStoredSecrets(conn, settings)
+
 		if err := conn.Update(settings); err != nil {
 			return fmt.Errorf("failed to update connection: %w", err)
 		}
@@ -1310,6 +1625,8 @@ func (b *NetworkManagerBackend) SetVPNCredentials(connUUID string, username stri
 			delete(ipv6, "routes")
 			delete(ipv6, "dns")
 		}
+
+		mergeStoredSecrets(conn, settings)
 
 		if err := conn.Update(settings); err != nil {
 			return fmt.Errorf("failed to update connection: %w", err)

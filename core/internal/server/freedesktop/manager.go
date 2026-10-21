@@ -5,18 +5,20 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/dbusutil"
+	"github.com/duxlabs-dev/dux-go/dbusutil"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/godbus/dbus/v5"
 )
 
 func NewManager() (*Manager, error) {
-	systemConn, err := dbus.ConnectSystemBus()
+	systemConn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to system bus: %w", err)
 	}
 
-	sessionConn, err := dbus.ConnectSessionBus()
+	sessionConn, err := dbus.SessionBus()
 	if err != nil {
 		sessionConn = nil
 	}
@@ -94,7 +96,103 @@ func (m *Manager) initializeSettings() error {
 		return fmt.Errorf("failed to update settings state: %w", err)
 	}
 
+	go m.watchSettingsChanges()
+
 	return nil
+}
+
+// ExpectColorSchemeEcho registers a self-write so the watcher swallows its SettingChanged echo instead of forwarding it as an external change.
+func (m *Manager) ExpectColorSchemeEcho(scheme string) {
+	var value uint32
+	switch scheme {
+	case "prefer-dark":
+		value = 1
+	case "prefer-light":
+		value = 2
+	}
+	m.selfEchoMu.Lock()
+	m.selfEchoes = append(m.selfEchoes, colorSchemeEcho{value: value, expires: time.Now().Add(10 * time.Second)})
+	m.selfEchoMu.Unlock()
+}
+
+func (m *Manager) consumeSelfEcho(value uint32) bool {
+	m.selfEchoMu.Lock()
+	defer m.selfEchoMu.Unlock()
+
+	now := time.Now()
+	kept := m.selfEchoes[:0]
+	consumed := false
+	for _, echo := range m.selfEchoes {
+		if now.After(echo.expires) {
+			continue
+		}
+		if !consumed && echo.value == value {
+			consumed = true
+			continue
+		}
+		kept = append(kept, echo)
+	}
+	m.selfEchoes = kept
+	return consumed
+}
+
+func (m *Manager) watchSettingsChanges() {
+	// reuse the shared session connection; a dedicated one was unreachable
+	// from Close() and leaked with this goroutine
+	if m.sessionConn == nil {
+		return
+	}
+	conn := m.sessionConn
+
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchInterface(dbusPortalSettingsInterface),
+		dbus.WithMatchMember("SettingChanged"),
+	); err != nil {
+		log.Warnf("Failed to watch portal settings changes: %v", err)
+		return
+	}
+
+	signals := make(chan *dbus.Signal, 64)
+	m.stateMutex.Lock()
+	m.settingsSignals = signals
+	m.stateMutex.Unlock()
+	conn.Signal(signals)
+
+	for sig := range signals {
+		if sig.Name != dbusPortalSettingsInterface+".SettingChanged" {
+			continue
+		}
+		if len(sig.Body) < 3 {
+			continue
+		}
+
+		namespace, _ := sig.Body[0].(string)
+		key, _ := sig.Body[1].(string)
+		if namespace != "org.freedesktop.appearance" || key != "color-scheme" {
+			continue
+		}
+
+		variant, ok := sig.Body[2].(dbus.Variant)
+		if !ok {
+			continue
+		}
+		colorScheme, ok := dbusutil.As[uint32](variant)
+		if !ok {
+			continue
+		}
+
+		selfInflicted := m.consumeSelfEcho(colorScheme)
+
+		m.stateMutex.Lock()
+		changed := m.state.Settings.ColorScheme != colorScheme || !m.state.Settings.Available
+		m.state.Settings.ColorScheme = colorScheme
+		m.state.Settings.Available = true
+		m.stateMutex.Unlock()
+
+		if changed && !selfInflicted {
+			m.NotifySubscribers()
+		}
+	}
 }
 
 func (m *Manager) updateAccountsState() error {
@@ -134,10 +232,23 @@ func (m *Manager) updateSettingsState() error {
 	var variant dbus.Variant
 	err := m.settingsObj.Call(dbusPortalSettingsInterface+".ReadOne", 0, "org.freedesktop.appearance", "color-scheme").Store(&variant)
 	if err != nil {
-		return err
+		// Older xdg-desktop-portal versions only expose the deprecated Read.
+		var nested dbus.Variant
+		if rerr := m.settingsObj.Call(dbusPortalSettingsInterface+".Read", 0, "org.freedesktop.appearance", "color-scheme").Store(&nested); rerr != nil {
+			log.Warnf("color-scheme: ReadOne (%v) and Read (%v) both failed", err, rerr)
+			return err
+		}
+		variant = nested
 	}
 
-	if colorScheme, ok := dbusutil.As[uint32](variant); ok {
+	colorScheme, ok := dbusutil.As[uint32](variant)
+	if !ok {
+		// Read double-wraps the value in a variant.
+		if inner, innerOk := variant.Value().(dbus.Variant); innerOk {
+			colorScheme, ok = dbusutil.As[uint32](inner)
+		}
+	}
+	if ok {
 		m.stateMutex.Lock()
 		m.state.Settings.ColorScheme = colorScheme
 		m.stateMutex.Unlock()
@@ -197,10 +308,18 @@ func (m *Manager) Close() {
 		return true
 	})
 
-	if m.systemConn != nil {
-		m.systemConn.Close()
-	}
 	if m.sessionConn != nil {
-		m.sessionConn.Close()
+		m.sessionConn.RemoveMatchSignal(
+			dbus.WithMatchInterface(dbusPortalSettingsInterface),
+			dbus.WithMatchMember("SettingChanged"),
+		)
+		m.stateMutex.Lock()
+		signals := m.settingsSignals
+		m.settingsSignals = nil
+		m.stateMutex.Unlock()
+		if signals != nil {
+			m.sessionConn.RemoveSignal(signals)
+			close(signals)
+		}
 	}
 }

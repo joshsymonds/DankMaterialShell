@@ -1,6 +1,6 @@
 package providers
 
-import "github.com/AvengeMedia/DankMaterialShell/core/internal/windowrules"
+import "github.com/duxlabs-dev/dux-shell/core/internal/windowrules"
 
 func newTestWindowRule(id, name, appID string) windowrules.WindowRule {
 	return windowrules.WindowRule{
@@ -11,12 +11,4 @@ func newTestWindowRule(id, name, appID string) windowrules.WindowRule {
 			AppID: appID,
 		},
 	}
-}
-
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-func floatPtr(f float64) *float64 {
-	return &f
 }

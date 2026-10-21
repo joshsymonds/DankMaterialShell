@@ -1,20 +1,15 @@
 import QtQuick
-import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Common
+import qs.Modules.Notifications
 import qs.Modals.Common
 import qs.Modules.Notifications.Center
 import qs.Services
 
-DankModal {
+DModal {
     id: notificationModal
 
     layerNamespace: "dms:notification-center-modal"
-
-    HyprlandFocusGrab {
-        windows: [notificationModal.contentWindow]
-        active: notificationModal.useHyprlandFocusGrab && notificationModal.shouldHaveFocus
-    }
 
     property bool notificationModalOpen: false
     property var notificationListRef: null
@@ -29,22 +24,6 @@ DankModal {
         NotificationService.onOverlayOpen();
         open();
         modalKeyboardController.reset();
-        if (modalKeyboardController && notificationListRef) {
-            modalKeyboardController.listView = notificationListRef;
-            modalKeyboardController.rebuildFlatNavigation();
-
-            Qt.callLater(() => {
-                modalKeyboardController.keyboardNavigationActive = true;
-                modalKeyboardController.selectedFlatIndex = 0;
-                modalKeyboardController.updateSelectedIdFromIndex();
-                if (notificationListRef) {
-                    notificationListRef.keyboardActive = true;
-                    notificationListRef.currentIndex = 0;
-                }
-                modalKeyboardController.selectionVersion++;
-                modalKeyboardController.ensureVisible();
-            });
-        }
     }
 
     function hide() {
@@ -70,9 +49,13 @@ DankModal {
         NotificationService.dismissAllPopups();
     }
 
-    modalWidth: Math.min(500, screenWidth - 48)
-    modalHeight: Math.min(700, screenHeight * 0.85)
-    backgroundColor: Theme.withAlpha(Theme.surfaceContainer, Theme.popupTransparency)
+    function dismissLastNotification() {
+        NotificationService.dismissLastNotification();
+    }
+
+    modalWidth: Math.min(NotificationMetrics.modalWidth, screenWidth - Theme.spacingL * 2)
+    modalHeight: Math.min(NotificationMetrics.modalHeight, screenHeight * NotificationMetrics.modalScreenRatio)
+    backgroundColor: Theme.floatingWindowSurface
     visible: false
     onBackgroundClicked: hide()
     onOpened: () => {
@@ -123,17 +106,23 @@ DankModal {
     }
 
     IpcHandler {
+        // DIsland owns this trigger whenever it is the sole bar for the screen.
         function open(): string {
+            if (PopoutService.routeToIsland("notificationcenter", null, false))
+                return "NOTIFICATION_ISLAND_OPEN_SUCCESS";
             notificationModal.show();
             return "NOTIFICATION_MODAL_OPEN_SUCCESS";
         }
 
         function close(): string {
+            const islandClosed = PopoutService.closeIslandActivity("notificationcenter");
             notificationModal.hide();
-            return "NOTIFICATION_MODAL_CLOSE_SUCCESS";
+            return islandClosed ? "NOTIFICATION_ISLAND_CLOSE_SUCCESS" : "NOTIFICATION_MODAL_CLOSE_SUCCESS";
         }
 
         function toggle(): string {
+            if (PopoutService.routeToIsland("notificationcenter", null, true))
+                return "NOTIFICATION_ISLAND_TOGGLE_SUCCESS";
             notificationModal.toggle();
             return "NOTIFICATION_MODAL_TOGGLE_SUCCESS";
         }
@@ -196,6 +185,17 @@ DankModal {
             return "NOTIFICATION_MODAL_DISMISS_ALL_POPUPS_SUCCESS";
         }
 
+        function dismiss(): string {
+            notificationModal.dismissLastNotification();
+            return "NOTIFICATION_DISMISS_SUCCESS";
+        }
+
+        function invokeLast(): string {
+            if (!NotificationService.invokeLastNotification())
+                return "NOTIFICATION_INVOKE_NO_ACTION";
+            return "NOTIFICATION_INVOKE_SUCCESS";
+        }
+
         target: "notifications"
     }
 
@@ -215,22 +215,26 @@ DankModal {
 
                 NotificationHeader {
                     id: notificationHeader
-                    keyboardController: modalKeyboardController
+                    modal: true
+                    transientSurfaceTracker: notificationModal.transientSurfaceTracker
+                    onCloseRequested: notificationModal.hide()
                     onCurrentTabChanged: notificationModal.currentTab = currentTab
+                    onSettingsRequested: {
+                        notificationModal.hide();
+                        PopoutService.openSettingsWithTab("notifications", notificationModal, () => notificationModal.show());
+                    }
                     Component.onCompleted: notificationModal.notificationHeaderRef = notificationHeader
-                }
-
-                NotificationSettings {
-                    id: notificationSettings
-                    expanded: notificationHeader.showSettings
                 }
 
                 KeyboardNavigatedNotificationList {
                     id: notificationList
-                    width: parent.width
+                    x: -swipeBleed
+                    width: parent.width + swipeBleed * 2
+                    swipeBleed: Theme.spacingL
                     height: parent.height - y
                     visible: notificationHeader.currentTab === 0
                     keyboardController: modalKeyboardController
+                    transientSurfaceTracker: notificationModal.transientSurfaceTracker
                     Component.onCompleted: {
                         notificationModal.notificationListRef = notificationList;
                         if (modalKeyboardController) {
@@ -245,6 +249,7 @@ DankModal {
                     width: parent.width
                     height: parent.height - y
                     visible: notificationHeader.currentTab === 1
+                    swipeBleed: Theme.spacingL
                     Component.onCompleted: notificationModal.historyListRef = historyList
                 }
             }
@@ -257,6 +262,7 @@ DankModal {
                 anchors.right: parent.right
                 anchors.margins: Theme.spacingL
                 showHints: notificationHeader.currentTab === 0 ? modalKeyboardController.showKeyboardHints : historyList.showKeyboardHints
+                historyTab: notificationHeader.currentTab === 1
             }
         }
     }

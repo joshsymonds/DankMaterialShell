@@ -1,20 +1,18 @@
 package evdev
 
 import (
-	"net"
-
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/duxlabs-dev/dux-go/ipc"
 )
 
-func HandleRequest(conn net.Conn, req models.Request, m *Manager) {
+func HandleRequest(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
 	switch req.Method {
 	case "evdev.getState":
 		handleGetState(conn, req, m)
 	default:
-		models.RespondError(conn, req.ID, "unknown method: "+req.Method)
+		conn.RespondError(req.ID, "unknown method: "+req.Method)
 	}
 }
 
-func handleGetState(conn net.Conn, req models.Request, m *Manager) {
-	models.Respond(conn, req.ID, m.GetState())
+func handleGetState(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
+	conn.Respond(req.ID, m.GetState())
 }

@@ -1,36 +1,8 @@
 import QtQuick
 import qs.Common
-import qs.Modules.Plugins
-import qs.Services
-import qs.Widgets
+import qs.Modules.DBar.Widgets as New
 
-BasePill {
-    id: root
-
-    content: Component {
-        Item {
-            implicitWidth: icon.width
-            implicitHeight: root.widgetThickness - root.horizontalPadding * 2
-
-            DankIcon {
-                id: icon
-                anchors.centerIn: parent
-                name: SessionService.idleInhibited ? "motion_sensor_active" : "motion_sensor_idle"
-                size: Theme.barIconSize(root.barThickness, -4, root.barConfig?.maximizeWidgetIcons, root.barConfig?.iconScale)
-                color: Theme.widgetTextColor
-            }
-        }
-    }
-
-    MouseArea {
-        z: 1
-        anchors.fill: parent
-        cursorShape: Qt.PointingHandCursor
-        onPressed: mouse => {
-            root.triggerRipple(this, mouse.x, mouse.y);
-        }
-        onClicked: {
-            SessionService.toggleIdleInhibit();
-        }
-    }
+New.IdleInhibitor {
+    id: shim
+    Component.onCompleted: Deprecation.module(shim, "IdleInhibitor", "qs.Modules.DankBar.Widgets", "qs.Modules.DBar.Widgets")
 }

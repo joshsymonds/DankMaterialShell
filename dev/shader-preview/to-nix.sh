@@ -11,9 +11,9 @@
 #   shader.colorTertiary        → shaderTertiaryColor
 #
 # Notes:
-#   - shader.intensity is NOT mapped: BarCanvas.qml hardcodes intensity=1.0
+#   - shader.intensity is NOT mapped: BarSurface.qml hardcodes intensity=1.0
 #     for hexrain mode. If you've tuned it, this script warns.
-#   - harness.speed is NOT mapped: BarCanvas.qml hardcodes speed=1.0.
+#   - harness.speed is NOT mapped: BarSurface.qml hardcodes speed=1.0.
 #   - To support a different shader (e.g. chrome_aurora) extend the mapping
 #     section below.
 
@@ -54,10 +54,10 @@ EOF
 
 if [[ "$intensity" != "1.0" && "$intensity" != "1" ]]; then
     echo
-    echo "# WARNING: shader.intensity=${intensity} is not expressible — BarCanvas.qml hardcodes 1.0 for hexrain." >&2
+    echo "# WARNING: shader.intensity=${intensity} is not expressible — BarSurface.qml hardcodes 1.0 for hexrain." >&2
 fi
 
 if [[ "$speed" != "1.0" && "$speed" != "1" ]]; then
     echo
-    echo "# WARNING: harness.speed=${speed} is not expressible — BarCanvas.qml hardcodes 1.0." >&2
+    echo "# WARNING: harness.speed=${speed} is not expressible — BarSurface.qml hardcodes 1.0." >&2
 fi

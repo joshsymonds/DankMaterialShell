@@ -2,13 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/keybinds"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/keybinds/providers"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/keybinds"
+	"github.com/duxlabs-dev/dux-shell/core/internal/keybinds/providers"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/wayland/keymap"
 	"github.com/spf13/cobra"
 )
 
@@ -46,18 +51,39 @@ var keybindsSetCmd = &cobra.Command{
 	Short: "Set a keybind override",
 	Long:  "Create or update a keybind override for the specified provider",
 	Args:  cobra.ExactArgs(3),
-	Run:   runKeybindsSet,
+	Run:   runKeybindsEdit,
 }
 
 var keybindsRemoveCmd = &cobra.Command{
 	Use:   "remove <provider> <key>",
-	Short: "Remove a keybind override",
-	Long:  "Remove a keybind override from the specified provider",
+	Short: "Remove a keybind",
+	Long:  "Remove a keybind. For Hyprland this writes a negative override to dms/binds-user.lua so the key stays unbound across DMS updates. For other providers it deletes the entry from the managed file.",
 	Args:  cobra.ExactArgs(2),
-	Run:   runKeybindsRemove,
+	Run:   runKeybindsEdit,
+}
+
+var keybindsResetCmd = &cobra.Command{
+	Use:   "reset <provider> <key>",
+	Short: "Reset a keybind override to its DMS default",
+	Long:  "Drop the user override for the given key so the DMS default re-applies. For providers without a separate default file (Niri, MangoWC) this is equivalent to remove.",
+	Args:  cobra.ExactArgs(2),
+	Run:   runKeybindsEdit,
+}
+
+var keybindsKeymapCmd = &cobra.Command{
+	Use:   "keymap",
+	Short: "Report which keysym each physical key carries on the first level",
+	Long: "Print the keysyms the active keyboard layout puts on the first level of every physical key, keyed by xkb keycode.\n\n" +
+		"Compositors resolve bind keysyms at that level, so a keysym missing from this list cannot be bound however many modifiers are pressed. " +
+		"The keybind editor uses it to warn instead of storing a bind that never fires.",
+	Run: runKeybindsKeymap,
 }
 
 func init() {
+	keybindsCmd.PersistentFlags().String("expected-generation", "", "Configuration generation observed when editing Aqueous bindings")
+	for _, command := range []*cobra.Command{keybindsSetCmd, keybindsRemoveCmd, keybindsResetCmd} {
+		command.Flags().Bool("json", false, "Return structured mutation results, including errors")
+	}
 	keybindsListCmd.Flags().BoolP("json", "j", false, "Output as JSON")
 	keybindsShowCmd.Flags().String("path", "", "Override config path for the provider")
 	keybindsSetCmd.Flags().String("desc", "", "Description for hotkey overlay")
@@ -66,12 +92,14 @@ func init() {
 	keybindsSetCmd.Flags().Bool("no-repeat", false, "Disable key repeat")
 	keybindsSetCmd.Flags().Bool("no-inhibiting", false, "Keep bind active when shortcuts are inhibited (allow-inhibiting=false)")
 	keybindsSetCmd.Flags().String("replace-key", "", "Original key to replace (removes old key)")
-	keybindsSetCmd.Flags().String("flags", "", "Hyprland bind flags (e.g., 'e' for repeat, 'l' for locked, 'r' for release)")
+	keybindsSetCmd.Flags().String("flags", "", "Hyprland bind flags as letters: e repeat, l locked, r release, o long-press, n non-consuming, m mouse, t transparent, i ignore-mods, u submap-universal, a auto-consuming, x allow-input-capture")
 
 	keybindsCmd.AddCommand(keybindsListCmd)
 	keybindsCmd.AddCommand(keybindsShowCmd)
 	keybindsCmd.AddCommand(keybindsSetCmd)
 	keybindsCmd.AddCommand(keybindsRemoveCmd)
+	keybindsCmd.AddCommand(keybindsResetCmd)
+	keybindsCmd.AddCommand(keybindsKeymapCmd)
 
 	keybinds.SetJSONProviderFactory(func(filePath string) (keybinds.Provider, error) {
 		return providers.NewJSONFileProvider(filePath)
@@ -84,6 +112,9 @@ func initializeProviders() {
 	registry := keybinds.GetDefaultRegistry()
 
 	hyprlandProvider := providers.NewHyprlandProvider("")
+	if err := registry.Register(providers.NewAqueousProvider()); err != nil {
+		log.Warnf("Failed to register Aqueous provider: %v", err)
+	}
 	if err := registry.Register(hyprlandProvider); err != nil {
 		log.Warnf("Failed to register Hyprland provider: %v", err)
 	}
@@ -146,6 +177,33 @@ func runKeybindsList(cmd *cobra.Command, _ []string) {
 	}
 }
 
+// runKeybindsKeymap answers with empty fields rather than an error when there
+// is no Wayland seat to ask, so the caller can simply skip the check instead
+// of having to tell "unknown layout" apart from "nothing wrong".
+func runKeybindsKeymap(_ *cobra.Command, _ []string) {
+	keysyms := map[string][]string{}
+	named := []string{}
+
+	km, err := keymap.FromSeat()
+	if err != nil {
+		log.Warnf("Failed to read the seat keymap: %v", err)
+	} else {
+		for code, syms := range km.Level1ByXkbKeycode() {
+			keysyms[strconv.FormatUint(uint64(code), 10)] = syms
+		}
+		// The vocabulary the keysyms above are drawn from, so a caller can
+		// tell a keysym we could not name from one the layout is missing.
+		named = slices.Compact(slices.Sorted(maps.Values(keymap.KeysymNames)))
+	}
+
+	output, err := json.Marshal(map[string]any{"keysyms": keysyms, "named": named})
+	if err != nil {
+		log.Warnf("Failed to encode keymap: %v", err)
+		return
+	}
+	fmt.Fprintln(os.Stdout, string(output))
+}
+
 func makeProviderWithPath(name, path string) keybinds.Provider {
 	switch name {
 	case "hyprland":
@@ -197,69 +255,92 @@ func runKeybindsShow(cmd *cobra.Command, args []string) {
 	printCheatSheet(provider)
 }
 
-func getWritableProvider(name string) keybinds.WritableProvider {
-	provider, err := keybinds.GetDefaultRegistry().Get(name)
+func keybindEditFailure(err error) map[string]any {
+	code := "command_failed"
+	var helperError *providers.AqueousError
+	if errors.As(err, &helperError) {
+		code = helperError.Code
+	}
+	return map[string]any{"success": false, "code": code, "message": err.Error()}
+}
+
+func runKeybindsEdit(cmd *cobra.Command, args []string) {
+	result, err := editKeybind(cmd, args)
+	if err == nil {
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+		return
+	}
+	structured, _ := cmd.Flags().GetBool("json")
+	if !structured {
+		log.Fatalf("Failed to save keybind: %v", err)
+		return
+	}
+	_ = json.NewEncoder(cmd.OutOrStdout()).Encode(keybindEditFailure(err))
+	os.Exit(1)
+}
+
+func editKeybind(cmd *cobra.Command, args []string) (map[string]any, error) {
+	provider, err := keybinds.GetDefaultRegistry().Get(args[0])
 	if err != nil {
-		log.Fatalf("Error: %v", err)
+		return nil, err
+	}
+	key := args[1]
+	if aqueous, ok := provider.(*providers.AqueousProvider); ok {
+		generation, _ := cmd.Flags().GetString("expected-generation")
+		edit := providers.AqueousBindEdit{Generation: generation, Key: key, Remove: cmd.Name() != "set"}
+		if !edit.Remove {
+			for _, flag := range []string{"desc", "allow-when-locked", "cooldown-ms", "no-repeat", "no-inhibiting", "flags"} {
+				if cmd.Flags().Changed(flag) {
+					return nil, fmt.Errorf("aqueous does not support --%s in this provider", flag)
+				}
+			}
+			edit.Action = args[2]
+			edit.OriginalKey, _ = cmd.Flags().GetString("replace-key")
+		}
+		result, err := aqueous.Edit(cmd.Context(), edit)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"success": true, "code": "applied", "generation": result.String("generation"), "key": key}, nil
 	}
 	writable, ok := provider.(keybinds.WritableProvider)
 	if !ok {
-		log.Fatalf("Provider %s does not support writing keybinds", name)
+		return nil, fmt.Errorf("provider %s does not support writing keybinds", args[0])
 	}
-	return writable
-}
-
-func runKeybindsSet(cmd *cobra.Command, args []string) {
-	providerName, key, action := args[0], args[1], args[2]
-	writable := getWritableProvider(providerName)
-
-	if replaceKey, _ := cmd.Flags().GetString("replace-key"); replaceKey != "" && replaceKey != key {
-		_ = writable.RemoveBind(replaceKey)
+	result := map[string]any{"success": true, "key": key}
+	switch cmd.Name() {
+	case "set":
+		options := make(map[string]any)
+		if v, _ := cmd.Flags().GetBool("allow-when-locked"); v {
+			options["allow-when-locked"] = true
+		}
+		if v, _ := cmd.Flags().GetInt("cooldown-ms"); v > 0 {
+			options["cooldown-ms"] = v
+		}
+		if v, _ := cmd.Flags().GetBool("no-repeat"); v {
+			options["repeat"] = false
+		}
+		if v, _ := cmd.Flags().GetBool("no-inhibiting"); v {
+			options["allow-inhibiting"] = false
+		}
+		if v, _ := cmd.Flags().GetString("flags"); v != "" {
+			options["flags"] = v
+		}
+		if replaceKey, _ := cmd.Flags().GetString("replace-key"); replaceKey != "" && replaceKey != key {
+			_ = writable.RemoveBind(replaceKey)
+		}
+		desc, _ := cmd.Flags().GetString("desc")
+		err = writable.SetBind(key, args[2], desc, options)
+		result["action"] = args[2]
+		result["path"] = writable.GetOverridePath()
+	case "remove":
+		err = writable.RemoveBind(key)
+		result["removed"] = true
+	case "reset":
+		err = writable.ResetBind(key)
+		result["reset"] = true
+	default:
+		return nil, fmt.Errorf("unsupported keybind operation: %s", cmd.Name())
 	}
-
-	options := make(map[string]any)
-	if v, _ := cmd.Flags().GetBool("allow-when-locked"); v {
-		options["allow-when-locked"] = true
-	}
-	if v, _ := cmd.Flags().GetInt("cooldown-ms"); v > 0 {
-		options["cooldown-ms"] = v
-	}
-	if v, _ := cmd.Flags().GetBool("no-repeat"); v {
-		options["repeat"] = false
-	}
-	if v, _ := cmd.Flags().GetBool("no-inhibiting"); v {
-		options["allow-inhibiting"] = false
-	}
-	if v, _ := cmd.Flags().GetString("flags"); v != "" {
-		options["flags"] = v
-	}
-
-	desc, _ := cmd.Flags().GetString("desc")
-	if err := writable.SetBind(key, action, desc, options); err != nil {
-		log.Fatalf("Error setting keybind: %v", err)
-	}
-
-	output, _ := json.MarshalIndent(map[string]any{
-		"success": true,
-		"key":     key,
-		"action":  action,
-		"path":    writable.GetOverridePath(),
-	}, "", "  ")
-	fmt.Fprintln(os.Stdout, string(output))
-}
-
-func runKeybindsRemove(_ *cobra.Command, args []string) {
-	providerName, key := args[0], args[1]
-	writable := getWritableProvider(providerName)
-
-	if err := writable.RemoveBind(key); err != nil {
-		log.Fatalf("Error removing keybind: %v", err)
-	}
-
-	output, _ := json.MarshalIndent(map[string]any{
-		"success": true,
-		"key":     key,
-		"removed": true,
-	}, "", "  ")
-	fmt.Fprintln(os.Stdout, string(output))
+	return result, err
 }
