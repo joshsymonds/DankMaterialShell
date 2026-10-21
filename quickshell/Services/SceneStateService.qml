@@ -22,7 +22,7 @@ import qs.Services
 //
 // Two-tier file backing per scene:
 //   - canonical: quickshell/Shaders/scenes/<name>.json — ships with DMS.
-//   - shadow:    $XDG_STATE_HOME/DankMaterialShell/scenes/<name>.json — writable.
+//   - shadow:    $XDG_STATE_HOME/dms/scenes/<name>.json — writable.
 //
 // On load, shadow wins if present (so user edits persist across DMS
 // restarts even when DMS itself lives in a read-only path like /nix/store).
@@ -54,7 +54,7 @@ Singleton {
     // Writable shadow under XDG state. Saves go here; loads prefer it
     // over the canonical when present.
     readonly property string shadowDir: {
-        return StandardPaths.writableLocation(StandardPaths.GenericStateLocation) + "/DankMaterialShell/scenes/";
+        return StandardPaths.writableLocation(StandardPaths.GenericStateLocation) + "/dms/scenes/";
     }
 
     function get(name) {
