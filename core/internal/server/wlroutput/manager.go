@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/proto/wlr_output_management"
-	wlclient "github.com/AvengeMedia/DankMaterialShell/core/pkg/go-wayland/wayland/client"
+	wlclient "github.com/duxlabs-dev/dux-go/wayland/client"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/proto/wlr_output_management"
 )
 
 func NewManager(display wlclient.WaylandDisplay) (*Manager, error) {
@@ -94,10 +94,7 @@ func (m *Manager) setupRegistry() error {
 		if e.Interface == wlr_output_management.ZwlrOutputManagerV1InterfaceName {
 			log.Infof("WlrOutput: found %s", wlr_output_management.ZwlrOutputManagerV1InterfaceName)
 			manager := wlr_output_management.NewZwlrOutputManagerV1(m.ctx)
-			version := e.Version
-			if version > 4 {
-				version = 4
-			}
+			version := min(e.Version, 4)
 
 			manager.SetHeadHandler(func(e wlr_output_management.ZwlrOutputManagerV1HeadEvent) {
 				m.handleHead(e)

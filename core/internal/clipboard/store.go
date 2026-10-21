@@ -47,7 +47,15 @@ func Store(data []byte, mimeType string) error {
 	return StoreWithConfig(data, mimeType, DefaultStoreConfig())
 }
 
-func StoreWithConfig(data []byte, mimeType string, cfg StoreConfig) error {
+func StoreWithConfig(data []byte, mimeType string, cfg StoreConfig) (err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		err = fmt.Errorf("clipboard db panic: %v", r)
+	}()
+
 	if len(data) == 0 {
 		return nil
 	}
@@ -121,7 +129,7 @@ func GetDBPath() (string, error) {
 		cacheDir = filepath.Join(homeDir, ".cache")
 	}
 
-	newDir := filepath.Join(cacheDir, "DankMaterialShell", "clipboard")
+	newDir := filepath.Join(cacheDir, "dms", "clipboard")
 	newPath := filepath.Join(newDir, "db")
 
 	if _, err := os.Stat(newPath); err == nil {

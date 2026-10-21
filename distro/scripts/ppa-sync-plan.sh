@@ -5,7 +5,7 @@ set -euo pipefail
 
 PPA_OWNER="avengemedia"
 LAUNCHPAD_API="https://api.launchpad.net/1.0"
-SERIES_LIST=(questing resolute)
+SERIES_LIST=(resolute stonking)
 PACKAGE_FILTER="dms-git"
 REBUILD_RELEASE=""
 JSON=false
@@ -13,7 +13,6 @@ JSON=false
 PACKAGES=(
     "dms:dms:release"
     "dms-git:dms-git:git"
-    "dms-greeter:danklinux:release"
 )
 
 while [[ $# -gt 0 ]]; do
@@ -38,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 latest_tag() {
-    git ls-remote --tags --refs --sort='-v:refname' https://github.com/AvengeMedia/DankMaterialShell.git |
+    git ls-remote --tags --refs --sort='-v:refname' https://github.com/duxlabs-dev/dux-shell.git |
         sed -n '1s|.*/v\{0,1\}||p'
 }
 
@@ -72,12 +71,12 @@ embedded_commit() {
 target_ppa() {
     local series="$1"
     if [[ -n "$REBUILD_RELEASE" ]]; then
-        if [[ "$series" == "resolute" ]]; then
+        if [[ "$series" == "stonking" ]]; then
             echo $((REBUILD_RELEASE + 1))
         else
             echo "$REBUILD_RELEASE"
         fi
-    elif [[ "$series" == "resolute" ]]; then
+    elif [[ "$series" == "stonking" ]]; then
         echo "2"
     else
         echo "1"

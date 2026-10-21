@@ -1,7 +1,7 @@
 import QtQuick
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginComponent {
@@ -25,7 +25,7 @@ PluginComponent {
 
             StyledText {
                 text: root.customColor.toString()
-                font.pixelSize: Theme.fontSizeSmall
+                font.pixelSize: root.textSize
                 color: Theme.surfaceText
                 anchors.verticalCenter: parent.verticalCenter
             }
@@ -48,7 +48,7 @@ PluginComponent {
 
             StyledText {
                 text: root.customColor.toString()
-                font.pixelSize: Theme.fontSizeSmall
+                font.pixelSize: root.textSize
                 color: Theme.surfaceText
                 anchors.horizontalCenter: parent.horizontalCenter
             }

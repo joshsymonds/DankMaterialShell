@@ -130,10 +130,10 @@ Singleton {
         const parts = [];
         switch (device.class) {
         case "direct":
-            parts.push(I18n.tr("Local"));
+            parts.push(I18n.tr("Local", "adjective, directly attached printer device class"));
             break;
         case "network":
-            parts.push(I18n.tr("Network"));
+            parts.push(I18n.tr("Network", "printer device class, a network printer"));
             break;
         case "file":
             parts.push(I18n.tr("File"));
@@ -223,6 +223,8 @@ Singleton {
             return;
         cupsAvailable = DMSService.capabilities.includes("cups");
 
+        if (refCount <= 0)
+            return;
         if (cupsAvailable && !stateInitialized) {
             stateInitialized = true;
             getState();
@@ -349,14 +351,6 @@ Singleton {
         return getPrinterStateTranslation(printer.state) + " (" + getPrinterStateReasonTranslation(printer.stateReason) + ")";
     }
 
-    function getCurrentPrinterStatePretty() {
-        if (!cupsAvailable || !selectedPrinter)
-            return "";
-
-        var printer = printers[selectedPrinter];
-        return getPrinterStateTranslation(printer.state) + " (" + I18n.tr("Reason") + ": " + getPrinterStateReasonTranslation(printer.stateReason) + ")";
-    }
-
     function getCurrentPrinterJobs() {
         if (!cupsAvailable || !selectedPrinter)
             return [];
@@ -370,14 +364,6 @@ Singleton {
 
         var printer = printers[printerName];
         return printer.jobs;
-    }
-
-    function getJobsNum(printerName) {
-        if (!cupsAvailable)
-            return 0;
-
-        var printer = printers[printerName];
-        return printer.jobs.length;
     }
 
     function pausePrinter(printerName) {
@@ -579,57 +565,6 @@ Singleton {
         });
     }
 
-    function setPrinterShared(printerName, shared) {
-        if (!cupsAvailable)
-            return;
-        const params = {
-            "printerName": printerName,
-            "shared": shared
-        };
-
-        DMSService.sendRequest("cups.setPrinterShared", params, response => {
-            if (response.error) {
-                ToastService.showError(I18n.tr("Failed to update sharing"), response.error);
-            } else {
-                getState();
-            }
-        });
-    }
-
-    function setPrinterLocation(printerName, location) {
-        if (!cupsAvailable)
-            return;
-        const params = {
-            "printerName": printerName,
-            "location": location
-        };
-
-        DMSService.sendRequest("cups.setPrinterLocation", params, response => {
-            if (response.error) {
-                ToastService.showError(I18n.tr("Failed to update location"), response.error);
-            } else {
-                getState();
-            }
-        });
-    }
-
-    function setPrinterInfo(printerName, info) {
-        if (!cupsAvailable)
-            return;
-        const params = {
-            "printerName": printerName,
-            "info": info
-        };
-
-        DMSService.sendRequest("cups.setPrinterInfo", params, response => {
-            if (response.error) {
-                ToastService.showError(I18n.tr("Failed to update description"), response.error);
-            } else {
-                getState();
-            }
-        });
-    }
-
     function printTestPage(printerName) {
         if (!cupsAvailable)
             return;
@@ -643,23 +578,6 @@ Singleton {
             } else {
                 ToastService.showInfo(I18n.tr("Test page sent to printer"));
                 fetchJobsForPrinter(printerName);
-            }
-        });
-    }
-
-    function moveJob(jobID, destPrinter) {
-        if (!cupsAvailable)
-            return;
-        const params = {
-            "jobID": jobID,
-            "destPrinter": destPrinter
-        };
-
-        DMSService.sendRequest("cups.moveJob", params, response => {
-            if (response.error) {
-                ToastService.showError(I18n.tr("Failed to move job"), response.error);
-            } else {
-                fetchAllJobs();
             }
         });
     }
@@ -699,40 +617,6 @@ Singleton {
         });
     }
 
-    function addPrinterToClass(className, printerName) {
-        if (!cupsAvailable)
-            return;
-        const params = {
-            "className": className,
-            "printerName": printerName
-        };
-
-        DMSService.sendRequest("cups.addPrinterToClass", params, response => {
-            if (response.error) {
-                ToastService.showError(I18n.tr("Failed to add printer to class"), response.error);
-            } else {
-                getClasses();
-            }
-        });
-    }
-
-    function removePrinterFromClass(className, printerName) {
-        if (!cupsAvailable)
-            return;
-        const params = {
-            "className": className,
-            "printerName": printerName
-        };
-
-        DMSService.sendRequest("cups.removePrinterFromClass", params, response => {
-            if (response.error) {
-                ToastService.showError(I18n.tr("Failed to remove printer from class"), response.error);
-            } else {
-                getClasses();
-            }
-        });
-    }
-
     function deleteClass(className) {
         if (!cupsAvailable)
             return;
@@ -758,33 +642,33 @@ Singleton {
     function getJobStateTranslation(state) {
         switch (state) {
         case "pending":
-            return I18n.tr("Pending");
+            return I18n.tr("Pending", "printer job state");
         case "pending-held":
-            return I18n.tr("Held");
+            return I18n.tr("Held", "printer job state, job is on hold");
         case "processing":
-            return I18n.tr("Processing");
+            return I18n.tr("Processing", "printer job state, also printer state");
         case "processing-stopped":
-            return I18n.tr("Stopped");
+            return I18n.tr("Stopped", "printer job state, also printer state");
         case "canceled":
-            return I18n.tr("Canceled");
+            return I18n.tr("Canceled", "printer job state");
         case "aborted":
-            return I18n.tr("Aborted");
+            return I18n.tr("Aborted", "printer job state");
         case "completed":
-            return I18n.tr("Completed");
+            return I18n.tr("Completed", "printer job state");
         default:
             return state;
         }
     }
 
     readonly property var states: ({
-            "idle": I18n.tr("Idle"),
+            "idle": I18n.tr("Idle", "adjective, printer state", true),
             "processing": I18n.tr("Processing"),
             "stopped": I18n.tr("Stopped")
         })
 
     readonly property var reasonsGeneral: ({
             "none": I18n.tr("None"),
-            "other": I18n.tr("Other")
+            "other": I18n.tr("Other", "printer state reason")
         })
 
     readonly property var reasonsSupplies: ({
@@ -813,11 +697,11 @@ Singleton {
         })
 
     readonly property var reasonsErrors: ({
-            "paused": I18n.tr("Paused"),
-            "shutdown": I18n.tr("Shutdown"),
+            "paused": I18n.tr("Paused", "printer state reason"),
+            "shutdown": I18n.tr("Shutdown", "printer state reason, the printer has shut down"),
             "connecting-to-device": I18n.tr("Connecting to Device"),
             "timed-out": I18n.tr("Timed Out"),
-            "stopping": I18n.tr("Stopping"),
+            "stopping": I18n.tr("Stopping", "printer state reason"),
             "stopped-partly": I18n.tr("Stopped Partly")
         })
 
@@ -834,8 +718,8 @@ Singleton {
 
     readonly property var severitySuffixes: ({
             "-error": I18n.tr("Error"),
-            "-warning": I18n.tr("Warning"),
-            "-report": I18n.tr("Report")
+            "-warning": I18n.tr("Warning", "noun, printer state reason severity"),
+            "-report": I18n.tr("Report", "noun, printer state reason severity")
         })
 
     function getPrinterStateTranslation(state) {

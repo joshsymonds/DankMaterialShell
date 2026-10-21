@@ -5,12 +5,44 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Common
-import qs.Services
+import "../PamStack.js" as PamStack
 
 Singleton {
     id: root
 
+    signal toastRequested(int severity, string title, string body, string command, string category)
+    signal toastCategoryDismissed(string category)
+
     property var settingsRoot: null
+
+    onSettingsRootChanged: {
+        if (settingsRoot && !settingsRoot.isGreeterMode)
+            consumeGreeterAutoLoginPendingSync();
+    }
+
+    readonly property string greeterAutoLoginPendingSyncPath: (Quickshell.env("DMS_GREET_CFG_DIR") || "/var/cache/dms-greeter") + "/.local/state/auto-login-sync-pending"
+
+    function consumeGreeterAutoLoginPendingSync() {
+        if (!settingsRoot || settingsRoot.isGreeterMode)
+            return;
+        greeterAutoLoginPendingCheckProcess.running = true;
+    }
+
+    property var greeterAutoLoginPendingCheckProcess: Process {
+        command: ["sh", "-c", "if [ -f " + JSON.stringify(root.greeterAutoLoginPendingSyncPath) + " ]; then rm -f " + JSON.stringify(root.greeterAutoLoginPendingSyncPath) + "; echo pending; fi"]
+        running: false
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if ((text || "").trim() !== "pending" || !root.settingsRoot)
+                    return;
+                if (!root.settingsRoot.greeterAutoLogin)
+                    root.settingsRoot.set("greeterAutoLogin", true);
+                else
+                    root.scheduleGreeterAutoLoginSync();
+            }
+        }
+    }
 
     property string greetdPamText: ""
     property string systemAuthPamText: ""
@@ -32,8 +64,10 @@ Singleton {
 
     readonly property string homeDir: Quickshell.env("HOME") || ""
     readonly property string u2fKeysPath: homeDir ? homeDir + "/.config/Yubico/u2f_keys" : ""
-    readonly property bool homeU2fKeysDetected: u2fKeysPath !== "" && u2fKeysWatcher.loaded && u2fKeysText.trim() !== ""
-    readonly property bool lockU2fCustomConfigDetected: pamModuleEnabled(dankshellU2fPamText, "pam_u2f")
+    property bool authProbeRequested: false
+    readonly property bool homeU2fKeysDetected: u2fKeysPath !== "" && (authWatchers.item?.u2fKeys.loaded ?? false) && u2fKeysText.trim() !== ""
+    readonly property bool lockU2fCustomConfigDetected: PamStack.moduleEnabled(dankshellU2fPamText, "pam_u2f")
+    readonly property bool lockU2fCustomSourceDetected: (settingsRoot?.lockU2fPamPath || "") !== "" && (authWatchers.item?.customU2fPam.loaded ?? false)
     readonly property bool greeterPamHasFprint: greeterPamStackHasModule("pam_fprintd")
     readonly property bool greeterPamHasU2f: greeterPamStackHasModule("pam_u2f")
 
@@ -59,7 +93,7 @@ Singleton {
             return forcedFprintAvailable ? "ready" : "probe_failed";
         if (!fingerprintProbeFinalized)
             return "probe_failed";
-        return parseFingerprintProbe(fingerprintProbeExitCode, fingerprintProbeOutput, pamFprintSupportDetected);
+        return PamStack.fingerprintProbeState(fingerprintProbeExitCode, fingerprintProbeOutput, pamFprintSupportDetected);
     }
 
     // --- Lock fingerprint capabilities ---
@@ -147,7 +181,7 @@ Singleton {
     readonly property bool lockU2fReady: {
         if (forcedU2fAvailable !== null)
             return forcedU2fAvailable;
-        return lockU2fCustomConfigDetected || homeU2fKeysDetected;
+        return lockU2fCustomSourceDetected || lockU2fCustomConfigDetected || homeU2fKeysDetected;
     }
 
     readonly property bool lockU2fCanEnable: {
@@ -217,6 +251,11 @@ Singleton {
     readonly property var _pamProbeCommand: ["sh", "-c", "for module in pam_fprintd.so pam_u2f.so; do found=false; for dir in /usr/lib64/security /usr/lib/security /lib/security /lib/x86_64-linux-gnu/security /usr/lib/x86_64-linux-gnu/security /usr/lib/aarch64-linux-gnu/security /run/current-system/sw/lib/security; do if [ -f \"$dir/$module\" ]; then found=true; break; fi; done; printf '%s:%s\\n' \"$module\" \"$found\"; done"]
 
     function detectAuthCapabilities() {
+        authProbeRequested = true;
+        // FileView cannot watch paths that do not exist yet, so reload the U2F PAM
+        authWatchers.item.dankshellU2fPam.reload();
+        authWatchers.item.u2fKeys.reload();
+
         if (forcedFprintAvailable === null) {
             fingerprintProbeFinalized = false;
             Proc.runCommand("fprint-probe", _fprintProbeCommand, (output, exitCode) => {
@@ -283,7 +322,7 @@ Singleton {
     function launchAuthApplyTerminalFallback(fromPrecheck, details) {
         authApplyTerminalFallbackFromPrecheck = fromPrecheck;
         if (details && details !== "")
-            ToastService.showInfo(I18n.tr("Authentication changes need sudo. Opening terminal so you can use password or fingerprint."), details, "", "auth-sync");
+            toastRequested(0, I18n.tr("Authentication changes need sudo. Opening terminal so you can use password or fingerprint."), details, "", "auth-sync");
         authApplyTerminalFallbackStderr = "";
         authApplyTerminalFallbackProcess.running = true;
     }
@@ -296,134 +335,68 @@ Singleton {
             authApplyDebounce.restart();
     }
 
-    // --- PAM parsing helpers ---
+    // --- Greeter auto-login sync pipeline ---
 
-    function stripPamComment(line) {
-        if (!line)
-            return "";
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#"))
-            return "";
-        const hashIdx = trimmed.indexOf("#");
-        if (hashIdx >= 0)
-            return trimmed.substring(0, hashIdx).trim();
-        return trimmed;
+    property bool greeterAutoLoginSyncRunning: false
+    property bool greeterAutoLoginSyncQueued: false
+    property bool greeterAutoLoginSyncRerunRequested: false
+    property string greeterAutoLoginSyncStdout: ""
+    property string greeterAutoLoginSyncStderr: ""
+
+    function scheduleGreeterAutoLoginSync() {
+        if (!settingsRoot || settingsRoot.isGreeterMode)
+            return;
+
+        greeterAutoLoginSyncQueued = true;
+        if (greeterAutoLoginSyncRunning) {
+            greeterAutoLoginSyncRerunRequested = true;
+            return;
+        }
+
+        greeterAutoLoginSyncDebounce.restart();
     }
 
-    function pamModuleEnabled(pamText, moduleName) {
-        if (!pamText || !moduleName)
-            return false;
-        const lines = pamText.split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-            const line = stripPamComment(lines[i]);
-            if (!line)
-                continue;
-            if (line.includes(moduleName))
-                return true;
-        }
-        return false;
+    function beginGreeterAutoLoginSync() {
+        if (!greeterAutoLoginSyncQueued || greeterAutoLoginSyncRunning || !settingsRoot || settingsRoot.isGreeterMode)
+            return;
+
+        greeterAutoLoginSyncQueued = false;
+        greeterAutoLoginSyncRerunRequested = false;
+        greeterAutoLoginSyncStdout = "";
+        greeterAutoLoginSyncStderr = "";
+        greeterAutoLoginSyncRunning = true;
+        greeterAutoLoginSyncSudoProbeProcess.running = true;
     }
 
-    function pamTextIncludesFile(pamText, filename) {
-        if (!pamText || !filename)
-            return false;
-        const lines = pamText.split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-            const line = stripPamComment(lines[i]);
-            if (!line)
-                continue;
-            if (line.includes(filename) && (line.includes("include") || line.includes("substack") || line.startsWith("@include")))
-                return true;
+    function deferGreeterAutoLoginSyncToPill(details) {
+        toastCategoryDismissed("greeter-autologin-sync");
+        SessionData.set("greeterSyncPending", true);
+        toastRequested(1, I18n.tr("Auto-login change needs a sync"), I18n.tr("Administrator access is required. Press Apply changes in Settings → Greeter.") + (details ? "\n\n" + details : ""), "dms-greeter sync --autologin", "greeter-autologin-sync");
+        finishGreeterAutoLoginSync();
+    }
+
+    function greeterAutoLoginSyncSuccessToast(details) {
+        const enabling = settingsRoot && settingsRoot.greeterAutoLogin;
+        // Clear the sticky in-progress toast, then confirm with an auto-dismissing toast.
+        toastCategoryDismissed("greeter-autologin-sync");
+        if (enabling) {
+            toastRequested(1, I18n.tr("Auto-login enabled"), I18n.tr("You'll skip the greeter password after the next reboot. The lock screen and signing out still require your password.") + (details ? "\n\n" + details : ""), "", "");
+        } else {
+            toastRequested(0, I18n.tr("Auto-login disabled"), I18n.tr("You'll enter your password at the greeter after the next reboot.") + (details ? "\n\n" + details : ""), "", "");
         }
-        return false;
+    }
+
+    function finishGreeterAutoLoginSync() {
+        const shouldRerun = greeterAutoLoginSyncQueued || greeterAutoLoginSyncRerunRequested;
+        greeterAutoLoginSyncRunning = false;
+        greeterAutoLoginSyncRerunRequested = false;
+        if (shouldRerun)
+            greeterAutoLoginSyncDebounce.restart();
     }
 
     function greeterPamStackHasModule(moduleName) {
-        if (pamModuleEnabled(greetdPamText, moduleName))
-            return true;
         const includedPamStacks = [["system-auth", systemAuthPamText], ["common-auth", commonAuthPamText], ["password-auth", passwordAuthPamText], ["system-login", systemLoginPamText], ["system-local-login", systemLocalLoginPamText], ["common-auth-pc", commonAuthPcPamText], ["login", loginPamText]];
-        for (let i = 0; i < includedPamStacks.length; i++) {
-            const stack = includedPamStacks[i];
-            if (pamTextIncludesFile(greetdPamText, stack[0]) && pamModuleEnabled(stack[1], moduleName))
-                return true;
-        }
-        return false;
-    }
-
-    // --- Fingerprint probe output parsing ---
-
-    function hasEnrolledFingerprintOutput(output) {
-        const lower = (output || "").toLowerCase();
-        if (lower.includes("has fingers enrolled") || lower.includes("has fingerprints enrolled"))
-            return true;
-        const lines = lower.split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-            const trimmed = lines[i].trim();
-            if (trimmed.startsWith("finger:"))
-                return true;
-            if (trimmed.startsWith("- ") && trimmed.includes("finger"))
-                return true;
-        }
-        return false;
-    }
-
-    function hasMissingFingerprintEnrollmentOutput(output) {
-        const lower = (output || "").toLowerCase();
-        return lower.includes("no fingers enrolled") || lower.includes("no fingerprints enrolled") || lower.includes("no prints enrolled");
-    }
-
-    function hasMissingFingerprintReaderOutput(output) {
-        const lower = (output || "").toLowerCase();
-        return lower.includes("no devices available") || lower.includes("no device available") || lower.includes("no devices found") || lower.includes("list_devices failed") || lower.includes("no device");
-    }
-
-    function parseFingerprintProbe(exitCode, output, pamFprintDetected) {
-        if (hasEnrolledFingerprintOutput(output))
-            return "ready";
-        if (hasMissingFingerprintEnrollmentOutput(output))
-            return "missing_enrollment";
-        if (hasMissingFingerprintReaderOutput(output))
-            return "missing_reader";
-        if (exitCode === 0)
-            return "missing_enrollment";
-        if (exitCode === 127 || (output || "").includes("__missing_command__"))
-            return "probe_failed";
-        return pamFprintDetected ? "probe_failed" : "missing_pam_support";
-    }
-
-    // --- Qt tools detection ---
-
-    function detectQtTools() {
-        qtToolsDetectionProcess.running = true;
-    }
-
-    function checkPluginSettings() {
-        pluginSettingsCheckProcess.running = true;
-    }
-
-    property var qtToolsDetectionProcess: Process {
-        command: ["sh", "-c", "echo -n 'qt5ct:'; command -v qt5ct >/dev/null && echo 'true' || echo 'false'; echo -n 'qt6ct:'; command -v qt6ct >/dev/null && echo 'true' || echo 'false'; echo -n 'gtk:'; (command -v gsettings >/dev/null || command -v dconf >/dev/null) && echo 'true' || echo 'false'"]
-        running: false
-
-        stdout: StdioCollector {
-            onStreamFinished: {
-                if (!settingsRoot)
-                    return;
-                if (text && text.trim()) {
-                    const lines = text.trim().split("\n");
-                    for (let i = 0; i < lines.length; i++) {
-                        const line = lines[i];
-                        if (line.startsWith("qt5ct:")) {
-                            settingsRoot.qt5ctAvailable = line.split(":")[1] === "true";
-                        } else if (line.startsWith("qt6ct:")) {
-                            settingsRoot.qt6ctAvailable = line.split(":")[1] === "true";
-                        } else if (line.startsWith("gtk:")) {
-                            settingsRoot.gtkAvailable = line.split(":")[1] === "true";
-                        }
-                    }
-                }
-            }
-        }
+        return PamStack.stackHasModule(greetdPamText, includedPamStacks, moduleName);
     }
 
     Timer {
@@ -431,6 +404,63 @@ Singleton {
         interval: 300
         repeat: false
         onTriggered: root.beginAuthApply()
+    }
+
+    Timer {
+        id: greeterAutoLoginSyncDebounce
+        interval: 300
+        repeat: false
+        onTriggered: root.beginGreeterAutoLoginSync()
+    }
+
+    property var greeterAutoLoginSyncProcess: Process {
+        command: ["dms-greeter", "sync", "--yes", "--autologin"]
+        running: false
+
+        stdout: StdioCollector {
+            onStreamFinished: root.greeterAutoLoginSyncStdout = text || ""
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: root.greeterAutoLoginSyncStderr = text || ""
+        }
+
+        onExited: exitCode => {
+            const out = (root.greeterAutoLoginSyncStdout || "").trim();
+            const err = (root.greeterAutoLoginSyncStderr || "").trim();
+
+            if (exitCode === 0) {
+                let details = out;
+                if (err !== "")
+                    details = details !== "" ? details + "\n\nstderr:\n" + err : "stderr:\n" + err;
+                root.greeterAutoLoginSyncSuccessToast(details);
+                root.finishGreeterAutoLoginSync();
+                return;
+            }
+
+            let details = "";
+            if (out !== "")
+                details = out;
+            if (err !== "")
+                details = details !== "" ? details + "\n\nstderr:\n" + err : "stderr:\n" + err;
+            root.deferGreeterAutoLoginSyncToPill(details);
+        }
+    }
+
+    property var greeterAutoLoginSyncSudoProbeProcess: Process {
+        command: ["sudo", "-n", "true"]
+        running: false
+
+        onExited: exitCode => {
+            const enabling = root.settingsRoot && root.settingsRoot.greeterAutoLogin;
+            if (exitCode === 0) {
+                root.toastRequested(1, enabling ? I18n.tr("Applying auto-login on startup...") : I18n.tr("Disabling auto-login on startup..."), "", "dms-greeter sync --autologin", "greeter-autologin-sync");
+                root.greeterAutoLoginSyncProcess.running = true;
+                return;
+            }
+
+            root.deferGreeterAutoLoginSyncToPill("");
+        }
     }
 
     property var authApplyProcess: Process {
@@ -453,7 +483,7 @@ Singleton {
                 let details = out;
                 if (err !== "")
                     details = details !== "" ? details + "\n\nstderr:\n" + err : "stderr:\n" + err;
-                ToastService.showInfo(I18n.tr("Authentication changes applied."), details, "", "auth-sync");
+                root.toastRequested(0, I18n.tr("Authentication changes applied"), details, "", "auth-sync");
                 root.detectAuthCapabilities();
                 root.finishAuthApply();
                 return;
@@ -464,7 +494,7 @@ Singleton {
                 details = out;
             if (err !== "")
                 details = details !== "" ? details + "\n\nstderr:\n" + err : "stderr:\n" + err;
-            ToastService.showWarning(I18n.tr("Background authentication sync failed. Trying terminal mode."), details, "", "auth-sync");
+            root.toastRequested(1, I18n.tr("Background authentication sync failed. Trying terminal mode."), details, "", "auth-sync");
             root.launchAuthApplyTerminalFallback(false, "");
         }
     }
@@ -480,7 +510,7 @@ Singleton {
         onExited: exitCode => {
             const err = (root.authApplySudoProbeStderr || "").trim();
             if (exitCode === 0) {
-                ToastService.showInfo(I18n.tr("Applying authentication changes…"), "", "", "auth-sync");
+                root.toastRequested(0, I18n.tr("Applying authentication changes..."), "", "", "auth-sync");
                 root.authApplyProcess.running = true;
                 return;
             }
@@ -499,104 +529,111 @@ Singleton {
 
         onExited: exitCode => {
             if (exitCode === 0) {
-                const message = root.authApplyTerminalFallbackFromPrecheck ? I18n.tr("Terminal opened. Complete authentication setup there; it will close automatically when done.") : I18n.tr("Terminal fallback opened. Complete authentication setup there; it will close automatically when done.");
-                ToastService.showInfo(message, "", "", "auth-sync");
+                const message = root.authApplyTerminalFallbackFromPrecheck ? I18n.tr("Terminal opened. Complete authentication there; it will close automatically when done.") : I18n.tr("Terminal fallback opened. Complete authentication there; it will close automatically when done.");
+                root.toastRequested(0, message, "", "", "auth-sync");
             } else {
                 let details = (root.authApplyTerminalFallbackStderr || "").trim();
-                ToastService.showError(I18n.tr("Terminal fallback failed. Install a supported terminal emulator or run 'dms auth sync' manually.") + " (exit " + exitCode + ")", details, "", "auth-sync");
+                root.toastRequested(2, I18n.tr("Terminal fallback failed. Install a supported terminal emulator or run 'dms auth sync' manually.") + " (exit " + exitCode + ")", details, "", "auth-sync");
             }
             root.finishAuthApply();
         }
     }
 
-    FileView {
-        id: greetdPamWatcher
-        path: "/etc/pam.d/greetd"
-        printErrors: false
-        onLoaded: root.greetdPamText = text()
-        onLoadFailed: root.greetdPamText = ""
-    }
+    Loader {
+        id: authWatchers
+        active: root.authProbeRequested
+        sourceComponent: Item {
+            property alias dankshellU2fPam: dankshellU2fPamWatcher
+            property alias customU2fPam: customU2fPamWatcher
+            property alias u2fKeys: u2fKeysWatcher
 
-    FileView {
-        id: systemAuthPamWatcher
-        path: "/etc/pam.d/system-auth"
-        printErrors: false
-        onLoaded: root.systemAuthPamText = text()
-        onLoadFailed: root.systemAuthPamText = ""
-    }
+            FileView {
+                id: greetdPamWatcher
+                path: "/etc/pam.d/greetd"
+                printErrors: false
+                onLoaded: root.greetdPamText = text()
+                onLoadFailed: root.greetdPamText = ""
+            }
 
-    FileView {
-        id: commonAuthPamWatcher
-        path: "/etc/pam.d/common-auth"
-        printErrors: false
-        onLoaded: root.commonAuthPamText = text()
-        onLoadFailed: root.commonAuthPamText = ""
-    }
+            FileView {
+                id: systemAuthPamWatcher
+                path: "/etc/pam.d/system-auth"
+                printErrors: false
+                onLoaded: root.systemAuthPamText = text()
+                onLoadFailed: root.systemAuthPamText = ""
+            }
 
-    FileView {
-        id: passwordAuthPamWatcher
-        path: "/etc/pam.d/password-auth"
-        printErrors: false
-        onLoaded: root.passwordAuthPamText = text()
-        onLoadFailed: root.passwordAuthPamText = ""
-    }
+            FileView {
+                id: commonAuthPamWatcher
+                path: "/etc/pam.d/common-auth"
+                printErrors: false
+                onLoaded: root.commonAuthPamText = text()
+                onLoadFailed: root.commonAuthPamText = ""
+            }
 
-    FileView {
-        id: systemLoginPamWatcher
-        path: "/etc/pam.d/system-login"
-        printErrors: false
-        onLoaded: root.systemLoginPamText = text()
-        onLoadFailed: root.systemLoginPamText = ""
-    }
+            FileView {
+                id: passwordAuthPamWatcher
+                path: "/etc/pam.d/password-auth"
+                printErrors: false
+                onLoaded: root.passwordAuthPamText = text()
+                onLoadFailed: root.passwordAuthPamText = ""
+            }
 
-    FileView {
-        id: systemLocalLoginPamWatcher
-        path: "/etc/pam.d/system-local-login"
-        printErrors: false
-        onLoaded: root.systemLocalLoginPamText = text()
-        onLoadFailed: root.systemLocalLoginPamText = ""
-    }
+            FileView {
+                id: systemLoginPamWatcher
+                path: "/etc/pam.d/system-login"
+                printErrors: false
+                onLoaded: root.systemLoginPamText = text()
+                onLoadFailed: root.systemLoginPamText = ""
+            }
 
-    FileView {
-        id: commonAuthPcPamWatcher
-        path: "/etc/pam.d/common-auth-pc"
-        printErrors: false
-        onLoaded: root.commonAuthPcPamText = text()
-        onLoadFailed: root.commonAuthPcPamText = ""
-    }
+            FileView {
+                id: systemLocalLoginPamWatcher
+                path: "/etc/pam.d/system-local-login"
+                printErrors: false
+                onLoaded: root.systemLocalLoginPamText = text()
+                onLoadFailed: root.systemLocalLoginPamText = ""
+            }
 
-    FileView {
-        id: loginPamWatcher
-        path: "/etc/pam.d/login"
-        printErrors: false
-        onLoaded: root.loginPamText = text()
-        onLoadFailed: root.loginPamText = ""
-    }
+            FileView {
+                id: commonAuthPcPamWatcher
+                path: "/etc/pam.d/common-auth-pc"
+                printErrors: false
+                onLoaded: root.commonAuthPcPamText = text()
+                onLoadFailed: root.commonAuthPcPamText = ""
+            }
 
-    FileView {
-        id: dankshellU2fPamWatcher
-        path: "/etc/pam.d/dankshell-u2f"
-        printErrors: false
-        onLoaded: root.dankshellU2fPamText = text()
-        onLoadFailed: root.dankshellU2fPamText = ""
-    }
+            FileView {
+                id: loginPamWatcher
+                path: "/etc/pam.d/login"
+                printErrors: false
+                onLoaded: root.loginPamText = text()
+                onLoadFailed: root.loginPamText = ""
+            }
 
-    FileView {
-        id: u2fKeysWatcher
-        path: root.u2fKeysPath
-        printErrors: false
-        onLoaded: root.u2fKeysText = text()
-        onLoadFailed: root.u2fKeysText = ""
-    }
+            FileView {
+                id: dankshellU2fPamWatcher
+                path: "/etc/pam.d/dankshell-u2f"
+                watchChanges: true
+                printErrors: false
+                onLoaded: root.dankshellU2fPamText = text()
+                onLoadFailed: root.dankshellU2fPamText = ""
+            }
 
-    property var pluginSettingsCheckProcess: Process {
-        command: ["test", "-f", settingsRoot?.pluginSettingsPath || ""]
-        running: false
+            FileView {
+                id: customU2fPamWatcher
+                path: root.settingsRoot?.lockU2fPamPath || ""
+                printErrors: false
+            }
 
-        onExited: function (exitCode) {
-            if (!settingsRoot)
-                return;
-            settingsRoot.pluginSettingsFileExists = (exitCode === 0);
+            FileView {
+                id: u2fKeysWatcher
+                path: root.u2fKeysPath
+                watchChanges: true
+                printErrors: false
+                onLoaded: root.u2fKeysText = text()
+                onLoadFailed: root.u2fKeysText = ""
+            }
         }
     }
 }

@@ -11,6 +11,8 @@ Singleton {
 
     property var appUsageRanking: {}
     property bool _saving: false
+    property bool _hasLoaded: false
+    property bool _parseError: false
 
     Component.onCompleted: {
         loadSettings();
@@ -21,22 +23,28 @@ Singleton {
     }
 
     function parseSettings(content) {
+        _parseError = false;
         try {
             if (content && content.trim()) {
                 var settings = JSON.parse(content);
                 appUsageRanking = settings.appUsageRanking || {};
             }
-        } catch (e) {}
+            _hasLoaded = true;
+        } catch (e) {
+            _parseError = true;
+        }
     }
 
     function saveSettings() {
+        if (_parseError || !_hasLoaded)
+            return;
         settingsFile.setText(JSON.stringify({
             "appUsageRanking": appUsageRanking
         }, null, 2));
     }
 
     function addAppUsage(app) {
-        if (!app)
+        if (!app || !SettingsData.launcherHistoryEnabled)
             return;
         var appId = app.id || (app.execString || app.exec || "");
         if (!appId)
@@ -63,6 +71,11 @@ Singleton {
         _saving = true;
         saveSettings();
         _saving = false;
+    }
+
+    function clear() {
+        appUsageRanking = {};
+        saveSettings();
     }
 
     function getRankedApps() {
@@ -109,10 +122,10 @@ Singleton {
     FileView {
         id: settingsFile
 
-        path: StandardPaths.writableLocation(StandardPaths.GenericStateLocation) + "/DankMaterialShell/appusage.json"
+        path: StandardPaths.writableLocation(StandardPaths.GenericStateLocation) + "/dms/appusage.json"
         blockLoading: true
         blockWrites: true
-        watchChanges: true
+        watchChanges: SettingsData.launcherHistoryEnabled
         onLoaded: {
             if (root._saving)
                 return;

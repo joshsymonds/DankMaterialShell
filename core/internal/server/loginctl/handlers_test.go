@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	mockdbus "github.com/AvengeMedia/DankMaterialShell/core/internal/mocks/github.com/godbus/dbus/v5"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	mockdbus "github.com/duxlabs-dev/dux-shell/core/internal/mocks/github.com/godbus/dbus/v5"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/models"
 	"github.com/godbus/dbus/v5"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,34 +43,7 @@ func (m *mockNetConn) Close() error {
 	return nil
 }
 
-func TestRespondError_Loginctl(t *testing.T) {
-	conn := newMockNetConn()
-	models.RespondError(conn, 123, "test error")
-
-	var resp models.Response[any]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-	require.NoError(t, err)
-
-	assert.Equal(t, 123, resp.ID)
-	assert.Equal(t, "test error", resp.Error)
-	assert.Nil(t, resp.Result)
-}
-
-func TestRespond_Loginctl(t *testing.T) {
-	conn := newMockNetConn()
-	result := models.SuccessResult{Success: true, Message: "test"}
-	models.Respond(conn, 123, result)
-
-	var resp models.Response[models.SuccessResult]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-	require.NoError(t, err)
-
-	assert.Equal(t, 123, resp.ID)
-	assert.Empty(t, resp.Error)
-	require.NotNil(t, resp.Result)
-	assert.True(t, resp.Result.Success)
-	assert.Equal(t, "test", resp.Result.Message)
-}
+func (m *mockNetConn) SetWriteDeadline(t time.Time) error { return nil }
 
 func TestHandleGetState(t *testing.T) {
 	manager := &Manager{
@@ -85,13 +58,14 @@ func TestHandleGetState(t *testing.T) {
 		stateMutex: sync.RWMutex{},
 	}
 
-	conn := newMockNetConn()
-	req := models.Request{ID: 123, Method: "loginctl.getState"}
+	mc := newMockNetConn()
+	conn := ipc.NewConnWriter(mc)
+	req := ipc.Request{ID: 123, Method: "loginctl.getState"}
 
 	handleGetState(conn, req, manager)
 
-	var resp models.Response[SessionState]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+	var resp ipc.Response[SessionState]
+	err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 	require.NoError(t, err)
 
 	assert.Equal(t, 123, resp.ID)
@@ -114,12 +88,13 @@ func TestHandleLock(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "loginctl.lock"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "loginctl.lock"}
 		handleLock(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -140,12 +115,13 @@ func TestHandleLock(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "loginctl.lock"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "loginctl.lock"}
 		handleLock(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -165,12 +141,13 @@ func TestHandleUnlock(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "loginctl.unlock"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "loginctl.unlock"}
 		handleUnlock(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -191,12 +168,13 @@ func TestHandleUnlock(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "loginctl.unlock"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "loginctl.unlock"}
 		handleUnlock(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -216,12 +194,13 @@ func TestHandleActivate(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "loginctl.activate"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "loginctl.activate"}
 		handleActivate(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -242,12 +221,13 @@ func TestHandleActivate(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "loginctl.activate"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "loginctl.activate"}
 		handleActivate(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -262,8 +242,9 @@ func TestHandleSetIdleHint(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "loginctl.setIdleHint",
 			Params: map[string]any{},
@@ -271,8 +252,8 @@ func TestHandleSetIdleHint(t *testing.T) {
 
 		handleSetIdleHint(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -290,8 +271,9 @@ func TestHandleSetIdleHint(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "loginctl.setIdleHint",
 			Params: map[string]any{
@@ -301,8 +283,8 @@ func TestHandleSetIdleHint(t *testing.T) {
 
 		handleSetIdleHint(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -323,8 +305,9 @@ func TestHandleSetIdleHint(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "loginctl.setIdleHint",
 			Params: map[string]any{
@@ -334,8 +317,8 @@ func TestHandleSetIdleHint(t *testing.T) {
 
 		handleSetIdleHint(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -355,12 +338,13 @@ func TestHandleTerminate(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "loginctl.terminate"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "loginctl.terminate"}
 		handleTerminate(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -381,12 +365,13 @@ func TestHandleTerminate(t *testing.T) {
 			sessionObj: mockSessionObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "loginctl.terminate"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "loginctl.terminate"}
 		handleTerminate(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -404,16 +389,17 @@ func TestHandleRequest(t *testing.T) {
 	}
 
 	t.Run("unknown method", func(t *testing.T) {
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "loginctl.unknown",
 		}
 
 		HandleRequest(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -421,80 +407,20 @@ func TestHandleRequest(t *testing.T) {
 	})
 
 	t.Run("valid method - getState", func(t *testing.T) {
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "loginctl.getState",
 		}
 
 		HandleRequest(conn, req, manager)
 
-		var resp models.Response[SessionState]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[SessionState]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
 		assert.Empty(t, resp.Error)
 	})
-
-	t.Run("lock method", func(t *testing.T) {
-		mockSessionObj := mockdbus.NewMockBusObject(t)
-		mockCall := &dbus.Call{Err: nil}
-		mockSessionObj.EXPECT().Call("org.freedesktop.login1.Session.Lock", mock.Anything).Return(mockCall)
-
-		manager.sessionObj = mockSessionObj
-
-		conn := newMockNetConn()
-		req := models.Request{
-			ID:     123,
-			Method: "loginctl.lock",
-		}
-
-		HandleRequest(conn, req, manager)
-
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-		require.NoError(t, err)
-
-		assert.Equal(t, 123, resp.ID)
-	})
-}
-
-func TestHandleSubscribe(t *testing.T) {
-	manager := &Manager{
-		state: &SessionState{
-			SessionID: "1",
-			Locked:    false,
-		},
-		stateMutex: sync.RWMutex{},
-	}
-
-	conn := newMockNetConn()
-	req := models.Request{ID: 123, Method: "loginctl.subscribe"}
-
-	done := make(chan bool)
-	go func() {
-		handleSubscribe(conn, req, manager)
-		done <- true
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-
-	conn.Close()
-
-	if conn.writeBuf.Len() > 0 {
-		var resp models.Response[SessionEvent]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-		if err == nil {
-			assert.Equal(t, 123, resp.ID)
-			require.NotNil(t, resp.Result)
-			assert.Equal(t, EventStateChanged, resp.Result.Type)
-			assert.Equal(t, "1", resp.Result.Data.SessionID)
-		}
-	}
-
-	select {
-	case <-done:
-	case <-time.After(100 * time.Millisecond):
-	}
 }

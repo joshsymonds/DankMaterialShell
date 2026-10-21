@@ -1,11 +1,12 @@
 package network
 
 import (
+	"sort"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/errdefs"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
 	"github.com/Wifx/gonetworkmanager/v2"
+	"github.com/duxlabs-dev/dux-shell/core/internal/errdefs"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 )
 
 func (b *NetworkManagerBackend) updatePrimaryConnection() error {
@@ -57,10 +58,13 @@ func (b *NetworkManagerBackend) updatePrimaryConnection() error {
 
 	b.stateMutex.Lock()
 	switch connType {
-	case "802-3-ethernet":
+	// Link aggregates carry the default route while the member NIC has no IP (#1581).
+	case "802-3-ethernet", "bridge", "bond", "team", "vlan":
 		b.state.NetworkStatus = StatusEthernet
 	case "802-11-wireless":
 		b.state.NetworkStatus = StatusWiFi
+	case "gsm", "cdma":
+		b.state.NetworkStatus = StatusCellular
 	case "vpn", "wireguard":
 		b.state.NetworkStatus = StatusVPN
 	default:
@@ -76,7 +80,7 @@ func (b *NetworkManagerBackend) updateEthernetState() error {
 	var connectedIP string
 	var anyConnected bool
 
-	for name, info := range b.ethernetDevices {
+	for name, info := range b.ethernetDevicesSnapshot() {
 		state, err := info.device.GetPropertyState()
 		if err != nil {
 			continue
@@ -100,6 +104,40 @@ func (b *NetworkManagerBackend) updateEthernetState() error {
 	b.state.EthernetDevice = connectedDevice
 	b.state.EthernetConnected = anyConnected
 	b.state.EthernetIP = connectedIP
+	b.stateMutex.Unlock()
+
+	return nil
+}
+
+func (b *NetworkManagerBackend) updateCellularState() error {
+	var connectedDevice string
+	var connectedIP string
+	var anyConnected bool
+
+	for name, info := range b.cellularDevicesSnapshot() {
+		state, err := info.device.GetPropertyState()
+		if err != nil {
+			continue
+		}
+
+		if state == gonetworkmanager.NmDeviceStateActivated {
+			anyConnected = true
+			connectedDevice = name
+			connectedIP = b.getDeviceIP(info.device)
+			break
+		}
+	}
+
+	if !anyConnected && b.cellularDevice != nil {
+		dev := b.cellularDevice.(gonetworkmanager.Device)
+		iface, _ := dev.GetPropertyInterface()
+		connectedDevice = iface
+	}
+
+	b.stateMutex.Lock()
+	b.state.CellularDevice = connectedDevice
+	b.state.CellularConnected = anyConnected
+	b.state.CellularIP = connectedIP
 	b.stateMutex.Unlock()
 
 	return nil
@@ -145,12 +183,50 @@ func (b *NetworkManagerBackend) classifyNMStateReason(reason uint32) string {
 	}
 }
 
-func (b *NetworkManagerBackend) updateWiFiState() error {
-	if b.wifiDevice == nil {
-		return nil
+// NM raises NO_SECRETS once auth retries run out on a saved profile too, not only
+// on a dismissed prompt (nm-device-wifi.c handle_8021x_or_psk_auth_fail, #3313).
+func forgetOnConnectFailure(reasonCode string, preExisting bool) bool {
+	return reasonCode == errdefs.ErrUserCanceled && !preExisting
+}
+
+// With several adapters, state must follow the associated device, not whichever
+// enumerated first (#2460).
+func (b *NetworkManagerBackend) wifiDeviceForState() (gonetworkmanager.Device, gonetworkmanager.DeviceWireless) {
+	fallbackDev, fallbackWireless := b.selectedWiFiDevice()
+
+	snapshot := b.wifiDevicesSnapshot()
+	if len(snapshot) < 2 {
+		return fallbackDev, fallbackWireless
 	}
 
-	dev := b.wifiDevice.(gonetworkmanager.Device)
+	apMode := b.activeAPModeWiFiDevicePaths()
+	names := make([]string, 0, len(snapshot))
+	for name := range snapshot {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		info := snapshot[name]
+		if info.device == nil {
+			continue
+		}
+		state, err := info.device.GetPropertyState()
+		if err != nil || state != gonetworkmanager.NmDeviceStateActivated {
+			continue
+		}
+		if apMode[string(info.device.GetPath())] {
+			continue
+		}
+		return info.device, info.wireless
+	}
+	return fallbackDev, fallbackWireless
+}
+
+func (b *NetworkManagerBackend) updateWiFiState() error {
+	dev, wireless := b.wifiDeviceForState()
+	if dev == nil {
+		return nil
+	}
 
 	iface, err := dev.GetPropertyInterface()
 	if err != nil {
@@ -163,6 +239,12 @@ func (b *NetworkManagerBackend) updateWiFiState() error {
 	}
 
 	connected := state == gonetworkmanager.NmDeviceStateActivated
+	if connected {
+		apModeDevicePaths := b.activeAPModeWiFiDevicePaths()
+		if apModeDevicePaths[string(dev.GetPath())] {
+			connected = false
+		}
+	}
 	failed := state == gonetworkmanager.NmDeviceStateFailed
 	disconnected := state == gonetworkmanager.NmDeviceStateDisconnected
 
@@ -170,9 +252,11 @@ func (b *NetworkManagerBackend) updateWiFiState() error {
 	var signal uint8
 
 	if connected {
-		if err := b.ensureWiFiDevice(); err == nil && b.wifiDev != nil {
-			w := b.wifiDev.(gonetworkmanager.DeviceWireless)
-			activeAP, err := w.GetPropertyActiveAccessPoint()
+		if wireless == nil {
+			wireless, _ = b.ensureWiFiDevice()
+		}
+		if wireless != nil {
+			activeAP, err := wireless.GetPropertyActiveAccessPoint()
 			if err == nil && activeAP != nil && activeAP.GetPath() != "/" {
 				ssid, _ = activeAP.GetPropertySSID()
 				signal, _ = activeAP.GetPropertyStrength()
@@ -213,6 +297,7 @@ func (b *NetworkManagerBackend) updateWiFiState() error {
 	}
 
 	var forgetSSID string
+	var doneSSID string
 
 	b.stateMutex.Lock()
 
@@ -226,13 +311,14 @@ func (b *NetworkManagerBackend) updateWiFiState() error {
 			b.state.IsConnecting = false
 			b.state.ConnectingSSID = ""
 			b.state.LastError = ""
+			doneSSID = connectingSSID
 		case failed || (disconnected && !connected):
 			log.Warnf("[updateWiFiState] Connection failed: SSID=%s, state=%d", connectingSSID, state)
 			b.state.IsConnecting = false
 			b.state.ConnectingSSID = ""
 			b.state.LastError = reasonCode
 
-			if reasonCode == errdefs.ErrUserCanceled {
+			if forgetOnConnectFailure(reasonCode, b.state.ConnectingPreExisting) {
 				forgetSSID = connectingSSID
 			}
 
@@ -240,6 +326,8 @@ func (b *NetworkManagerBackend) updateWiFiState() error {
 			b.lastFailedSSID = connectingSSID
 			b.lastFailedTime = time.Now().Unix()
 			b.failedMutex.Unlock()
+
+			doneSSID = connectingSSID
 		}
 	}
 
@@ -251,6 +339,10 @@ func (b *NetworkManagerBackend) updateWiFiState() error {
 	b.state.WiFiSignal = signal
 
 	b.stateMutex.Unlock()
+
+	if doneSSID != "" {
+		b.clearCachedWiFiSecretBySSID(doneSSID)
+	}
 
 	if forgetSSID != "" {
 		log.Infof("[updateWiFiState] User cancelled authentication, removing connection profile for %s", forgetSSID)

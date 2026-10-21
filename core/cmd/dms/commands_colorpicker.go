@@ -3,23 +3,31 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/clipboard"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/colorpicker"
+	"github.com/duxlabs-dev/dux-shell/core/internal/clipboard"
+	"github.com/duxlabs-dev/dux-shell/core/internal/colorpicker"
+	"github.com/duxlabs-dev/dux-shell/core/internal/site"
 	"github.com/spf13/cobra"
 )
 
 var (
-	colorOutputFmt string
-	colorAutocopy  bool
-	colorNotify    bool
-	colorLowercase bool
+	colorOutputFmt  string
+	colorAutocopy   bool
+	colorNotify     bool
+	colorLowercase  bool
+	colorAllowMulti bool
 )
 
 var colorCmd = &cobra.Command{
 	Use:   "color",
 	Short: "Color utilities",
-	Long:  "Color utilities including picking colors from the screen",
+	Long: `Color utilities including picking colors from the screen.
+
+This is the screen eyedropper CLI. To open the in-shell color modal, use:
+  dms ipc call color-picker toggle
+
+See: ` + site.Docs + "/dms/keybinds-ipc",
 }
 
 var colorPickCmd = &cobra.Command{
@@ -28,6 +36,9 @@ var colorPickCmd = &cobra.Command{
 	Long: `Pick a color from anywhere on your screen using an interactive color picker.
 
 Click on any pixel to capture its color, or press Escape to cancel.
+
+This is the screen eyedropper CLI. To open the in-shell color modal, use:
+  dms ipc call color-picker toggle
 
 Output format flags (mutually exclusive, default: --hex):
   --hex  - Hexadecimal (#RRGGBB)
@@ -45,7 +56,8 @@ Examples:
   dms color pick --rgb          # Output as RGB
   dms color pick --json         # Output all formats as JSON
   dms color pick --hex -l       # Output hex in lowercase
-  dms color pick -a             # Auto-copy result to clipboard`,
+  dms color pick -a             # Auto-copy result to clipboard
+  dms color pick --allow-multiple  # Skip the one-picker-at-a-time guard`,
 	Run: runColorPick,
 }
 
@@ -60,6 +72,7 @@ func init() {
 	colorPickCmd.Flags().StringVarP(&colorOutputFmt, "output-format", "o", "", "Custom output format template")
 	colorPickCmd.Flags().BoolVarP(&colorAutocopy, "autocopy", "a", false, "Copy result to clipboard")
 	colorPickCmd.Flags().BoolVarP(&colorLowercase, "lowercase", "l", false, "Output hex in lowercase")
+	colorPickCmd.Flags().BoolVar(&colorAllowMulti, "allow-multiple", false, "Open a picker even when another selection overlay is already open")
 
 	colorPickCmd.MarkFlagsMutuallyExclusive("hex", "rgb", "hsl", "hsv", "cmyk", "json")
 
@@ -81,12 +94,17 @@ func runColorPick(cmd *cobra.Command, args []string) {
 	}
 
 	config := colorpicker.Config{
-		Format:       format,
-		CustomFormat: colorOutputFmt,
-		Lowercase:    colorLowercase,
-		Autocopy:     colorAutocopy,
-		Notify:       colorNotify,
+		Format:        format,
+		CustomFormat:  colorOutputFmt,
+		Lowercase:     colorLowercase,
+		Autocopy:      colorAutocopy,
+		Notify:        colorNotify,
+		AllowMultiple: colorAllowMulti,
 	}
+
+	// One-shot process holding a few screen-sized buffers: skip GC cycles while it runs.
+	debug.SetGCPercent(-1)
+	debug.SetMemoryLimit(1 << 30)
 
 	picker := colorpicker.New(config)
 	color, err := picker.Run()

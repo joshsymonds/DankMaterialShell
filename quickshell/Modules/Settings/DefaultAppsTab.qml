@@ -1,0 +1,424 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import qs.Common
+import qs.Services
+import qs.Modules.Settings.Widgets
+
+Item {
+    id: root
+    readonly property var log: Log.scoped("DefaultAppsTab")
+
+    readonly property var appCategory: ({
+            WebBrowser: 0,
+            FileManager: 1,
+            TextEditor: 2,
+            ImageViewer: 3,
+            VideoPlayer: 4,
+            MusicPlayer: 5,
+            PDFReader: 6,
+            Mail: 7,
+            Terminal: 8,
+            Calendar: 9,
+            Maps: 10,
+            WordProcessor: 11,
+            Spreadsheet: 12,
+            Presentation: 13,
+            ArchiveManager: 14
+        })
+
+    property string currentWebBrowserAppId: ""
+    property string currentFileManagerAppId: ""
+    property string currentTextEditorAppId: ""
+    property string currentImageViewerAppId: ""
+    property string currentVideoPlayerAppId: ""
+    property string currentMusicPlayerAppId: ""
+    property string currentPDFReaderAppId: ""
+    property string currentMailAppId: ""
+    property string currentTerminalAppId: ""
+    property string currentCalendarAppId: ""
+    property string currentMapsAppId: ""
+    property string currentWordProcessorAppId: ""
+    property string currentSpreadsheetAppId: ""
+    property string currentPresentationAppId: ""
+    property string currentArchiveManagerAppId: ""
+
+    property var categoryModels: ({})
+
+    // A curated list of MIME types for each category.
+    // The first one is used for fetching the apps list and current default,
+    // the rest are for setting the default app.
+    readonly property var mimeMapping: ({
+            [root.appCategory.WebBrowser]: ["x-scheme-handler/https", "x-scheme-handler/http", "text/html", "application/xhtml+xml"],
+            [root.appCategory.FileManager]: ["inode/directory", "x-scheme-handler/file", "x-scheme-handler/sftp"],
+            [root.appCategory.TextEditor]: ["text/plain", "text/markdown", "application/x-zerosize", "text/x-c++src", "text/x-csrc", "text/x-python", "text/x-shellscript", "application/json"],
+            [root.appCategory.ImageViewer]: ["image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp", "image/avif", "image/svg+xml", "image/tiff", "image/heic", "image/heif", "image/jxl"],
+            [root.appCategory.VideoPlayer]: ["video/mp4", "video/x-matroska", "video/webm", "video/avi", "video/mpeg", "video/quicktime", "video/x-msvideo"],
+            [root.appCategory.MusicPlayer]: ["audio/mpeg", "audio/x-flac", "audio/wav", "audio/ogg", "audio/aac", "audio/webm"],
+            [root.appCategory.PDFReader]: ["application/pdf", "application/x-ext-pdf", "application/x-bzpdf", "application/x-gzpdf", "application/vnd.comicbook-rar", "application/vnd.comicbook+zip"],
+            [root.appCategory.Mail]: ["x-scheme-handler/mailto"],
+            [root.appCategory.Calendar]: ["text/calendar", "x-scheme-handler/calendar", "x-scheme-handler/webcal", "x-scheme-handler/webcals"],
+            [root.appCategory.Maps]: ["x-scheme-handler/geo"],
+            [root.appCategory.WordProcessor]: ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword", "application/vnd.oasis.opendocument.text", "application/rtf"],
+            [root.appCategory.Spreadsheet]: ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel", "application/vnd.oasis.opendocument.spreadsheet", "text/csv"],
+            [root.appCategory.Presentation]: ["application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.ms-powerpoint", "application/vnd.oasis.opendocument.presentation"],
+            [root.appCategory.ArchiveManager]: ["application/zip", "application/x-tar", "application/x-7z-compressed", "application/x-rar", "application/gzip", "application/x-bzip2", "application/x-xz"],
+            [root.appCategory.Terminal]: ["terminal"] // Special
+        })
+
+    function propertyName(type) {
+        const names = Object.keys(root.appCategory);
+        return "current" + names[type] + "AppId";
+    }
+
+    function loadAppSearchCategory(categoryName) {
+        const apps = AppSearchService.getVisibleApplications() || [];
+        return apps.filter(app => {
+            const categories = app.categories || [];
+            return categories.includes(categoryName);
+        });
+    }
+
+    function getAppDisplayName(appId) {
+        if (appId === root.dmsChooserId || appId === "dms-open") {
+            return root.dmsChooserLabel;
+        }
+        let entry = DesktopEntries.heuristicLookup(appId);
+        if (entry && entry.name) {
+            return entry.name;
+        }
+        const withoutSuffix = appId.replace(/\.desktop$/, "");
+        if (withoutSuffix !== appId) {
+            entry = DesktopEntries.heuristicLookup(withoutSuffix);
+            if (entry && entry.name) {
+                return entry.name;
+            }
+        }
+        return appId;
+    }
+
+    readonly property string dmsChooserId: "dms-open.desktop"
+    readonly property string dmsChooserLabel: I18n.tr("DMS chooser")
+
+    function withDmsChooser(entries) {
+        const filtered = (entries || []).filter(e => e.value !== root.dmsChooserId && e.value !== "dms-open");
+        return [
+            {
+                name: root.dmsChooserLabel,
+                value: root.dmsChooserId,
+                icon: "material:apps"
+            }
+        ].concat(filtered);
+    }
+
+    function getAppIcon(appId) {
+        const entry = DesktopEntries.heuristicLookup(appId) || DesktopEntries.heuristicLookup(stripDesktopSuffix(appId));
+        return entry?.icon || "";
+    }
+
+    function stripDesktopSuffix(id) {
+        return (id || "").replace(/\.desktop$/, "");
+    }
+
+    function labeled(entries) {
+        const counts = {};
+        entries.forEach(e => counts[e.name] = (counts[e.name] || 0) + 1);
+        return entries.map(e => Object.assign({}, e, {
+                text: counts[e.name] > 1 ? `${e.name} (${stripDesktopSuffix(e.value)})` : e.name
+            }));
+    }
+
+    function labelFor(category, id) {
+        const wanted = stripDesktopSuffix(id);
+        const found = (root.categoryModels[category] || []).find(opt => stripDesktopSuffix(opt.value) === wanted);
+        return found ? found.text : root.getAppDisplayName(id);
+    }
+
+    function loadCategoryModel(categoryKey, categorySearchName) {
+        const apps = loadAppSearchCategory(categorySearchName);
+        const appIds = apps.map(app => app.id || app.execString || "").filter(id => id);
+        let models = Object.assign({}, root.categoryModels);
+        const entries = appIds.map(id => ({
+                    name: root.getAppDisplayName(id),
+                    value: id,
+                    icon: root.getAppIcon(id)
+                }));
+        models[categoryKey] = labeled(categoryKey === root.appCategory.Terminal ? entries : root.withDmsChooser(entries));
+        root.categoryModels = models;
+    }
+
+    Component.onCompleted: {
+        const categories = Object.values(root.appCategory);
+
+        categories.forEach(category => {
+            switch (category) {
+            case root.appCategory.Terminal:
+                // Terminals don't have a MIME type
+                loadCategoryModel(root.appCategory.Terminal, "TerminalEmulator");
+                getDefaultTerminal();
+                break;
+            case root.appCategory.WebBrowser:
+                // When using the MIME type, stuff like dms-run shows up.
+                // It's probably better to use the category.
+                loadCategoryModel(root.appCategory.WebBrowser, "WebBrowser");
+                DesktopService.getDefaultApp(mimeMapping[category][0], category.toString());
+                break;
+            case root.appCategory.FileManager:
+                // Use categories for file managers instead,
+                // you don't want Kate as your file manager just because it can open folders
+                loadCategoryModel(root.appCategory.FileManager, "FileManager");
+                DesktopService.getDefaultApp(mimeMapping[category][0], category.toString());
+                DesktopService.getHandlersForMimeType(mimeMapping[category][0], category.toString());
+                break;
+            default:
+                const mimeType = mimeMapping[category][0];
+                DesktopService.getDefaultApp(mimeType, category.toString());
+                DesktopService.getAppsForMimeType(mimeType, category.toString());
+                break;
+            }
+        });
+    }
+
+    function getDefaultTerminal() {
+        // Run xdg-terminal-exec to get the default terminal
+        const proc = xdgGetDefaultTerminal.createObject(root, {
+            running: true
+        });
+    }
+
+    function setDefaultTerminal(terminalId) {
+        // Write to xdg-terminals.list
+        const proc = xdgSetDefaultTerminal.createObject(root, {
+            terminalId: terminalId,
+            running: true
+        });
+    }
+
+    Component {
+        id: xdgSetDefaultTerminal
+        Process {
+            property string terminalId: ""
+            property string configPath: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
+            command: ["sh", "-c", `echo "${terminalId}.desktop" > "${configPath}/xdg-terminals.list"`]
+            onExited: (exitCode, exitStatus) => {
+                if (exitCode != 0) {
+                    log.error("Failed to write xdg-terminals.list, exit code:", exitCode);
+                }
+                destroy();
+            }
+        }
+    }
+
+    Component {
+        id: xdgGetDefaultTerminal
+        Process {
+            property string configPath: Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")
+
+            command: ["sh", "-c", `cat '${configPath}/xdg-terminals.list'`]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    const defaultTerminal = text.trim();
+                    if (defaultTerminal) {
+                        root.currentTerminalAppId = defaultTerminal;
+                    } else {
+                        log.warn("No default terminal found");
+                    }
+                }
+            }
+            stderr: StdioCollector {
+                onStreamFinished: {
+                    if (text.trim().length > 0) {
+                        log.error("Error getting default terminal:", text);
+                    }
+                }
+            }
+            onExited: (exitCode, exitStatus) => {
+                destroy();
+            }
+        }
+    }
+
+    Connections {
+        target: DesktopService
+
+        function onGetAppsForMimeResult(mimeType, appIds, callbackId) {
+            let categoryIndex = parseInt(callbackId);
+            let models = Object.assign({}, root.categoryModels);
+
+            const entries = (appIds || []).map(id => ({
+                        name: root.getAppDisplayName(id),
+                        value: id,
+                        icon: root.getAppIcon(id)
+                    }));
+
+            models[categoryIndex] = root.labeled(root.withDmsChooser(entries));
+            root.categoryModels = models;
+        }
+
+        function onGetHandlersForMimeResult(mimeType, apps, callbackId) {
+            const categoryIndex = parseInt(callbackId);
+            let models = Object.assign({}, root.categoryModels);
+            const existing = models[categoryIndex] || root.withDmsChooser([]);
+            const known = new Set(existing.map(opt => root.stripDesktopSuffix(opt.value)));
+            const extra = (apps || []).filter(app => app.id && !known.has(root.stripDesktopSuffix(app.id))).map(app => ({
+                        name: app.name || root.getAppDisplayName(app.id),
+                        value: app.id,
+                        icon: app.icon || root.getAppIcon(app.id)
+                    }));
+            if (extra.length === 0) {
+                return;
+            }
+            models[categoryIndex] = root.labeled(existing.concat(extra));
+            root.categoryModels = models;
+        }
+
+        function onGetDefaultAppResult(mimeType, desktopFileId, callbackId) {
+            if (!desktopFileId) {
+                log.info("No default app found for MIME type:", mimeType);
+                return;
+            }
+            root[propertyName(parseInt(callbackId))] = desktopFileId;
+        }
+    }
+
+    component AppSelector: SettingsDropdownRow {
+        property int category: -1
+        options: (root.categoryModels[category] || []).map(opt => opt.text)
+        optionImages: (root.categoryModels[category] || []).map(opt => opt.icon || "")
+        enabled: options.length > 0
+        emptyText: options.length > 0 ? I18n.tr("Unset", "Unset") : ""
+        opacity: options.length > 0 ? 1 : 0.5
+        currentValue: {
+            const id = root[propertyName(category)];
+            if (!id) {
+                return "";
+            }
+            return root.labelFor(category, id);
+        }
+        onValueChanged: val => {
+            let model = root.categoryModels[category] || [];
+            let found = model.find(opt => opt.text === val);
+            if (found) {
+                if (category === root.appCategory.Terminal) {
+                    root.setDefaultTerminal(found.value);
+                } else {
+                    DesktopService.setDefaultAppForMimes(root.mimeMapping[category], found.value, category.toString());
+                }
+            }
+        }
+    }
+
+    // Dropdowns
+
+    SettingsPage {
+        id: mainColumn
+
+        SettingsCard {
+            settingKey: "defaultAppsInternet"
+            tags: ["browser", "mail", "email", "web"]
+            title: I18n.tr("Internet", "Internet")
+            iconName: "public"
+
+            AppSelector {
+                text: I18n.tr("Web browser")
+                tags: ["web", "browser", "internet", "links", "html"]
+                category: root.appCategory.WebBrowser
+            }
+
+            AppSelector {
+                text: I18n.tr("Mail", "Mail")
+                category: root.appCategory.Mail
+                tags: ["mail", "email", "mailto"]
+            }
+
+            AppSelector {
+                text: I18n.tr("Maps", "Maps")
+                category: root.appCategory.Maps
+                tags: ["maps", "geo", "location"]
+            }
+        }
+
+        SettingsCard {
+            settingKey: "defaultAppsUtilities"
+            tags: ["file", "manager", "terminal", "editor", "archive", "zip"]
+            title: I18n.tr("Utilities", "Utilities")
+            iconName: "terminal"
+
+            AppSelector {
+                text: I18n.tr("File manager")
+                tags: ["file", "manager", "directory", "sftp"]
+                category: root.appCategory.FileManager
+            }
+            AppSelector {
+                text: I18n.tr("Terminal", "Terminal")
+                category: root.appCategory.Terminal
+                tags: ["terminal", "console", "xdg-terminal-exec"]
+            }
+            AppSelector {
+                text: I18n.tr("Calendar", "Calendar")
+                category: root.appCategory.Calendar
+                tags: ["calendar", "events"]
+            }
+            AppSelector {
+                text: I18n.tr("Archive manager", "default app selector label for archive manager program for zip and tar files")
+                category: root.appCategory.ArchiveManager
+                tags: ["archive", "zip", "tar", "compress"]
+            }
+        }
+
+        SettingsCard {
+            settingKey: "defaultAppsDocuments"
+            tags: ["pdf", "text", "reader", "office", "word", "spreadsheet", "presentation"]
+            title: I18n.tr("Documents", "Documents")
+            iconName: "edit_document"
+
+            AppSelector {
+                text: I18n.tr("Text editor")
+                category: root.appCategory.TextEditor
+                tags: ["text", "editor"]
+            }
+            AppSelector {
+                text: I18n.tr("PDF reader")
+                category: root.appCategory.PDFReader
+                tags: ["pdf", "reader"]
+            }
+            AppSelector {
+                text: I18n.tr("Word processor", "default app selector label for word processor program")
+                category: root.appCategory.WordProcessor
+                tags: ["word", "document", "docs", "office", "writer"]
+            }
+            AppSelector {
+                text: I18n.tr("Spreadsheet", "default app selector label for spreadsheet program")
+                category: root.appCategory.Spreadsheet
+                tags: ["spreadsheet", "excel", "calc", "csv", "office"]
+            }
+            AppSelector {
+                text: I18n.tr("Presentation", "default app selector label for slide presentation program, not presentation mode")
+                category: root.appCategory.Presentation
+                tags: ["presentation", "powerpoint", "ppt", "slides", "office"]
+            }
+        }
+
+        SettingsCard {
+            settingKey: "defaultAppsMultimedia"
+            tags: ["image", "video", "music", "viewer", "player"]
+            title: I18n.tr("Multimedia", "Multimedia")
+            iconName: "movie"
+            AppSelector {
+                text: I18n.tr("Image viewer")
+                category: root.appCategory.ImageViewer
+                tags: ["image", "viewer"]
+            }
+            AppSelector {
+                text: I18n.tr("Video player")
+                category: root.appCategory.VideoPlayer
+                tags: ["video", "player"]
+            }
+            AppSelector {
+                text: I18n.tr("Music player")
+                category: root.appCategory.MusicPlayer
+                tags: ["music", "player", "audio"]
+            }
+        }
+    }
+}

@@ -1,17 +1,16 @@
 package network
 
 import (
-	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/params"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-go/ipc/params"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/models"
 )
 
-func HandleRequest(conn net.Conn, req models.Request, manager *Manager) {
+func HandleRequest(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	switch req.Method {
 	case "network.getState":
 		handleGetState(conn, req, manager)
@@ -37,12 +36,28 @@ func HandleRequest(conn net.Conn, req models.Request, manager *Manager) {
 		handleConnectEthernet(conn, req, manager)
 	case "network.ethernet.disconnect":
 		handleDisconnectEthernet(conn, req, manager)
+	case "network.cellular.connect.config":
+		handleConnectCellularSpecificConfig(conn, req, manager)
+	case "network.cellular.connect":
+		handleConnectCellular(conn, req, manager)
+	case "network.cellular.disconnect":
+		handleDisconnectCellular(conn, req, manager)
+	case "network.cellular.toggle":
+		handleToggleCellular(conn, req, manager)
+	case "network.cellular.enable":
+		handleEnableCellular(conn, req, manager)
+	case "network.cellular.disable":
+		handleDisableCellular(conn, req, manager)
 	case "network.preference.set":
 		handleSetPreference(conn, req, manager)
 	case "network.info":
 		handleGetNetworkInfo(conn, req, manager)
 	case "network.qrcode":
 		handleGetNetworkQRCode(conn, req, manager)
+	case "network.qrcode-content":
+		handleGetNetworkQRCodeContent(conn, req, manager)
+	case "network.generate-qrcode":
+		handleGenerateQRCode(conn, req)
 	case "network.delete-qrcode":
 		handleDeleteQRCode(conn, req, manager)
 	case "network.ethernet.info":
@@ -79,23 +94,31 @@ func HandleRequest(conn net.Conn, req models.Request, manager *Manager) {
 		handleSetVPNCredentials(conn, req, manager)
 	case "network.wifi.setAutoconnect":
 		handleSetWiFiAutoconnect(conn, req, manager)
+	case "network.hotspot.configure":
+		handleConfigureHotspot(conn, req, manager)
+	case "network.hotspot.start":
+		handleStartHotspot(conn, req, manager)
+	case "network.hotspot.stop":
+		handleStopHotspot(conn, req, manager)
+	case "network.hotspot.getSecrets":
+		handleGetHotspotSecrets(conn, req, manager)
 	default:
-		models.RespondError(conn, req.ID, fmt.Sprintf("unknown method: %s", req.Method))
+		conn.RespondError(req.ID, fmt.Sprintf("unknown method: %s", req.Method))
 	}
 }
 
-func handleCredentialsSubmit(conn net.Conn, req models.Request, manager *Manager) {
+func handleCredentialsSubmit(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	token, err := params.String(req.Params, "token")
 	if err != nil {
 		log.Warnf("handleCredentialsSubmit: missing or invalid token parameter")
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	secrets, err := params.StringMap(req.Params, "secrets")
 	if err != nil {
 		log.Warnf("handleCredentialsSubmit: missing or invalid secrets parameter")
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
@@ -103,34 +126,34 @@ func handleCredentialsSubmit(conn net.Conn, req models.Request, manager *Manager
 
 	if err := manager.SubmitCredentials(token, secrets, save); err != nil {
 		log.Warnf("handleCredentialsSubmit: failed to submit credentials: %v", err)
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	log.Infof("handleCredentialsSubmit: credentials submitted successfully")
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "credentials submitted"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "credentials submitted"})
 }
 
-func handleCredentialsCancel(conn net.Conn, req models.Request, manager *Manager) {
+func handleCredentialsCancel(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	token, err := params.String(req.Params, "token")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	if err := manager.CancelCredentials(token); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "credentials cancelled"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "credentials cancelled"})
 }
 
-func handleGetState(conn net.Conn, req models.Request, manager *Manager) {
-	models.Respond(conn, req.ID, manager.GetState())
+func handleGetState(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	conn.Respond(req.ID, manager.GetState())
 }
 
-func handleScanWiFi(conn net.Conn, req models.Request, manager *Manager) {
+func handleScanWiFi(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	device := params.StringOpt(req.Params, "device", "")
 	var err error
 	if device != "" {
@@ -139,20 +162,20 @@ func handleScanWiFi(conn net.Conn, req models.Request, manager *Manager) {
 		err = manager.ScanWiFi()
 	}
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "scanning"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "scanning"})
 }
 
-func handleGetWiFiNetworks(conn net.Conn, req models.Request, manager *Manager) {
-	models.Respond(conn, req.ID, manager.GetWiFiNetworks())
+func handleGetWiFiNetworks(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	conn.Respond(req.ID, manager.GetWiFiNetworks())
 }
 
-func handleConnectWiFi(conn net.Conn, req models.Request, manager *Manager) {
+func handleConnectWiFi(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	ssid, err := params.String(req.Params, "ssid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
@@ -162,7 +185,7 @@ func handleConnectWiFi(conn net.Conn, req models.Request, manager *Manager) {
 	connReq.Username = params.StringOpt(req.Params, "username", "")
 	connReq.Device = params.StringOpt(req.Params, "device", "")
 
-	if interactive, ok := models.Get[bool](req, "interactive"); ok {
+	if interactive, ok := req.Get[bool]("interactive"); ok {
 		connReq.Interactive = interactive
 	} else {
 		state := manager.GetState()
@@ -190,19 +213,19 @@ func handleConnectWiFi(conn net.Conn, req models.Request, manager *Manager) {
 	connReq.ClientCertPath = params.StringOpt(req.Params, "clientCertPath", "")
 	connReq.PrivateKeyPath = params.StringOpt(req.Params, "privateKeyPath", "")
 
-	if useSystemCACerts, ok := models.Get[bool](req, "useSystemCACerts"); ok {
+	if useSystemCACerts, ok := req.Get[bool]("useSystemCACerts"); ok {
 		connReq.UseSystemCACerts = &useSystemCACerts
 	}
 
 	if err := manager.ConnectWiFi(connReq); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "connecting"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "connecting"})
 }
 
-func handleDisconnectWiFi(conn net.Conn, req models.Request, manager *Manager) {
+func handleDisconnectWiFi(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	device := params.StringOpt(req.Params, "device", "")
 	var err error
 	if device != "" {
@@ -211,75 +234,75 @@ func handleDisconnectWiFi(conn net.Conn, req models.Request, manager *Manager) {
 		err = manager.DisconnectWiFi()
 	}
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "disconnected"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "disconnected"})
 }
 
-func handleForgetWiFi(conn net.Conn, req models.Request, manager *Manager) {
+func handleForgetWiFi(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	ssid, err := params.String(req.Params, "ssid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	if err := manager.ForgetWiFiNetwork(ssid); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "forgotten"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "forgotten"})
 }
 
-func handleToggleWiFi(conn net.Conn, req models.Request, manager *Manager) {
+func handleToggleWiFi(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	if err := manager.ToggleWiFi(); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	state := manager.GetState()
-	models.Respond(conn, req.ID, map[string]bool{"enabled": state.WiFiEnabled})
+	conn.Respond(req.ID, map[string]bool{"enabled": state.WiFiEnabled})
 }
 
-func handleEnableWiFi(conn net.Conn, req models.Request, manager *Manager) {
+func handleEnableWiFi(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	if err := manager.EnableWiFi(); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
-	models.Respond(conn, req.ID, map[string]bool{"enabled": true})
+	conn.Respond(req.ID, map[string]bool{"enabled": true})
 }
 
-func handleDisableWiFi(conn net.Conn, req models.Request, manager *Manager) {
+func handleDisableWiFi(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	if err := manager.DisableWiFi(); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
-	models.Respond(conn, req.ID, map[string]bool{"enabled": false})
+	conn.Respond(req.ID, map[string]bool{"enabled": false})
 }
 
-func handleConnectEthernetSpecificConfig(conn net.Conn, req models.Request, manager *Manager) {
+func handleConnectEthernetSpecificConfig(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	uuid, err := params.String(req.Params, "uuid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 	if err := manager.activateConnection(uuid); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "connecting"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "connecting"})
 }
 
-func handleConnectEthernet(conn net.Conn, req models.Request, manager *Manager) {
+func handleConnectEthernet(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	if err := manager.ConnectEthernet(); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "connecting"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "connecting"})
 }
 
-func handleDisconnectEthernet(conn net.Conn, req models.Request, manager *Manager) {
+func handleDisconnectEthernet(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	device := params.StringOpt(req.Params, "device", "")
 	var err error
 	if device != "" {
@@ -288,96 +311,190 @@ func handleDisconnectEthernet(conn net.Conn, req models.Request, manager *Manage
 		err = manager.DisconnectEthernet()
 	}
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "disconnected"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "disconnected"})
 }
 
-func handleSetPreference(conn net.Conn, req models.Request, manager *Manager) {
+func handleConnectCellularSpecificConfig(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	uuid, err := params.String(req.Params, "uuid")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+	if err := manager.activateCellularConnection(uuid); err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "connecting"})
+}
+
+func handleConnectCellular(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	if err := manager.ConnectCellular(); err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "connecting"})
+}
+
+func handleDisconnectCellular(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	device := params.StringOpt(req.Params, "device", "")
+	var err error
+	if device != "" {
+		err = manager.DisconnectCellularDevice(device)
+	} else {
+		err = manager.DisconnectCellular()
+	}
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "disconnected"})
+}
+
+func handleToggleCellular(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	if err := manager.ToggleCellular(); err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	state := manager.GetState()
+	conn.Respond(req.ID, map[string]bool{"enabled": state.CellularEnabled})
+}
+
+func handleEnableCellular(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	if err := manager.EnableCellular(); err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+	conn.Respond(req.ID, map[string]bool{"enabled": true})
+}
+
+func handleDisableCellular(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	if err := manager.DisableCellular(); err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+	conn.Respond(req.ID, map[string]bool{"enabled": false})
+}
+
+func handleSetPreference(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	preference, err := params.String(req.Params, "preference")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	if err := manager.SetConnectionPreference(ConnectionPreference(preference)); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, map[string]string{"preference": preference})
+	conn.Respond(req.ID, map[string]string{"preference": preference})
 }
 
-func handleGetNetworkInfo(conn net.Conn, req models.Request, manager *Manager) {
+func handleGetNetworkInfo(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	ssid, err := params.String(req.Params, "ssid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	network, err := manager.GetNetworkInfoDetailed(ssid)
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, network)
+	conn.Respond(req.ID, network)
 }
 
-func handleGetNetworkQRCode(conn net.Conn, req models.Request, manager *Manager) {
+func handleGetNetworkQRCode(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	ssid, err := params.String(req.Params, "ssid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	content, err := manager.GetNetworkQRCode(ssid)
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, content)
+	conn.Respond(req.ID, content)
 }
 
-func handleDeleteQRCode(conn net.Conn, req models.Request, _ *Manager) {
+func handleGetNetworkQRCodeContent(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	ssid, err := params.String(req.Params, "ssid")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	content, err := manager.GetWiFiQRContent(ssid)
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	conn.Respond(req.ID, content)
+}
+
+func handleGenerateQRCode(conn *ipc.ConnWriter, req ipc.Request) {
+	text, err := params.String(req.Params, "text")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	paths, err := generateTextQRCode(text)
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	conn.Respond(req.ID, paths)
+}
+
+func handleDeleteQRCode(conn *ipc.ConnWriter, req ipc.Request, _ *Manager) {
 	path, err := params.String(req.Params, "path")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	if !isValidQRCodePath(path) {
-		models.RespondError(conn, req.ID, "invalid QR code path")
+		conn.RespondError(req.ID, "invalid QR code path")
 		return
 	}
 
 	if err := os.Remove(path); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "QR code file deleted"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "QR code file deleted"})
 }
 
-func handleGetWiredNetworkInfo(conn net.Conn, req models.Request, manager *Manager) {
+func handleGetWiredNetworkInfo(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	uuid, err := params.String(req.Params, "uuid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	network, err := manager.GetWiredNetworkInfoDetailed(uuid)
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, network)
+	conn.Respond(req.ID, network)
 }
 
-func handleSubscribe(conn net.Conn, req models.Request, manager *Manager) {
+func handleSubscribe(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	clientID := fmt.Sprintf("client-%p", conn)
 	stateChan := manager.Subscribe(clientID)
 	defer manager.Unsubscribe(clientID)
@@ -387,7 +504,7 @@ func handleSubscribe(conn net.Conn, req models.Request, manager *Manager) {
 		Type: EventStateChanged,
 		Data: initialState,
 	}
-	if err := json.NewEncoder(conn).Encode(models.Response[NetworkEvent]{
+	if err := conn.WriteResponse(ipc.Response[NetworkEvent]{
 		ID:     req.ID,
 		Result: &event,
 	}); err != nil {
@@ -399,7 +516,7 @@ func handleSubscribe(conn net.Conn, req models.Request, manager *Manager) {
 			Type: EventStateChanged,
 			Data: state,
 		}
-		if err := json.NewEncoder(conn).Encode(models.Response[NetworkEvent]{
+		if err := conn.WriteResponse(ipc.Response[NetworkEvent]{
 			Result: &event,
 		}); err != nil {
 			return
@@ -407,33 +524,33 @@ func handleSubscribe(conn net.Conn, req models.Request, manager *Manager) {
 	}
 }
 
-func handleListVPNProfiles(conn net.Conn, req models.Request, manager *Manager) {
+func handleListVPNProfiles(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	profiles, err := manager.ListVPNProfiles()
 	if err != nil {
 		log.Warnf("handleListVPNProfiles: failed to list profiles: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to list VPN profiles: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to list VPN profiles: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, profiles)
+	conn.Respond(req.ID, profiles)
 }
 
-func handleListActiveVPN(conn net.Conn, req models.Request, manager *Manager) {
+func handleListActiveVPN(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	active, err := manager.ListActiveVPN()
 	if err != nil {
 		log.Warnf("handleListActiveVPN: failed to list active VPNs: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to list active VPNs: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to list active VPNs: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, active)
+	conn.Respond(req.ID, active)
 }
 
-func handleConnectVPN(conn net.Conn, req models.Request, manager *Manager) {
+func handleConnectVPN(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	uuidOrName, ok := params.StringAlt(req.Params, "uuidOrName", "name", "uuid")
 	if !ok {
 		log.Warnf("handleConnectVPN: missing uuidOrName/name/uuid parameter")
-		models.RespondError(conn, req.ID, "missing 'uuidOrName', 'name', or 'uuid' parameter")
+		conn.RespondError(req.ID, "missing 'uuidOrName', 'name', or 'uuid' parameter")
 		return
 	}
 
@@ -441,93 +558,143 @@ func handleConnectVPN(conn net.Conn, req models.Request, manager *Manager) {
 
 	if err := manager.ConnectVPN(uuidOrName, singleActive); err != nil {
 		log.Warnf("handleConnectVPN: failed to connect: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to connect VPN: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to connect VPN: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "VPN connection initiated"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "VPN connection initiated"})
 }
 
-func handleDisconnectVPN(conn net.Conn, req models.Request, manager *Manager) {
+func handleDisconnectVPN(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	uuidOrName, ok := params.StringAlt(req.Params, "uuidOrName", "name", "uuid")
 	if !ok {
 		log.Warnf("handleDisconnectVPN: missing uuidOrName/name/uuid parameter")
-		models.RespondError(conn, req.ID, "missing 'uuidOrName', 'name', or 'uuid' parameter")
+		conn.RespondError(req.ID, "missing 'uuidOrName', 'name', or 'uuid' parameter")
 		return
 	}
 
 	if err := manager.DisconnectVPN(uuidOrName); err != nil {
 		log.Warnf("handleDisconnectVPN: failed to disconnect: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to disconnect VPN: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to disconnect VPN: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "VPN disconnected"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "VPN disconnected"})
 }
 
-func handleDisconnectAllVPN(conn net.Conn, req models.Request, manager *Manager) {
+func handleDisconnectAllVPN(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	if err := manager.DisconnectAllVPN(); err != nil {
 		log.Warnf("handleDisconnectAllVPN: failed: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to disconnect all VPNs: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to disconnect all VPNs: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "All VPNs disconnected"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "All VPNs disconnected"})
 }
 
-func handleClearVPNCredentials(conn net.Conn, req models.Request, manager *Manager) {
+func handleClearVPNCredentials(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	uuidOrName, ok := params.StringAlt(req.Params, "uuid", "name", "uuidOrName")
 	if !ok {
 		log.Warnf("handleClearVPNCredentials: missing uuidOrName/name/uuid parameter")
-		models.RespondError(conn, req.ID, "missing uuidOrName/name/uuid parameter")
+		conn.RespondError(req.ID, "missing uuidOrName/name/uuid parameter")
 		return
 	}
 
 	if err := manager.ClearVPNCredentials(uuidOrName); err != nil {
 		log.Warnf("handleClearVPNCredentials: failed: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to clear VPN credentials: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to clear VPN credentials: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "VPN credentials cleared"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "VPN credentials cleared"})
 }
 
-func handleSetWiFiAutoconnect(conn net.Conn, req models.Request, manager *Manager) {
+func handleSetWiFiAutoconnect(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	ssid, err := params.String(req.Params, "ssid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	autoconnect, err := params.Bool(req.Params, "autoconnect")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	if err := manager.SetWiFiAutoconnect(ssid, autoconnect); err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to set autoconnect: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to set autoconnect: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "autoconnect updated"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "autoconnect updated"})
 }
 
-func handleListVPNPlugins(conn net.Conn, req models.Request, manager *Manager) {
+func handleConfigureHotspot(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	ssid, err := params.String(req.Params, "ssid")
+	if err != nil {
+		conn.RespondError(req.ID, err.Error())
+		return
+	}
+
+	hotspotReq := HotspotRequest{
+		SSID:     ssid,
+		Password: params.StringOpt(req.Params, "password", ""),
+		Device:   params.StringOpt(req.Params, "device", ""),
+		Band:     params.StringOpt(req.Params, "band", ""),
+	}
+
+	if err := manager.ConfigureHotspot(hotspotReq); err != nil {
+		conn.RespondError(req.ID, fmt.Sprintf("failed to configure hotspot: %v", err))
+		return
+	}
+
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "hotspot configured"})
+}
+
+func handleStartHotspot(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	if err := manager.StartHotspot(); err != nil {
+		conn.RespondError(req.ID, fmt.Sprintf("failed to start hotspot: %v", err))
+		return
+	}
+
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "hotspot started"})
+}
+
+func handleStopHotspot(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	if err := manager.StopHotspot(); err != nil {
+		conn.RespondError(req.ID, fmt.Sprintf("failed to stop hotspot: %v", err))
+		return
+	}
+
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "hotspot stopped"})
+}
+
+func handleGetHotspotSecrets(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
+	password, err := manager.GetHotspotSecrets()
+	if err != nil {
+		conn.RespondError(req.ID, fmt.Sprintf("failed to get hotspot secrets: %v", err))
+		return
+	}
+
+	conn.Respond(req.ID, map[string]string{"password": password})
+}
+
+func handleListVPNPlugins(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	plugins, err := manager.ListVPNPlugins()
 	if err != nil {
 		log.Warnf("handleListVPNPlugins: failed to list plugins: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to list VPN plugins: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to list VPN plugins: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, plugins)
+	conn.Respond(req.ID, plugins)
 }
 
-func handleImportVPN(conn net.Conn, req models.Request, manager *Manager) {
+func handleImportVPN(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	filePath, ok := params.StringAlt(req.Params, "file", "path")
 	if !ok {
-		models.RespondError(conn, req.ID, "missing 'file' or 'path' parameter")
+		conn.RespondError(req.ID, "missing 'file' or 'path' parameter")
 		return
 	}
 
@@ -536,83 +703,83 @@ func handleImportVPN(conn net.Conn, req models.Request, manager *Manager) {
 	result, err := manager.ImportVPN(filePath, name)
 	if err != nil {
 		log.Warnf("handleImportVPN: failed to import: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to import VPN: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to import VPN: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, result)
+	conn.Respond(req.ID, result)
 }
 
-func handleGetVPNConfig(conn net.Conn, req models.Request, manager *Manager) {
+func handleGetVPNConfig(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	uuidOrName, ok := params.StringAlt(req.Params, "uuid", "name", "uuidOrName")
 	if !ok {
-		models.RespondError(conn, req.ID, "missing 'uuid', 'name', or 'uuidOrName' parameter")
+		conn.RespondError(req.ID, "missing 'uuid', 'name', or 'uuidOrName' parameter")
 		return
 	}
 
 	config, err := manager.GetVPNConfig(uuidOrName)
 	if err != nil {
 		log.Warnf("handleGetVPNConfig: failed to get config: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to get VPN config: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to get VPN config: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, config)
+	conn.Respond(req.ID, config)
 }
 
-func handleUpdateVPNConfig(conn net.Conn, req models.Request, manager *Manager) {
+func handleUpdateVPNConfig(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	connUUID, err := params.String(req.Params, "uuid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	updates := make(map[string]any)
 
-	if name, ok := models.Get[string](req, "name"); ok {
+	if name, ok := req.Get[string]("name"); ok {
 		updates["name"] = name
 	}
-	if autoconnect, ok := models.Get[bool](req, "autoconnect"); ok {
+	if autoconnect, ok := req.Get[bool]("autoconnect"); ok {
 		updates["autoconnect"] = autoconnect
 	}
-	if data, ok := models.Get[map[string]any](req, "data"); ok {
+	if data, ok := req.Get[map[string]any]("data"); ok {
 		updates["data"] = data
 	}
 
 	if len(updates) == 0 {
-		models.RespondError(conn, req.ID, "no updates provided")
+		conn.RespondError(req.ID, "no updates provided")
 		return
 	}
 
 	if err := manager.UpdateVPNConfig(connUUID, updates); err != nil {
 		log.Warnf("handleUpdateVPNConfig: failed to update: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to update VPN config: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to update VPN config: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "VPN config updated"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "VPN config updated"})
 }
 
-func handleDeleteVPN(conn net.Conn, req models.Request, manager *Manager) {
+func handleDeleteVPN(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	uuidOrName, ok := params.StringAlt(req.Params, "uuid", "name", "uuidOrName")
 	if !ok {
-		models.RespondError(conn, req.ID, "missing 'uuid', 'name', or 'uuidOrName' parameter")
+		conn.RespondError(req.ID, "missing 'uuid', 'name', or 'uuidOrName' parameter")
 		return
 	}
 
 	if err := manager.DeleteVPN(uuidOrName); err != nil {
 		log.Warnf("handleDeleteVPN: failed to delete: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to delete VPN: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to delete VPN: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "VPN deleted"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "VPN deleted"})
 }
 
-func handleSetVPNCredentials(conn net.Conn, req models.Request, manager *Manager) {
+func handleSetVPNCredentials(conn *ipc.ConnWriter, req ipc.Request, manager *Manager) {
 	connUUID, err := params.String(req.Params, "uuid")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
@@ -622,9 +789,9 @@ func handleSetVPNCredentials(conn net.Conn, req models.Request, manager *Manager
 
 	if err := manager.SetVPNCredentials(connUUID, username, password, save); err != nil {
 		log.Warnf("handleSetVPNCredentials: failed to set credentials: %v", err)
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to set VPN credentials: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to set VPN credentials: %v", err))
 		return
 	}
 
-	models.Respond(conn, req.ID, models.SuccessResult{Success: true, Message: "VPN credentials set"})
+	conn.Respond(req.ID, models.SuccessResult{Success: true, Message: "VPN credentials set"})
 }

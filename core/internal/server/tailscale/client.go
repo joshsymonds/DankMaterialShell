@@ -33,6 +33,7 @@ func convertStatus(status *ipnstate.Status) *TailscaleState {
 
 	if status.Self != nil {
 		state.Self = convertPeerStatus(status.Self, users)
+		state.Self.Online = true
 	}
 
 	if len(status.Peer) > 0 {
@@ -66,16 +67,17 @@ func convertPeerStatus(ps *ipnstate.PeerStatus, users map[tailcfg.UserID]tailcfg
 	}
 
 	peer := Peer{
-		ID:       string(ps.ID),
-		Hostname: hostname,
-		DNSName:  dnsName,
-		OS:       ps.OS,
-		Online:   ps.Online,
-		Active:   ps.Active,
-		ExitNode: ps.ExitNode,
-		Relay:    ps.Relay,
-		RxBytes:  ps.RxBytes,
-		TxBytes:  ps.TxBytes,
+		ID:             string(ps.ID),
+		Hostname:       hostname,
+		DNSName:        dnsName,
+		OS:             ps.OS,
+		Online:         ps.Online,
+		Active:         ps.Active,
+		ExitNode:       ps.ExitNode,
+		ExitNodeOption: ps.ExitNodeOption,
+		Relay:          ps.Relay,
+		RxBytes:        ps.RxBytes,
+		TxBytes:        ps.TxBytes,
 	}
 
 	for _, ip := range ps.TailscaleIPs {

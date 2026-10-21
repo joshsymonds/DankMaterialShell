@@ -2,27 +2,16 @@ import QtQuick
 import QtQuick.Layouts
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
+import "../../Common/Format.js" as Format
 
 Item {
     id: root
 
-    function formatSpeed(bytesPerSec) {
-        if (bytesPerSec < 1024)
-            return bytesPerSec.toFixed(0) + " B/s";
-        if (bytesPerSec < 1024 * 1024)
-            return (bytesPerSec / 1024).toFixed(1) + " KB/s";
-        if (bytesPerSec < 1024 * 1024 * 1024)
-            return (bytesPerSec / (1024 * 1024)).toFixed(1) + " MB/s";
-        return (bytesPerSec / (1024 * 1024 * 1024)).toFixed(2) + " GB/s";
-    }
-
-    Component.onCompleted: {
-        DgopService.addRef(["disk", "diskmounts"]);
-    }
-
-    Component.onDestruction: {
-        DgopService.removeRef(["disk", "diskmounts"]);
+    Ref {
+        service: DgopService
+        modules: ["disk", "diskmounts"]
+        active: root.visible
     }
 
     ColumnLayout {
@@ -34,6 +23,8 @@ Item {
             Layout.preferredHeight: 80
             radius: Theme.cornerRadius
             color: Theme.nestedSurface
+            border.width: Theme.layerOutlineWidth
+            border.color: Theme.outlineMedium
 
             RowLayout {
                 anchors.fill: parent
@@ -47,7 +38,7 @@ Item {
                     Row {
                         spacing: Theme.spacingS
 
-                        DankIcon {
+                        DIcon {
                             name: "storage"
                             size: Theme.iconSize
                             color: Theme.primary
@@ -57,7 +48,7 @@ Item {
                         StyledText {
                             text: I18n.tr("Disk I/O", "disk io header in system monitor")
                             font.pixelSize: Theme.fontSizeLarge
-                            font.weight: Font.Bold
+                            font.weight: Theme.fontWeightMedium
                             color: Theme.surfaceText
                             anchors.verticalCenter: parent.verticalCenter
                         }
@@ -76,10 +67,10 @@ Item {
                             }
 
                             StyledText {
-                                text: root.formatSpeed(DgopService.diskReadRate)
+                                text: Format.formatRate(DgopService.diskReadRate)
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.family: SettingsData.monoFontFamily
-                                font.weight: Font.Bold
+                                font.weight: Theme.fontWeightMedium
                                 color: Theme.primary
                             }
                         }
@@ -94,10 +85,10 @@ Item {
                             }
 
                             StyledText {
-                                text: root.formatSpeed(DgopService.diskWriteRate)
+                                text: Format.formatRate(DgopService.diskWriteRate)
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.family: SettingsData.monoFontFamily
-                                font.weight: Font.Bold
+                                font.weight: Theme.fontWeightMedium
                                 color: Theme.warning
                             }
                         }
@@ -111,6 +102,8 @@ Item {
             Layout.fillHeight: true
             radius: Theme.cornerRadius
             color: Theme.nestedSurface
+            border.width: Theme.layerOutlineWidth
+            border.color: Theme.outlineMedium
 
             ColumnLayout {
                 anchors.fill: parent
@@ -120,7 +113,7 @@ Item {
                 Row {
                     spacing: Theme.spacingS
 
-                    DankIcon {
+                    DIcon {
                         name: "folder"
                         size: Theme.iconSize - 2
                         color: Theme.secondary
@@ -130,7 +123,7 @@ Item {
                     StyledText {
                         text: I18n.tr("Mount Points", "mount points header in system monitor")
                         font.pixelSize: Theme.fontSizeMedium
-                        font.weight: Font.Bold
+                        font.weight: Theme.fontWeightMedium
                         color: Theme.surfaceText
                         anchors.verticalCenter: parent.verticalCenter
                     }
@@ -142,13 +135,13 @@ Item {
                     color: Theme.outlineLight
                 }
 
-                DankListView {
+                DListView {
                     id: mountListView
 
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
-                    spacing: 4
+                    spacing: Theme.spacingXS
 
                     model: DgopService.diskMounts
 
@@ -159,7 +152,7 @@ Item {
                         width: mountListView.width
                         height: 60
                         radius: Theme.cornerRadius
-                        color: mountMouseArea.containsMouse ? Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.06) : "transparent"
+                        color: mountMouseArea.containsMouse ? Theme.primaryBackground : Theme.withAlpha(Theme.primaryBackground, 0)
 
                         readonly property real usedPct: {
                             const pctStr = modelData?.percent ?? "0%";
@@ -184,7 +177,7 @@ Item {
                                 Row {
                                     spacing: Theme.spacingS
 
-                                    DankIcon {
+                                    DIcon {
                                         name: {
                                             const mp = modelData?.mount ?? "";
                                             if (mp === "/")
@@ -206,7 +199,7 @@ Item {
                                         text: modelData?.mount ?? ""
                                         font.pixelSize: Theme.fontSizeSmall
                                         font.family: SettingsData.monoFontFamily
-                                        font.weight: Font.Medium
+                                        font.weight: Theme.fontWeightMedium
                                         color: Theme.surfaceText
                                     }
                                 }
@@ -243,13 +236,13 @@ Item {
                                 Rectangle {
                                     width: parent.width
                                     height: 8
-                                    radius: 4
-                                    color: Qt.rgba(Theme.outline.r, Theme.outline.g, Theme.outline.b, 0.2)
+                                    radius: Theme.fullRadius(width, height)
+                                    color: Theme.outlineHeavy
 
                                     Rectangle {
                                         width: parent.width * Math.min(1, parent.parent.parent.parent.usedPct)
                                         height: parent.height
-                                        radius: 4
+                                        radius: Theme.fullRadius(width, height)
                                         color: {
                                             const pct = parent.parent.parent.parent.usedPct;
                                             if (pct > 0.95)
@@ -298,7 +291,7 @@ Item {
                                 text: modelData?.percent ?? ""
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.family: SettingsData.monoFontFamily
-                                font.weight: Font.Bold
+                                font.weight: Theme.fontWeightMedium
                                 color: {
                                     const pct = parent.parent.usedPct;
                                     if (pct > 0.95)
@@ -324,7 +317,7 @@ Item {
                             anchors.centerIn: parent
                             spacing: Theme.spacingM
 
-                            DankIcon {
+                            DIcon {
                                 name: "storage"
                                 size: 32
                                 color: Theme.surfaceVariantText

@@ -25,6 +25,7 @@ Singleton {
     signal importComplete(string uuid, string name)
     signal configLoaded(var config)
     signal configUpdated
+    signal credentialsSet(string uuid)
     signal vpnDeleted(string uuid)
 
     Component.onCompleted: {
@@ -90,7 +91,7 @@ Singleton {
             if (!response.result)
                 return;
             if (response.result.success) {
-                ToastService.showInfo(I18n.tr("VPN imported: %1").arg(response.result.name || ""));
+                ToastService.showInfo(I18n.tr("VPN imported: %1", "toast after importing a vpn profile, %1 is its name").arg(response.result.name || ""));
                 DMSNetworkService.refreshVpnProfiles();
                 importComplete(response.result.uuid || "", response.result.name || "");
                 return;
@@ -149,6 +150,28 @@ Singleton {
         });
     }
 
+    function setCredentials(uuid, username, password, save = true) {
+        if (!available)
+            return;
+        const params = {
+            uuid: uuid,
+            save: save
+        };
+        if (username)
+            params.username = username;
+        if (password)
+            params.password = password;
+
+        DMSService.sendRequest("network.vpn.setCredentials", params, response => {
+            if (response.error) {
+                ToastService.showError(I18n.tr("Failed to save VPN credentials"), response.error);
+                return;
+            }
+            ToastService.showInfo(I18n.tr("VPN credentials saved"));
+            credentialsSet(uuid);
+        });
+    }
+
     function deleteVpn(uuidOrName) {
         if (!available)
             return;
@@ -166,10 +189,12 @@ Singleton {
     }
 
     function getFileFilter() {
+        // openfortivpn configs are conventionally extensionless, so the browser
+        // has to offer every file; core sniffs the contents on import.
         if (allExtensions.length === 0) {
-            return ["*.ovpn", "*.conf"];
+            return ["*.ovpn", "*.conf", "*"];
         }
-        return allExtensions.map(e => "*" + e);
+        return allExtensions.map(e => "*" + e).concat(["*"]);
     }
 
     function getExtensionsForPlugin(serviceType) {

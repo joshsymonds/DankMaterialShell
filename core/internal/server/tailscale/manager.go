@@ -6,11 +6,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/syncmap"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
 )
 
 const (
@@ -22,6 +23,8 @@ const (
 type tailscaleClient interface {
 	WatchIPNBus(ctx context.Context, mask ipn.NotifyWatchOpt) (ipnBusWatcher, error)
 	Status(ctx context.Context) (*ipnstate.Status, error)
+	GetPrefs(ctx context.Context) (*ipn.Prefs, error)
+	EditPrefs(ctx context.Context, mp *ipn.MaskedPrefs) (*ipn.Prefs, error)
 }
 
 // ipnBusWatcher abstracts the IPN bus watcher for testing.
@@ -41,6 +44,14 @@ func (w *localClientWrapper) WatchIPNBus(ctx context.Context, mask ipn.NotifyWat
 
 func (w *localClientWrapper) Status(ctx context.Context) (*ipnstate.Status, error) {
 	return w.client.Status(ctx)
+}
+
+func (w *localClientWrapper) GetPrefs(ctx context.Context) (*ipn.Prefs, error) {
+	return w.client.GetPrefs(ctx)
+}
+
+func (w *localClientWrapper) EditPrefs(ctx context.Context, mp *ipn.MaskedPrefs) (*ipn.Prefs, error) {
+	return w.client.EditPrefs(ctx, mp)
 }
 
 // Manager manages Tailscale state via IPN bus events and subscriber notifications.
@@ -84,7 +95,7 @@ func newManager(client tailscaleClient) *Manager {
 func (m *Manager) watchLoop(ctx context.Context) {
 	defer m.watchWG.Done()
 
-	mask := ipn.NotifyInitialState | ipn.NotifyInitialNetMap | ipn.NotifyRateLimit
+	mask := ipn.NotifyInitialState | ipn.NotifyInitialPrefs | ipn.NotifyPeerChanges | ipn.NotifyPeerPatches
 	backoff := time.Second
 	unreachableSent := false
 
@@ -98,33 +109,34 @@ func (m *Manager) watchLoop(ctx context.Context) {
 		watcher, err := m.client.WatchIPNBus(ctx, mask)
 		if err != nil {
 			if !unreachableSent {
+				log.Warnf("[Tailscale] IPN bus subscribe failed: %v", err)
 				m.updateState(&TailscaleState{Connected: false, BackendState: "Unreachable"})
 				unreachableSent = true
 			}
-			select {
-			case <-ctx.Done():
+			if !sleepBackoff(ctx, &backoff) {
 				return
-			case <-time.After(backoff):
 			}
-			backoff = min(backoff*2, 30*time.Second)
 			continue
 		}
 
 		unreachableSent = false
-		backoff = time.Second
 		log.Info("[Tailscale] Connected to IPN bus")
 		m.markAvailable()
 
+		select {
+		case m.dirty <- struct{}{}:
+		default:
+		}
+
 		for {
-			notify, err := watcher.Next()
+			_, err := watcher.Next()
 			if err != nil {
 				log.Warnf("[Tailscale] IPN bus error: %v", err)
 				break
 			}
 
-			if notify.State == nil && notify.NetMap == nil {
-				continue
-			}
+			backoff = time.Second
+
 			select {
 			case m.dirty <- struct{}{}:
 			default:
@@ -132,7 +144,21 @@ func (m *Manager) watchLoop(ctx context.Context) {
 		}
 
 		watcher.Close()
+
+		if !sleepBackoff(ctx, &backoff) {
+			return
+		}
 	}
+}
+
+func sleepBackoff(ctx context.Context, backoff *time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(*backoff):
+	}
+	*backoff = min(*backoff*2, 30*time.Second)
+	return true
 }
 
 // debounceLoop coalesces rapid bus notifications into a single Status RPC
@@ -169,14 +195,34 @@ func (m *Manager) fetchAndBroadcast(ctx context.Context) {
 	statusCtx, cancel := context.WithTimeout(ctx, statusTimeout)
 	defer cancel()
 
-	status, err := m.client.Status(statusCtx)
+	state, err := m.fetchState(statusCtx)
 	if err != nil {
 		log.Warnf("[Tailscale] Failed to fetch status: %v", err)
 		return
 	}
 
-	state := convertStatus(status)
 	m.updateState(state)
+}
+
+// fetchState fetches the current status and merges in pref-derived fields
+// (e.g. exit-node LAN access) that are not present in the IPN status itself.
+func (m *Manager) fetchState(ctx context.Context) (*TailscaleState, error) {
+	status, err := m.client.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	state := convertStatus(status)
+
+	// Prefs carry the exit-node LAN-access toggle, which the status does not
+	// expose. Treat a prefs failure as non-fatal so status still updates.
+	if prefs, err := m.client.GetPrefs(ctx); err != nil {
+		log.Warnf("[Tailscale] Failed to fetch prefs: %v", err)
+	} else if prefs != nil {
+		state.ExitNodeAllowLANAccess = prefs.ExitNodeAllowLANAccess
+	}
+
+	return state, nil
 }
 
 func (m *Manager) updateState(state *TailscaleState) {
@@ -266,12 +312,62 @@ func (m *Manager) RefreshState() {
 	ctx, cancel := context.WithTimeout(m.ctx, statusTimeout)
 	defer cancel()
 
-	status, err := m.client.Status(ctx)
+	state, err := m.fetchState(ctx)
 	if err != nil {
 		log.Warnf("[Tailscale] Failed to refresh state: %v", err)
 		return
 	}
 
-	state := convertStatus(status)
 	m.updateState(state)
+}
+
+// Connect brings the Tailscale backend up (WantRunning = true).
+func (m *Manager) Connect() error {
+	return m.editPrefs(&ipn.MaskedPrefs{
+		Prefs:          ipn.Prefs{WantRunning: true},
+		WantRunningSet: true,
+	})
+}
+
+// Disconnect brings the Tailscale backend down (WantRunning = false).
+func (m *Manager) Disconnect() error {
+	return m.editPrefs(&ipn.MaskedPrefs{
+		Prefs:          ipn.Prefs{WantRunning: false},
+		WantRunningSet: true,
+	})
+}
+
+// SetExitNode selects the exit node identified by its stable node ID. An empty
+// id clears the current exit node. Mirrors `tailscale set --exit-node=<id>`,
+// which also clears any legacy IP-based exit node so a stale ExitNodeIP cannot
+// silently take precedence over the now-empty ID.
+func (m *Manager) SetExitNode(id string) error {
+	return m.editPrefs(&ipn.MaskedPrefs{
+		Prefs:         ipn.Prefs{ExitNodeID: tailcfg.StableNodeID(id)},
+		ExitNodeIDSet: true,
+		ExitNodeIPSet: true,
+	})
+}
+
+// SetAllowLANAccess toggles whether locally accessible subnets remain
+// reachable while an exit node is in use.
+func (m *Manager) SetAllowLANAccess(enabled bool) error {
+	return m.editPrefs(&ipn.MaskedPrefs{
+		Prefs:                     ipn.Prefs{ExitNodeAllowLANAccess: enabled},
+		ExitNodeAllowLANAccessSet: true,
+	})
+}
+
+// editPrefs applies a masked prefs edit and refreshes state so subscribers see
+// the result immediately, in addition to the IPN bus notification it triggers.
+func (m *Manager) editPrefs(mp *ipn.MaskedPrefs) error {
+	ctx, cancel := context.WithTimeout(m.ctx, statusTimeout)
+	defer cancel()
+
+	if _, err := m.client.EditPrefs(ctx, mp); err != nil {
+		return err
+	}
+
+	m.RefreshState()
+	return nil
 }

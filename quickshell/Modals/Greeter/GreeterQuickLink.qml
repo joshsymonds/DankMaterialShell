@@ -1,6 +1,6 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Rectangle {
     id: root
@@ -13,7 +13,9 @@ Rectangle {
 
     height: Math.round(Theme.fontSizeMedium * 3.1)
     radius: Theme.cornerRadius
-    color: Theme.surfaceContainerHigh
+    color: Theme.floatingWindowNestedSurface
+    border.width: Theme.layerOutlineWidth
+    border.color: Theme.outlineMedium
 
     Rectangle {
         anchors.fill: parent
@@ -26,7 +28,7 @@ Rectangle {
         anchors.centerIn: parent
         spacing: Theme.spacingS
 
-        DankIcon {
+        DIcon {
             name: root.iconName
             size: Theme.iconSizeSmall + 2
             color: Theme.primary
@@ -36,12 +38,12 @@ Rectangle {
         StyledText {
             text: root.title
             font.pixelSize: Theme.fontSizeSmall
-            font.weight: Font.Medium
+            font.weight: Theme.fontWeightMedium
             color: Theme.surfaceText
             anchors.verticalCenter: parent.verticalCenter
         }
 
-        DankIcon {
+        DIcon {
             visible: root.isExternal
             name: "open_in_new"
             size: Theme.iconSizeSmall - 2

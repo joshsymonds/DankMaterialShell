@@ -4,38 +4,54 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/duxlabs-dev/dux-go/paths"
 )
 
-func XDGStateHome() string {
-	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
-		return dir
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state")
-}
+var app = paths.New("dms")
 
-func XDGDataHome() string {
-	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
-		return dir
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share")
-}
+func App() paths.App { return app }
 
-func XDGCacheHome() string {
-	if dir, err := os.UserCacheDir(); err == nil {
-		return dir
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache")
-}
+func RuntimeDir() string { return app.SocketDir() }
 
-func XDGConfigHome() string {
-	if dir, err := os.UserConfigDir(); err == nil {
-		return dir
+func XDGStateHome() string { return paths.XDGStateHome() }
+
+func XDGDataHome() string { return paths.XDGDataHome() }
+
+func XDGCacheHome() string { return paths.XDGCacheHome() }
+
+func XDGConfigHome() string { return paths.XDGConfigHome() }
+
+func ExpandPath(path string) (string, error) { return paths.ExpandPath(path) }
+
+func XDGPicturesDir() string {
+	if dir := os.Getenv("XDG_PICTURES_DIR"); dir != "" {
+		if expanded, err := ExpandPath(dir); err == nil {
+			return expanded
+		}
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config")
+
+	data, err := os.ReadFile(filepath.Join(XDGConfigHome(), "user-dirs.dirs"))
+	if err != nil {
+		return ""
+	}
+
+	const prefix = "XDG_PICTURES_DIR="
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		path := strings.Trim(line[len(prefix):], "\"")
+		expanded, err := ExpandPath(path)
+		if err != nil {
+			return ""
+		}
+		return expanded
+	}
+	return ""
 }
 
 func EmacsConfigDir() string {
@@ -52,19 +68,4 @@ func EmacsConfigDir() string {
 	}
 
 	return ""
-}
-
-func ExpandPath(path string) (string, error) {
-	expanded := os.ExpandEnv(path)
-	expanded = filepath.Clean(expanded)
-
-	if strings.HasPrefix(expanded, "~") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		expanded = filepath.Join(home, expanded[1:])
-	}
-
-	return expanded, nil
 }

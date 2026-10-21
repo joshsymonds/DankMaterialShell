@@ -3,8 +3,8 @@ package location
 import (
 	"sync"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/geolocation"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/syncmap"
+	"github.com/duxlabs-dev/dux-shell/core/internal/geolocation"
 )
 
 type State struct {
@@ -16,7 +16,8 @@ type Manager struct {
 	state      *State
 	stateMutex sync.RWMutex
 
-	client geolocation.Client
+	client    geolocation.Client
+	startOnce sync.Once
 
 	stopChan chan struct{}
 	sigWG    sync.WaitGroup

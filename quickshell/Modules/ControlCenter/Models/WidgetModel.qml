@@ -1,122 +1,294 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import qs.Common
 import qs.Services
+import qs.Modules.ControlCenter
 import qs.Modules.ControlCenter.BuiltinPlugins
+import qs.Modules.ControlCenter.Components
+import qs.Modules.ControlCenter.Widgets
 import "../utils/widgets.js" as WidgetUtils
 
 QtObject {
     id: root
-    readonly property var log: Log.scoped("WidgetModel")
 
-    property var vpnBuiltinInstance: null
-    property var cupsBuiltinInstance: null
-    property var tailscaleBuiltinInstance: null
+    property int columns: CcMetrics.gridColumns
+    property int maximumRows: CcMetrics.rowCapFor(CcMetrics.fallbackScreenHeight)
+    property var builtinInstances: ({})
+    readonly property var _pluginWidgetsCache: ({})
 
-    property var vpnLoader: Loader {
-        active: false
-        sourceComponent: Component {
-            VpnWidget {}
+    readonly property var builtinDefinitions: [
+        {
+            "id": "builtin_vpn",
+            "component": vpnComponent
+        },
+        {
+            "id": "builtin_cups",
+            "component": cupsComponent
+        },
+        {
+            "id": "builtin_tailscale",
+            "component": tailscaleComponent
+        },
+        {
+            "id": "builtin_display_profiles",
+            "component": displayProfilesComponent
         }
+    ]
 
-        onItemChanged: {
-            root.vpnBuiltinInstance = item;
-        }
+    readonly property Component vpnComponent: Component {
+        VpnWidget {}
+    }
+    readonly property Component cupsComponent: Component {
+        CupsWidget {}
+    }
+    readonly property Component tailscaleComponent: Component {
+        TailscaleWidget {}
+    }
+    readonly property Component displayProfilesComponent: Component {
+        DisplayProfilesWidget {}
+    }
 
-        Connections {
-            target: SettingsData
-            function onControlCenterWidgetsChanged() {
-                const widgets = SettingsData.controlCenterWidgets || [];
-                const hasVpnWidget = widgets.some(w => w.id === "builtin_vpn");
-                if (!hasVpnWidget && vpnLoader.active) {
-                    log.debug("VpnWidget: No VPN widget in control center, deactivating loader");
-                    vpnLoader.active = false;
-                }
-            }
+    readonly property Instantiator builtinLoaders: Instantiator {
+        model: root.builtinDefinitions
+
+        delegate: Loader {
+            required property var modelData
+
+            active: (SettingsData.controlCenterWidgets || []).some(w => w.id === modelData.id)
+            sourceComponent: modelData.component
+            onItemChanged: root.setBuiltinInstance(modelData.id, item)
         }
     }
 
-    property var cupsLoader: Loader {
-        active: false
-        sourceComponent: Component {
-            CupsWidget {}
-        }
+    function setBuiltinInstance(id, item) {
+        const next = Object.assign({}, builtinInstances);
+        if (item)
+            next[id] = item;
+        else
+            delete next[id];
+        builtinInstances = next;
+    }
 
-        onItemChanged: {
-            root.cupsBuiltinInstance = item;
+    readonly property Component networkTile: Component {
+        NetworkTile {}
+    }
+    readonly property Component bluetoothTile: Component {
+        BluetoothTile {}
+    }
+    readonly property Component audioOutputTile: Component {
+        AudioDeviceTile {}
+    }
+    readonly property Component audioInputTile: Component {
+        AudioDeviceTile {
+            isInput: true
         }
-
-        onActiveChanged: {
-            if (!active) {
-                root.cupsBuiltinInstance = null;
-            }
+    }
+    readonly property Component nightModeTile: Component {
+        NightModeTile {}
+    }
+    readonly property Component darkModeTile: Component {
+        DarkModeTile {}
+    }
+    readonly property Component dndTile: Component {
+        DndTile {}
+    }
+    readonly property Component idleInhibitTile: Component {
+        IdleInhibitTile {}
+    }
+    readonly property Component batteryTile: Component {
+        BatteryTile {}
+    }
+    readonly property Component diskUsageTile: Component {
+        DiskUsageTile {}
+    }
+    readonly property Component colorPickerTile: Component {
+        ColorPickerTile {}
+    }
+    readonly property Component userTile: Component {
+        UserTile {}
+    }
+    readonly property Component actionTile: Component {
+        ActionTile {}
+    }
+    readonly property Component runningAppsTile: Component {
+        RunningAppsTile {}
+    }
+    readonly property Component quickTilesGroup: Component {
+        QuickTilesGroup {}
+    }
+    readonly property Component pluginTile: Component {
+        PluginTile {}
+    }
+    readonly property Component volumeSliderRow: Component {
+        AudioSliderRow {
+            node: AudioService.sink
+            maxVolume: AudioService.sinkMaxVolume
+            playFeedback: true
         }
+    }
+    readonly property Component inputVolumeSliderRow: Component {
+        AudioSliderRow {
+            node: AudioService.source
+            isInput: true
+        }
+    }
+    readonly property Component brightnessSliderRow: Component {
+        BrightnessSliderRow {}
+    }
 
-        Connections {
-            target: SettingsData
-            function onControlCenterWidgetsChanged() {
-                const widgets = SettingsData.controlCenterWidgets || [];
-                const hasCupsWidget = widgets.some(w => w.id === "builtin_cups");
-                if (!hasCupsWidget && cupsLoader.active) {
-                    log.debug("CupsWidget: No CUPS widget in control center, deactivating loader");
-                    cupsLoader.active = false;
-                }
-            }
+    function componentForWidget(widgetData) {
+        const id = widgetData.id || "";
+        if (id.startsWith("builtin_") || id.startsWith("plugin_"))
+            return pluginTile;
+        switch (id) {
+        case "wifi":
+            return networkTile;
+        case "bluetooth":
+            return bluetoothTile;
+        case "audioOutput":
+            return audioOutputTile;
+        case "audioInput":
+            return audioInputTile;
+        case "volumeSlider":
+            return volumeSliderRow;
+        case "inputVolumeSlider":
+            return inputVolumeSliderRow;
+        case "brightnessSlider":
+            return brightnessSliderRow;
+        case "nightMode":
+            return nightModeTile;
+        case "darkMode":
+            return darkModeTile;
+        case "doNotDisturb":
+            return dndTile;
+        case "idleInhibitor":
+            return idleInhibitTile;
+        case "battery":
+            return batteryTile;
+        case "diskUsage":
+            return diskUsageTile;
+        case "colorPicker":
+            return colorPickerTile;
+        case "user":
+            return userTile;
+        case "lock":
+        case "power":
+        case "settings":
+        case "edit":
+            return actionTile;
+        case "runningApps":
+            return runningAppsTile;
+        case "quickTiles":
+            return quickTilesGroup;
+        default:
+            return null;
         }
     }
 
-    property var tailscaleLoader: Loader {
-        active: false
-        sourceComponent: Component {
-            TailscaleWidget {}
+    readonly property Connections pluginWatcher: Connections {
+        target: PluginService
+
+        function onPluginLoaded() {
+            root._pluginWidgetsCache.widgets = null;
         }
 
-        onItemChanged: {
-            root.tailscaleBuiltinInstance = item;
-        }
-
-        onActiveChanged: {
-            if (!active) {
-                root.tailscaleBuiltinInstance = null;
-            }
-        }
-
-        Connections {
-            target: SettingsData
-            function onControlCenterWidgetsChanged() {
-                const widgets = SettingsData.controlCenterWidgets || [];
-                const hasTailscaleWidget = widgets.some(w => w.id === "builtin_tailscale");
-                if (!hasTailscaleWidget && tailscaleLoader.active) {
-                    root.log.debug("No Tailscale widget in control center, deactivating loader");
-                    tailscaleLoader.active = false;
-                }
-            }
+        function onPluginUnloaded() {
+            root._pluginWidgetsCache.widgets = null;
         }
     }
 
-    readonly property var coreWidgetDefinitions: [
+    readonly property var baseWidgetDefinitions: [
+        {
+            "id": "user",
+            "text": I18n.tr("User"),
+            "description": I18n.tr("Profile"),
+            "icon": "person",
+            "type": "info",
+            "category": "user",
+            "enabled": true
+        },
+        {
+            "id": "settings",
+            "text": I18n.tr("Settings"),
+            "description": "",
+            "icon": "settings",
+            "type": "action",
+            "category": "system",
+            "enabled": true
+        },
+        {
+            "id": "lock",
+            "text": I18n.tr("Lock"),
+            "description": I18n.tr("Lock screen"),
+            "icon": "lock",
+            "type": "action",
+            "category": "system",
+            "enabled": true
+        },
+        {
+            "id": "power",
+            "text": I18n.tr("Power"),
+            "description": I18n.tr("Power menu"),
+            "icon": "power_settings_new",
+            "type": "action",
+            "category": "system",
+            "enabled": true
+        },
+        {
+            "id": "edit",
+            "text": I18n.tr("Edit"),
+            "description": I18n.tr("Edit widgets"),
+            "icon": "edit",
+            "type": "action",
+            "category": "system",
+            "enabled": true
+        },
+        {
+            "id": "runningApps",
+            "text": I18n.tr("Running apps"),
+            "description": "",
+            "icon": "apps",
+            "type": "action",
+            "category": "system",
+            "enabled": true
+        },
+        {
+            "id": "quickTiles",
+            "text": I18n.tr("Quick tiles", "control center widget that holds small tiles in one row"),
+            "description": I18n.tr("Drag small tiles in to group them", "control center quick tiles widget description"),
+            "icon": "view_module",
+            "type": "action",
+            "category": "system",
+            "enabled": true,
+            "allowMultiple": true
+        },
         {
             "id": "nightMode",
-            "text": I18n.tr("Night Mode"),
+            "text": I18n.tr("Night mode"),
             "description": I18n.tr("Blue light filter"),
             "icon": "nightlight",
             "type": "toggle",
-            "enabled": DisplayService.automationAvailable,
-            "warning": !DisplayService.automationAvailable ? I18n.tr("Requires night mode support") : undefined
+            "category": "display",
+            "enabled": NightModeService.automationAvailable,
+            "warning": !NightModeService.automationAvailable ? I18n.tr("Requires night mode support") : undefined
         },
         {
             "id": "darkMode",
-            "text": I18n.tr("Dark Mode"),
+            "text": I18n.tr("Dark mode"),
             "description": I18n.tr("System theme toggle"),
             "icon": "contrast",
             "type": "toggle",
+            "category": "display",
             "enabled": true
         },
         {
             "id": "doNotDisturb",
-            "text": I18n.tr("Do Not Disturb"),
+            "text": I18n.tr("Do not disturb"),
             "description": I18n.tr("Block notifications"),
             "icon": "do_not_disturb_on",
             "type": "toggle",
+            "category": "system",
             "enabled": true
         },
         {
@@ -125,6 +297,7 @@ QtObject {
             "description": I18n.tr("Prevent screen timeout"),
             "icon": "motion_sensor_active",
             "type": "toggle",
+            "category": "system",
             "enabled": true
         },
         {
@@ -133,6 +306,7 @@ QtObject {
             "description": I18n.tr("Wi-Fi and Ethernet connection"),
             "icon": "wifi",
             "type": "connection",
+            "category": "network",
             "enabled": NetworkService.wifiAvailable,
             "warning": !NetworkService.wifiAvailable ? I18n.tr("Wi-Fi not available") : undefined
         },
@@ -142,6 +316,7 @@ QtObject {
             "description": I18n.tr("Device connections"),
             "icon": "bluetooth",
             "type": "connection",
+            "category": "network",
             "enabled": BluetoothService.available,
             "warning": !BluetoothService.available ? I18n.tr("Bluetooth not available") : undefined
         },
@@ -151,6 +326,7 @@ QtObject {
             "description": I18n.tr("Speaker settings"),
             "icon": "volume_up",
             "type": "connection",
+            "category": "audio",
             "enabled": true
         },
         {
@@ -159,6 +335,7 @@ QtObject {
             "description": I18n.tr("Microphone settings"),
             "icon": "mic",
             "type": "connection",
+            "category": "audio",
             "enabled": true
         },
         {
@@ -167,6 +344,7 @@ QtObject {
             "description": I18n.tr("Audio volume control"),
             "icon": "volume_up",
             "type": "slider",
+            "category": "audio",
             "enabled": true
         },
         {
@@ -175,8 +353,9 @@ QtObject {
             "description": I18n.tr("Display brightness control"),
             "icon": "brightness_6",
             "type": "slider",
-            "enabled": DisplayService.brightnessAvailable,
-            "warning": !DisplayService.brightnessAvailable ? I18n.tr("Brightness control not available") : undefined,
+            "category": "display",
+            "enabled": BrightnessService.brightnessAvailable,
+            "warning": !BrightnessService.brightnessAvailable ? I18n.tr("Brightness control not available") : undefined,
             "allowMultiple": true
         },
         {
@@ -185,22 +364,26 @@ QtObject {
             "description": I18n.tr("Microphone volume control"),
             "icon": "mic",
             "type": "slider",
+            "category": "audio",
             "enabled": true
         },
         {
             "id": "battery",
-            "text": I18n.tr("Battery"),
+            "text": BatteryService.batteryAvailable || !PowerProfileWatcher.available ? I18n.tr("Battery") : I18n.tr("Power profile"),
             "description": I18n.tr("Battery and power management"),
             "icon": "battery_std",
             "type": "action",
-            "enabled": true
+            "category": "system",
+            "enabled": BatteryService.batteryAvailable || PowerProfileWatcher.available,
+            "warning": !BatteryService.batteryAvailable && !PowerProfileWatcher.available ? I18n.tr("No battery") : undefined
         },
         {
             "id": "diskUsage",
-            "text": I18n.tr("Disk Usage"),
+            "text": I18n.tr("Disk usage"),
             "description": I18n.tr("Filesystem usage monitoring"),
             "icon": "storage",
             "type": "action",
+            "category": "system",
             "enabled": DgopService.dgopAvailable,
             "warning": !DgopService.dgopAvailable ? I18n.tr("Requires 'dgop' tool") : undefined,
             "allowMultiple": true
@@ -211,14 +394,16 @@ QtObject {
             "description": I18n.tr("Choose colors from palette"),
             "icon": "palette",
             "type": "action",
+            "category": "display",
             "enabled": true
         },
         {
             "id": "builtin_vpn",
-            "text": I18n.tr("VPN"),
-            "description": I18n.tr("VPN connections"),
+            "text": I18n.tr("VPN", "virtual private network, widget and page title"),
+            "description": I18n.tr("VPN Connections"),
             "icon": "vpn_key",
             "type": "builtin_plugin",
+            "category": "network",
             "enabled": DMSNetworkService.available,
             "warning": !DMSNetworkService.available ? I18n.tr("VPN not available") : undefined,
             "isBuiltinPlugin": true
@@ -229,8 +414,9 @@ QtObject {
             "description": I18n.tr("Print Server Management"),
             "icon": "Print",
             "type": "builtin_plugin",
-            "enabled": CupsService.available,
-            "warning": !CupsService.available ? I18n.tr("CUPS not available") : undefined,
+            "category": "system",
+            "enabled": CupsService.cupsAvailable,
+            "warning": !CupsService.cupsAvailable ? I18n.tr("CUPS not available") : undefined,
             "isBuiltinPlugin": true
         },
         {
@@ -239,13 +425,26 @@ QtObject {
             "description": I18n.tr("Tailscale Network", "Tailscale control center widget description"),
             "icon": "device_hub",
             "type": "builtin_plugin",
+            "category": "network",
             "enabled": TailscaleService.available,
             "warning": !TailscaleService.available ? I18n.tr("Tailscale not available", "Warning when Tailscale service is not running") : undefined,
+            "isBuiltinPlugin": true
+        },
+        {
+            "id": "builtin_display_profiles",
+            "text": I18n.tr("Display Profiles"),
+            "description": I18n.tr("Switch between display configurations"),
+            "icon": "monitor",
+            "type": "builtin_plugin",
+            "category": "display",
+            "enabled": true,
             "isBuiltinPlugin": true
         }
     ]
 
     function getPluginWidgets() {
+        if (_pluginWidgetsCache.widgets)
+            return _pluginWidgetsCache.widgets;
         const plugins = [];
         const loadedPlugins = PluginService.getLoadedPlugins();
 
@@ -284,34 +483,34 @@ QtObject {
                 "description": plugin.description || "",
                 "icon": plugin.icon || "extension",
                 "type": "plugin",
+                "category": "plugins",
                 "enabled": true,
                 "isPlugin": true
             });
         }
 
+        _pluginWidgetsCache.widgets = plugins;
         return plugins;
     }
 
-    readonly property var baseWidgetDefinitions: coreWidgetDefinitions
-
     function getWidgetForId(widgetId) {
-        return WidgetUtils.getWidgetForId(baseWidgetDefinitions, widgetId);
+        return baseWidgetDefinitions.find(w => w.id === widgetId);
     }
 
     function addWidget(widgetId) {
-        WidgetUtils.addWidget(widgetId);
+        WidgetUtils.addWidget(widgetId, columns);
     }
 
     function removeWidget(index) {
         WidgetUtils.removeWidget(index);
     }
 
-    function toggleWidgetSize(index) {
-        WidgetUtils.toggleWidgetSize(index);
+    function setLayout(widgets) {
+        WidgetUtils.setLayout(widgets);
     }
 
-    function moveWidget(fromIndex, toIndex) {
-        WidgetUtils.moveWidget(fromIndex, toIndex);
+    function setOption(index, key, value) {
+        WidgetUtils.setOption(index, key, value);
     }
 
     function resetToDefault() {

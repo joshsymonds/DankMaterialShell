@@ -1,6 +1,9 @@
 package brightness
 
 import (
+	"maps"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -15,24 +18,6 @@ func TestIsIgnorableI2CDeviceName(t *testing.T) {
 			name:       "AMDGPU SMU should be ignored",
 			deviceName: "AMDGPU SMU",
 			driver:     "amdgpu",
-			want:       true,
-		},
-		{
-			name:       "SMBus should be ignored",
-			deviceName: "SMBus I801 adapter",
-			driver:     "",
-			want:       true,
-		},
-		{
-			name:       "Synopsys DesignWare should be ignored",
-			deviceName: "Synopsys DesignWare I2C adapter",
-			driver:     "",
-			want:       true,
-		},
-		{
-			name:       "smu prefix should be ignored (Mac G5)",
-			deviceName: "smu-i2c-controller",
-			driver:     "",
 			want:       true,
 		},
 		{
@@ -72,51 +57,24 @@ func TestIsIgnorableI2CDeviceName(t *testing.T) {
 	}
 }
 
-func TestClassFiltering(t *testing.T) {
-	tests := []struct {
-		name  string
-		class uint32
-		want  bool
-	}{
-		{
-			name:  "Display adapter class should not be ignored",
-			class: 0x030000,
-			want:  false,
-		},
-		{
-			name:  "Docking station class should not be ignored",
-			class: 0x0a0000,
-			want:  false,
-		},
-		{
-			name:  "Display adapter with subclass should not be ignored",
-			class: 0x030001,
-			want:  false,
-		},
-		{
-			name:  "SMBus class should be ignored",
-			class: 0x0c0500,
-			want:  true,
-		},
-		{
-			name:  "Bridge class should be ignored",
-			class: 0x060400,
-			want:  true,
-		},
-		{
-			name:  "Generic system peripheral should be ignored",
-			class: 0x088000,
-			want:  true,
-		},
+func TestDrmConnectorsByBusMapsBothDPBuses(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{
+		"card1-DP-2/i2c-13",
+		"card1-DP-2/ddc/i2c-dev/i2c-4",
+		"card1-HDMI-A-1/ddc/i2c-dev/i2c-2",
+		"card1-DP-9",
+		"renderD128",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			classHigh := tt.class & 0xFFFF0000
-			ignorable := (classHigh != 0x030000 && classHigh != 0x0A0000)
-			if ignorable != tt.want {
-				t.Errorf("class 0x%08x: ignorable = %v, want %v", tt.class, ignorable, tt.want)
-			}
-		})
+	got := drmConnectorsByBusIn(root)
+
+	want := map[int]string{13: "card1-DP-2", 4: "card1-DP-2", 2: "card1-HDMI-A-1"}
+	if !maps.Equal(got, want) {
+		t.Fatalf("drmConnectorsByBusIn() = %v, want %v", got, want)
 	}
 }

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/config"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/ipp"
+	"github.com/duxlabs-dev/dux-shell/core/internal/config"
+	"github.com/duxlabs-dev/dux-shell/core/pkg/ipp"
 )
 
 func isAuthError(err error) bool {
@@ -18,13 +18,11 @@ func isAuthError(err error) bool {
 		return false
 	}
 
-	var httpErr ipp.HTTPError
-	if errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[ipp.HTTPError](err); ok {
 		return httpErr.Code == 401 || httpErr.Code == 403
 	}
 
-	var ippErr ipp.IPPError
-	if errors.As(err, &ippErr) {
+	if ippErr, ok := errors.AsType[ipp.IPPError](err); ok {
 		return ippErr.Status == ipp.StatusErrorForbidden ||
 			ippErr.Status == ipp.StatusErrorNotAuthenticated ||
 			ippErr.Status == ipp.StatusErrorNotAuthorized

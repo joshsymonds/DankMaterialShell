@@ -2,12 +2,11 @@ package plugins
 
 import (
 	"fmt"
-	"net"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/duxlabs-dev/dux-go/ipc"
 )
 
-func HandleRequest(conn net.Conn, req models.Request) {
+func HandleRequest(conn *ipc.ConnWriter, req ipc.Request) {
 	switch req.Method {
 	case "plugins.list":
 		HandleList(conn, req)
@@ -22,6 +21,6 @@ func HandleRequest(conn net.Conn, req models.Request) {
 	case "plugins.search":
 		HandleSearch(conn, req)
 	default:
-		models.RespondError(conn, req.ID, fmt.Sprintf("unknown method: %s", req.Method))
+		conn.RespondError(req.ID, fmt.Sprintf("unknown method: %s", req.Method))
 	}
 }

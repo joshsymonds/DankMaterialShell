@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginComponent {
@@ -23,24 +23,24 @@ PluginComponent {
         repeat: true
         onTriggered: {
             if (root.enabledEmojis.length > 0) {
-                root.currentIndex = (root.currentIndex + 1) % root.enabledEmojis.length
-                root.updateDisplayedEmojis()
+                root.currentIndex = (root.currentIndex + 1) % root.enabledEmojis.length;
+                root.updateDisplayedEmojis();
             }
         }
     }
 
     function updateDisplayedEmojis() {
-        const maxToShow = Math.min(root.maxBarEmojis, root.enabledEmojis.length)
-        let emojis = []
+        const maxToShow = Math.min(root.maxBarEmojis, root.enabledEmojis.length);
+        let emojis = [];
         for (let i = 0; i < maxToShow; i++) {
-            const idx = (root.currentIndex + i) % root.enabledEmojis.length
-            emojis.push(root.enabledEmojis[idx])
+            const idx = (root.currentIndex + i) % root.enabledEmojis.length;
+            emojis.push(root.enabledEmojis[idx]);
         }
-        root.displayedEmojis = emojis
+        root.displayedEmojis = emojis;
     }
 
     Component.onCompleted: {
-        updateDisplayedEmojis()
+        updateDisplayedEmojis();
     }
 
     onEnabledEmojisChanged: updateDisplayedEmojis()
@@ -55,7 +55,7 @@ PluginComponent {
                 model: root.displayedEmojis
                 StyledText {
                     text: modelData
-                    font.pixelSize: Theme.fontSizeLarge
+                    font.pixelSize: root.iconSize
                 }
             }
         }
@@ -70,7 +70,7 @@ PluginComponent {
                 model: root.displayedEmojis
                 StyledText {
                     text: modelData
-                    font.pixelSize: Theme.fontSizeMedium
+                    font.pixelSize: root.iconSize
                     anchors.horizontalCenter: parent.horizontalCenter
                 }
             }
@@ -81,31 +81,16 @@ PluginComponent {
         PopoutComponent {
             id: popoutColumn
 
-            headerText: "Emoji Picker"
-            detailsText: "Click an emoji to copy it to clipboard"
-            showCloseButton: true
+            headerText: I18n.trFor("exampleEmojiPlugin", "Emoji Picker")
+            detailsText: I18n.trFor("exampleEmojiPlugin", "Click an emoji to copy it to clipboard")
 
-            property var allEmojis: [
-                "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃",
-                "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😗", "😚", "😙",
-                "😋", "😛", "😜", "🤪", "😝", "🤑", "🤗", "🤭", "🤫", "🤔",
-                "🤐", "🤨", "😐", "😑", "😶", "😏", "😒", "🙄", "😬", "🤥",
-                "😌", "😔", "😪", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮",
-                "🤧", "🥵", "🥶", "😶‍🌫️", "😵", "😵‍💫", "🤯", "🤠", "🥳", "😎",
-                "🤓", "🧐", "😕", "😟", "🙁", "☹️", "😮", "😯", "😲", "😳",
-                "🥺", "😦", "😧", "😨", "😰", "😥", "😢", "😭", "😱", "😖",
-                "😣", "😞", "😓", "😩", "😫", "🥱", "😤", "😡", "😠", "🤬",
-                "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔",
-                "❤️‍🔥", "❤️‍🩹", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟",
-                "👍", "👎", "👊", "✊", "🤛", "🤜", "🤞", "✌️", "🤟", "🤘",
-                "👌", "🤌", "🤏", "👈", "👉", "👆", "👇", "☝️", "✋", "🤚"
-            ]
+            property var allEmojis: ["😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃", "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😗", "😚", "😙", "😋", "😛", "😜", "🤪", "😝", "🤑", "🤗", "🤭", "🤫", "🤔", "🤐", "🤨", "😐", "😑", "😶", "😏", "😒", "🙄", "😬", "🤥", "😌", "😔", "😪", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮", "🤧", "🥵", "🥶", "😶‍🌫️", "😵", "😵‍💫", "🤯", "🤠", "🥳", "😎", "🤓", "🧐", "😕", "😟", "🙁", "☹️", "😮", "😯", "😲", "😳", "🥺", "😦", "😧", "😨", "😰", "😥", "😢", "😭", "😱", "😖", "😣", "😞", "😓", "😩", "😫", "🥱", "😤", "😡", "😠", "🤬", "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❤️‍🔥", "❤️‍🩹", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "👍", "👎", "👊", "✊", "🤛", "🤜", "🤞", "✌️", "🤟", "🤘", "👌", "🤌", "🤏", "👈", "👉", "👆", "👇", "☝️", "✋", "🤚"]
 
             Item {
                 width: parent.width
                 implicitHeight: root.popoutHeight - popoutColumn.headerHeight - popoutColumn.detailsHeight - Theme.spacingXL
 
-                DankGridView {
+                DGridView {
                     id: emojiGrid
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: Math.floor(parent.width / 50) * 50
@@ -119,7 +104,7 @@ PluginComponent {
                         width: 45
                         height: 45
                         radius: Theme.cornerRadius
-                        color: emojiMouseArea.containsMouse ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
+                        color: emojiMouseArea.containsMouse ? Theme.chipSurface : Theme.cardSurface
                         border.width: 0
 
                         StyledText {
@@ -135,9 +120,9 @@ PluginComponent {
                             cursorShape: Qt.PointingHandCursor
 
                             onClicked: {
-                                Quickshell.execDetached(["dms", "cl", "copy", modelData])
-                                ToastService.showInfo("Copied " + modelData + " to clipboard")
-                                popoutColumn.closePopout()
+                                Quickshell.execDetached(["dms", "cl", "copy", modelData]);
+                                ToastService.showInfo(I18n.trFor("exampleEmojiPlugin", "Copied %1 to clipboard").arg(modelData));
+                                popoutColumn.closePopout();
                             }
                         }
                     }

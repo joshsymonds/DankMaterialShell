@@ -6,6 +6,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Common
 import qs.Services
+import "../Common/GSettings.js" as GSettings
 
 Singleton {
     id: root
@@ -14,11 +15,16 @@ Singleton {
     property bool accountsServiceAvailable: false
     property string systemProfileImage: ""
     property string profileImage: ""
+    readonly property string profileImageUrl: {
+        if (!profileImage.startsWith("/"))
+            return profileImage;
+        return "file://" + profileImage.split("/").map(part => encodeURIComponent(part)).join("/");
+    }
     property bool settingsPortalAvailable: false
     property int systemColorScheme: 0
+    property bool colorSchemeInitialized: false
 
     property bool freedeskAvailable: false
-    property string colorSchemeCommand: ""
     property string pendingProfileImage: ""
 
     readonly property string socketPath: Quickshell.env("DMS_SOCKET")
@@ -87,39 +93,61 @@ Singleton {
         }
     }
 
-    function getSystemColorScheme() {
-        if (typeof SettingsData !== "undefined" && SettingsData.syncModeWithPortal === false) {
-            return;
-        }
-        if (!freedeskAvailable)
-            return;
-        DMSService.sendRequest("freedesktop.settings.getColorScheme", null, response => {
-            if (response.result) {
-                systemColorScheme = response.result.value || 0;
-            }
-        });
+    function canSyncColorScheme() {
+        if (typeof SettingsData === "undefined" || !SettingsData.syncModeWithPortal)
+            return false;
+        if (!settingsPortalAvailable)
+            return false;
+        if (typeof SessionData !== "undefined" && SessionData.themeModeAutoEnabled)
+            return false;
+        if (SettingsData.matugenSmartMode && typeof Theme !== "undefined" && Theme.currentTheme === Theme.dynamic)
+            return false;
+        return typeof Theme !== "undefined";
     }
 
-    function setLightMode(isLightMode) {
-        if (typeof SettingsData !== "undefined" && SettingsData.syncModeWithPortal === false) {
+    // Follow only genuine portal transitions, debounced by the settle window — the
+    // opt-in GTK4-refresh toggle reverts within ~400ms, and a stale portal value
+    // (broken gsettings→portal bridge) must never revert a DMS-initiated change.
+    function handlePortalColorScheme(scheme) {
+        const isTransition = colorSchemeInitialized && scheme !== systemColorScheme;
+        colorSchemeInitialized = true;
+        systemColorScheme = scheme;
+
+        if (!canSyncColorScheme())
+            return;
+
+        const shouldBeLight = scheme !== 1;
+        if (Theme.isLightMode === shouldBeLight) {
+            colorSchemeSettleTimer.stop();
             return;
         }
-        setSystemColorScheme(isLightMode);
+        if (!isTransition)
+            return;
+        colorSchemeSettleTimer.restart();
+    }
+
+    Timer {
+        id: colorSchemeSettleTimer
+        interval: 750
+        onTriggered: {
+            if (!root.canSyncColorScheme())
+                return;
+            const shouldBeLight = root.systemColorScheme !== 1;
+            if (Theme.isLightMode === shouldBeLight)
+                return;
+            if (Theme.workerRunning) {
+                restart();
+                return;
+            }
+            Theme.setLightMode(shouldBeLight, true, false);
+        }
     }
 
     function setSystemColorScheme(isLightMode) {
-        if (typeof SettingsData !== "undefined" && SettingsData.syncModeWithPortal === false) {
-            return;
-        }
+        const preferLight = isLightMode && systemColorScheme === 2;
+        const targetScheme = isLightMode ? (preferLight ? "prefer-light" : "default") : "prefer-dark";
 
-        const targetScheme = isLightMode ? "default" : "prefer-dark";
-
-        if (colorSchemeCommand === "gsettings") {
-            Quickshell.execDetached(["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", targetScheme]);
-        }
-        if (colorSchemeCommand === "dconf") {
-            Quickshell.execDetached(["dconf", "write", "/org/gnome/desktop/interface/color-scheme", `'${targetScheme}'`]);
-        }
+        Quickshell.execDetached(["sh", "-c", GSettings.setCmd("org.gnome.desktop.interface", "color-scheme", targetScheme)]);
     }
 
     function setSystemIconTheme(themeName) {
@@ -153,7 +181,7 @@ Singleton {
                 } else if (errorMsg.includes("not found") || errorMsg.includes("does not exist")) {
                     userMessage = I18n.tr("Selected image file not found.");
                 } else {
-                    userMessage = I18n.tr("Failed to set profile image: %1").arg(errorMsg.split(":").pop().trim());
+                    userMessage = I18n.tr("Failed to set profile image: %1", "error message, %1 is the error detail").arg(errorMsg.split(":").pop().trim());
                 }
 
                 Quickshell.execDetached(["notify-send", "-u", "normal", "-a", "DMS", "-i", "error", I18n.tr("Profile Image Error"), userMessage]);
@@ -173,7 +201,38 @@ Singleton {
         } else {
             log.info("DMS_SOCKET not set");
         }
-        colorSchemeDetector.running = true;
+    }
+
+    Connections {
+        target: Theme
+        enabled: SettingsData.syncModeWithPortal
+
+        function onIsLightModeChanged() {
+            root.setSystemColorScheme(Theme.isLightMode);
+        }
+    }
+
+    Connections {
+        target: typeof SettingsData !== "undefined" ? SettingsData : null
+
+        function onSyncModeWithPortalChanged() {
+            if (!SettingsData.syncModeWithPortal)
+                return;
+            if (typeof Theme === "undefined")
+                return;
+            root.setSystemColorScheme(Theme.isLightMode);
+        }
+    }
+
+    Connections {
+        target: DMSService
+
+        function onFreedesktopStateUpdate(data) {
+            if (!data || !data.settings)
+                return;
+            root.settingsPortalAvailable = data.settings.available === true;
+            root.handlePortalColorScheme(data.settings.colorScheme || 0);
+        }
     }
 
     Connections {
@@ -232,18 +291,28 @@ Singleton {
         DMSService.sendRequest("freedesktop.getState", null, response => {
             if (response.result && response.result.settings) {
                 settingsPortalAvailable = response.result.settings.available || false;
-                if (settingsPortalAvailable && SettingsData.syncModeWithPortal) {
-                    getSystemColorScheme();
-                }
+                handlePortalColorScheme(response.result.settings.colorScheme || 0);
             }
         });
     }
 
+    property string pendingGreeterProfileUser: ""
+
     function getGreeterUserProfileImage(username) {
         if (!username) {
             profileImage = "";
+            pendingGreeterProfileUser = "";
             return;
         }
+        if (typeof GreeterUsersService !== "undefined") {
+            const cachedPath = GreeterUsersService.profileImagePath(username);
+            if (cachedPath) {
+                profileImage = cachedPath;
+                pendingGreeterProfileUser = "";
+                return;
+            }
+        }
+        pendingGreeterProfileUser = username;
         userProfileCheckProcess.command = ["bash", "-c", `uid=$(id -u ${username} 2>/dev/null) && [ -n "$uid" ] && dbus-send --system --print-reply --dest=org.freedesktop.Accounts /org/freedesktop/Accounts/User$uid org.freedesktop.DBus.Properties.Get string:org.freedesktop.Accounts.User string:IconFile 2>/dev/null | grep -oP 'string "\\K[^"]+' || echo ""`];
         userProfileCheckProcess.running = true;
     }
@@ -261,29 +330,14 @@ Singleton {
                 } else {
                     root.profileImage = "";
                 }
+                root.pendingGreeterProfileUser = "";
             }
         }
 
         onExited: exitCode => {
-            if (exitCode !== 0) {
+            if (exitCode !== 0 && root.pendingGreeterProfileUser !== "") {
                 root.profileImage = "";
-            }
-        }
-    }
-
-    Process {
-        id: colorSchemeDetector
-        command: ["bash", "-c", "command -v gsettings || command -v dconf"]
-        running: false
-
-        stdout: StdioCollector {
-            onStreamFinished: {
-                const cmd = text.trim();
-                if (cmd.includes("gsettings")) {
-                    root.colorSchemeCommand = "gsettings";
-                } else if (cmd.includes("dconf")) {
-                    root.colorSchemeCommand = "dconf";
-                }
+                root.pendingGreeterProfileUser = "";
             }
         }
     }

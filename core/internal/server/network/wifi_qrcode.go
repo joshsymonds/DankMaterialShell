@@ -5,12 +5,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/duxlabs-dev/dux-shell/core/internal/qrcode"
 )
 
 const qrCodeTmpPrefix = "/tmp/dank-wifi-qrcode-"
 
 func FormatWiFiQRString(securityType, ssid, password string) string {
-	return fmt.Sprintf("WIFI:T:%s;S:%s;P:%s;;", securityType, ssid, password)
+	return qrcode.WiFiString(securityType, ssid, password, false)
 }
 
 func qrCodePaths(ssid string) (themed, normal string) {
@@ -22,7 +24,7 @@ func qrCodePaths(ssid string) (themed, normal string) {
 
 func isValidQRCodePath(path string) bool {
 	clean := filepath.Clean(path)
-	return strings.HasPrefix(clean, qrCodeTmpPrefix) && strings.HasSuffix(clean, ".png")
+	return (strings.HasPrefix(clean, qrCodeTmpPrefix) || strings.HasPrefix(clean, textQRCodeTmpPrefix)) && strings.HasSuffix(clean, ".png")
 }
 
 var safePathChar = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
@@ -44,7 +46,7 @@ func iwdConfigPath(ssid string) string {
 
 func parseIWDPassphrase(data string) (string, error) {
 	inSecurity := false
-	for _, line := range strings.Split(data, "\n") {
+	for line := range strings.SplitSeq(data, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case line == "[Security]":

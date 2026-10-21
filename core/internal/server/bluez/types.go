@@ -3,16 +3,25 @@ package bluez
 import (
 	"sync"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/syncmap"
 	"github.com/godbus/dbus/v5"
 )
 
 type BluetoothState struct {
-	Powered          bool     `json:"powered"`
-	Discovering      bool     `json:"discovering"`
-	Devices          []Device `json:"devices"`
-	PairedDevices    []Device `json:"pairedDevices"`
-	ConnectedDevices []Device `json:"connectedDevices"`
+	Powered          bool          `json:"powered"`
+	Discovering      bool          `json:"discovering"`
+	Adapters         []AdapterInfo `json:"adapters"`
+	Devices          []Device      `json:"devices"`
+	PairedDevices    []Device      `json:"pairedDevices"`
+	ConnectedDevices []Device      `json:"connectedDevices"`
+}
+
+type AdapterInfo struct {
+	Path        string `json:"path"`
+	Name        string `json:"name"`
+	Address     string `json:"address"`
+	Powered     bool   `json:"powered"`
+	Discovering bool   `json:"discovering"`
 }
 
 type Device struct {
@@ -58,21 +67,28 @@ type PairingPrompt struct {
 }
 
 type Manager struct {
-	state              *BluetoothState
-	stateMutex         sync.RWMutex
-	subscribers        syncmap.Map[string, chan BluetoothState]
-	stopChan           chan struct{}
-	dbusConn           *dbus.Conn
-	signals            chan *dbus.Signal
-	sigWG              sync.WaitGroup
-	agent              *BluezAgent
-	promptBroker       PromptBroker
-	pairingSubscribers syncmap.Map[string, chan PairingPrompt]
-	dirty              chan struct{}
-	notifierWg         sync.WaitGroup
-	lastNotifiedState  *BluetoothState
-	adapterPath        dbus.ObjectPath
-	pendingPairings    syncmap.Map[string, bool]
-	eventQueue         chan func()
-	eventWg            sync.WaitGroup
+	state               *BluetoothState
+	stateMutex          sync.RWMutex
+	subscribers         syncmap.Map[string, chan BluetoothState]
+	stopChan            chan struct{}
+	dbusConn            *dbus.Conn
+	signals             chan *dbus.Signal
+	sigWG               sync.WaitGroup
+	agent               *BluezAgent
+	promptBroker        PromptBroker
+	pairingSubscribers  syncmap.Map[string, chan PairingPrompt]
+	commandSubscribers  syncmap.Map[string, chan PlayerCommand]
+	commandMutex        sync.RWMutex
+	commandLease        string
+	commandSubscription string
+	commandWaiters      []string
+	mprisPlayer         *mprisPlayer
+	dirty               chan struct{}
+	notifierWg          sync.WaitGroup
+	lastNotifiedState   *BluetoothState
+	adapterPaths        []dbus.ObjectPath
+	pendingPairings     syncmap.Map[string, bool]
+	eventQueue          chan func()
+	adapterRefresh      chan struct{}
+	eventWg             sync.WaitGroup
 }

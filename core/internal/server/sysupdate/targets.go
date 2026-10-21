@@ -1,5 +1,20 @@
 package sysupdate
 
+import "regexp"
+
+var safePkgName = regexp.MustCompile(`^[A-Za-z0-9@._+:/.-]+$`)
+
+// shellSafeNames drops names unsafe to interpolate into the apt/zypper sh -c scripts.
+func shellSafeNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if safePkgName.MatchString(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func BackendHasTargets(b Backend, targets []Package, includeAUR, includeFlatpak bool) bool {
 	if b == nil || len(targets) == 0 {
 		return false
@@ -57,4 +72,11 @@ func privilegedArgv(opts UpgradeOptions, argv ...string) []string {
 	out = append(out, privesc)
 	out = append(out, argv...)
 	return out
+}
+
+func withAutoYes(opts UpgradeOptions, argv []string, flag string) []string {
+	if opts.Interactive {
+		return argv
+	}
+	return append(argv, flag)
 }

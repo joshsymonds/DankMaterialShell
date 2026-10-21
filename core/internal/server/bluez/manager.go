@@ -1,13 +1,16 @@
 package bluez
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/dbusutil"
+	"github.com/duxlabs-dev/dux-go/dbusutil"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -15,10 +18,20 @@ const (
 	adapter1Iface   = "org.bluez.Adapter1"
 	objectMgrIface  = "org.freedesktop.DBus.ObjectManager"
 	propertiesIface = "org.freedesktop.DBus.Properties"
+	dbusIface       = "org.freedesktop.DBus"
 )
 
+// Sender-scoped: the system bus is shared process-wide, so unscoped rules wake
+// every other subsystem's signal channel too.
+var bluezMatchRules = [][]dbus.MatchOption{
+	{dbus.WithMatchSender(bluezService), dbus.WithMatchInterface(propertiesIface), dbus.WithMatchMember("PropertiesChanged")},
+	{dbus.WithMatchSender(bluezService), dbus.WithMatchInterface(objectMgrIface), dbus.WithMatchMember("InterfacesAdded")},
+	{dbus.WithMatchSender(bluezService), dbus.WithMatchInterface(objectMgrIface), dbus.WithMatchMember("InterfacesRemoved")},
+	{dbus.WithMatchSender(dbusIface), dbus.WithMatchInterface(dbusIface), dbus.WithMatchMember("NameOwnerChanged"), dbus.WithMatchArg(0, bluezService)},
+}
+
 func NewManager() (*Manager, error) {
-	conn, err := dbus.ConnectSystemBus()
+	conn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("system bus connection failed: %w", err)
 	}
@@ -27,37 +40,46 @@ func NewManager() (*Manager, error) {
 		state: &BluetoothState{
 			Powered:          false,
 			Discovering:      false,
+			Adapters:         []AdapterInfo{},
 			Devices:          []Device{},
 			PairedDevices:    []Device{},
 			ConnectedDevices: []Device{},
 		},
 		stateMutex: sync.RWMutex{},
 
-		stopChan:   make(chan struct{}),
-		dbusConn:   conn,
-		signals:    make(chan *dbus.Signal, 256),
-		dirty:      make(chan struct{}, 1),
-		eventQueue: make(chan func(), 32),
+		stopChan:       make(chan struct{}),
+		dbusConn:       conn,
+		signals:        make(chan *dbus.Signal, 256),
+		dirty:          make(chan struct{}, 1),
+		eventQueue:     make(chan func(), 32),
+		adapterRefresh: make(chan struct{}, 1),
 	}
 
 	broker := NewSubscriptionBroker(m.broadcastPairingPrompt)
 	m.promptBroker = broker
 
-	adapter, err := m.findAdapter()
+	adapters, err := scanAdapters(conn)
 	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("no bluetooth adapter found: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrNoAdapter, err)
 	}
-	m.adapterPath = adapter
+	if len(adapters) == 0 {
+		return nil, ErrNoAdapter
+	}
+	m.adapterPaths = adapters
+	log.Infof("[BluezManager] adapters: %v (default: %s)", adapters, adapters[0])
 
 	if err := m.initialize(); err != nil {
-		conn.Close()
 		return nil, err
 	}
 
 	if err := m.startAgent(); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("agent start failed: %w", err)
+	}
+
+	m.mprisPlayer = newMPRISPlayer(conn, m.dispatchPlayerCommand)
+	if err := m.mprisPlayer.export(); err != nil {
+		m.agent.Close()
+		return nil, err
 	}
 
 	if err := m.startSignalPump(); err != nil {
@@ -74,22 +96,71 @@ func NewManager() (*Manager, error) {
 	return m, nil
 }
 
-func (m *Manager) findAdapter() (dbus.ObjectPath, error) {
-	obj := m.dbusConn.Object(bluezService, dbus.ObjectPath("/"))
+func scanAdapters(conn *dbus.Conn) ([]dbus.ObjectPath, error) {
+	obj := conn.Object(bluezService, dbus.ObjectPath("/"))
 	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 
 	if err := obj.Call(objectMgrIface+".GetManagedObjects", 0).Store(&objects); err != nil {
-		return "", err
+		return nil, err
 	}
 
+	paths := []dbus.ObjectPath{}
 	for path, interfaces := range objects {
 		if _, ok := interfaces[adapter1Iface]; ok {
-			log.Infof("[BluezManager] found adapter: %s", path)
-			return path, nil
+			paths = append(paths, path)
 		}
 	}
+	slices.Sort(paths)
+	return paths, nil
+}
 
-	return "", fmt.Errorf("no adapter found")
+func (m *Manager) adapterPathsSnapshot() []dbus.ObjectPath {
+	m.stateMutex.RLock()
+	defer m.stateMutex.RUnlock()
+	return append([]dbus.ObjectPath(nil), m.adapterPaths...)
+}
+
+func (m *Manager) resolveAdapter(adapterPath string) (dbus.ObjectPath, error) {
+	m.stateMutex.RLock()
+	defer m.stateMutex.RUnlock()
+
+	if len(m.adapterPaths) == 0 {
+		return "", ErrNoAdapter
+	}
+	if adapterPath == "" {
+		return m.adapterPaths[0], nil
+	}
+	if !slices.Contains(m.adapterPaths, dbus.ObjectPath(adapterPath)) {
+		return "", fmt.Errorf("unknown adapter: %s", adapterPath)
+	}
+	return dbus.ObjectPath(adapterPath), nil
+}
+
+func (m *Manager) refreshAdapters() {
+	paths, err := scanAdapters(m.dbusConn)
+	if err != nil {
+		log.Warnf("[BluezManager] adapter scan failed: %v", err)
+		return
+	}
+
+	m.stateMutex.Lock()
+	changed := !slices.Equal(m.adapterPaths, paths)
+	m.adapterPaths = paths
+	m.stateMutex.Unlock()
+
+	if m.mprisPlayer != nil {
+		if err := m.mprisPlayer.reconcile(paths); err != nil {
+			log.Warnf("[BluezManager] MPRIS registration reconcile failed: %v", err)
+		}
+	}
+	if !changed {
+		return
+	}
+	log.Infof("[BluezManager] adapters changed: %v", paths)
+	if err := m.updateAdapterState(); err != nil {
+		log.Warnf("[BluezManager] adapter state refresh failed: %v", err)
+	}
+	m.notifySubscribers()
 }
 
 func (m *Manager) initialize() error {
@@ -105,21 +176,36 @@ func (m *Manager) initialize() error {
 }
 
 func (m *Manager) updateAdapterState() error {
-	obj := m.dbusConn.Object(bluezService, m.adapterPath)
+	paths := m.adapterPathsSnapshot()
+	adapters := make([]AdapterInfo, 0, len(paths))
 
-	poweredVar, err := obj.GetProperty(adapter1Iface + ".Powered")
-	if err != nil {
-		return err
-	}
+	for _, path := range paths {
+		obj := m.dbusConn.Object(bluezService, path)
 
-	discoveringVar, err := obj.GetProperty(adapter1Iface + ".Discovering")
-	if err != nil {
-		return err
+		poweredVar, err := obj.GetProperty(adapter1Iface + ".Powered")
+		if err != nil {
+			return err
+		}
+		discoveringVar, err := obj.GetProperty(adapter1Iface + ".Discovering")
+		if err != nil {
+			return err
+		}
+		aliasVar, _ := obj.GetProperty(adapter1Iface + ".Alias")
+		addressVar, _ := obj.GetProperty(adapter1Iface + ".Address")
+
+		adapters = append(adapters, AdapterInfo{
+			Path:        string(path),
+			Name:        dbusutil.AsOr(aliasVar, ""),
+			Address:     dbusutil.AsOr(addressVar, ""),
+			Powered:     dbusutil.AsOr(poweredVar, false),
+			Discovering: dbusutil.AsOr(discoveringVar, false),
+		})
 	}
 
 	m.stateMutex.Lock()
-	m.state.Powered = dbusutil.AsOr(poweredVar, false)
-	m.state.Discovering = dbusutil.AsOr(discoveringVar, false)
+	m.state.Adapters = adapters
+	m.state.Powered = len(adapters) > 0 && adapters[0].Powered
+	m.state.Discovering = len(adapters) > 0 && adapters[0].Discovering
 	m.stateMutex.Unlock()
 
 	return nil
@@ -133,6 +219,7 @@ func (m *Manager) updateDevices() error {
 		return err
 	}
 
+	adapters := m.adapterPathsSnapshot()
 	devices := []Device{}
 	paired := []Device{}
 	connected := []Device{}
@@ -143,7 +230,7 @@ func (m *Manager) updateDevices() error {
 			continue
 		}
 
-		if !strings.HasPrefix(string(path), string(m.adapterPath)+"/") {
+		if !deviceOnAnyAdapter(path, adapters) {
 			continue
 		}
 
@@ -165,6 +252,15 @@ func (m *Manager) updateDevices() error {
 	m.stateMutex.Unlock()
 
 	return nil
+}
+
+func deviceOnAnyAdapter(path dbus.ObjectPath, adapters []dbus.ObjectPath) bool {
+	for _, adapter := range adapters {
+		if strings.HasPrefix(string(path), string(adapter)+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) deviceFromProps(path string, props map[string]dbus.Variant) Device {
@@ -201,30 +297,13 @@ func (m *Manager) startAgent() error {
 func (m *Manager) startSignalPump() error {
 	m.dbusConn.Signal(m.signals)
 
-	if err := m.dbusConn.AddMatchSignal(
-		dbus.WithMatchInterface(propertiesIface),
-		dbus.WithMatchMember("PropertiesChanged"),
-	); err != nil {
-		return err
+	for _, rule := range bluezMatchRules {
+		if err := m.dbusConn.AddMatchSignal(rule...); err != nil {
+			return err
+		}
 	}
 
-	if err := m.dbusConn.AddMatchSignal(
-		dbus.WithMatchInterface(objectMgrIface),
-		dbus.WithMatchMember("InterfacesAdded"),
-	); err != nil {
-		return err
-	}
-
-	if err := m.dbusConn.AddMatchSignal(
-		dbus.WithMatchInterface(objectMgrIface),
-		dbus.WithMatchMember("InterfacesRemoved"),
-	); err != nil {
-		return err
-	}
-
-	m.sigWG.Add(1)
-	go func() {
-		defer m.sigWG.Done()
+	m.sigWG.Go(func() {
 		for {
 			select {
 			case <-m.stopChan:
@@ -239,7 +318,7 @@ func (m *Manager) startSignalPump() error {
 				m.handleSignal(sig)
 			}
 		}
-	}()
+	})
 
 	return nil
 }
@@ -263,39 +342,107 @@ func (m *Manager) handleSignal(sig *dbus.Signal) {
 
 		switch iface {
 		case adapter1Iface:
-			if strings.HasPrefix(string(sig.Path), string(m.adapterPath)) {
-				m.handleAdapterPropertiesChanged(changed)
-			}
+			m.handleAdapterPropertiesChanged(sig.Path, changed)
 		case device1Iface:
 			m.handleDevicePropertiesChanged(sig.Path, changed)
 		}
 
 	case objectMgrIface + ".InterfacesAdded":
+		m.maybeRefreshAdapters(sig)
 		m.notifySubscribers()
 
 	case objectMgrIface + ".InterfacesRemoved":
+		m.maybeRefreshAdapters(sig)
 		m.notifySubscribers()
+
+	case dbusIface + ".NameOwnerChanged":
+		m.handleBluezOwnerChanged(sig)
 	}
 }
 
-func (m *Manager) handleAdapterPropertiesChanged(changed map[string]dbus.Variant) {
+func (m *Manager) handleBluezOwnerChanged(sig *dbus.Signal) {
+	if len(sig.Body) < 3 {
+		return
+	}
+	name, nameOK := sig.Body[0].(string)
+	oldOwner, oldOK := sig.Body[1].(string)
+	newOwner, newOK := sig.Body[2].(string)
+	if !nameOK || !oldOK || !newOK || name != bluezService {
+		return
+	}
+	if oldOwner != "" && m.mprisPlayer != nil {
+		m.mprisPlayer.clearRegistrations()
+	}
+	if newOwner != "" {
+		m.enqueueAdapterRefresh()
+	}
+}
+
+func (m *Manager) maybeRefreshAdapters(sig *dbus.Signal) {
+	if !signalTouchesAdapter(sig) {
+		return
+	}
+	m.enqueueAdapterRefresh()
+}
+
+func (m *Manager) enqueueAdapterRefresh() {
+	select {
+	case m.adapterRefresh <- struct{}{}:
+	default:
+	}
+}
+
+func signalTouchesAdapter(sig *dbus.Signal) bool {
+	if len(sig.Body) < 2 {
+		return false
+	}
+	switch ifaces := sig.Body[1].(type) {
+	case map[string]map[string]dbus.Variant:
+		_, ok := ifaces[adapter1Iface]
+		return ok
+	case []string:
+		return slices.Contains(ifaces, adapter1Iface)
+	default:
+		return false
+	}
+}
+
+func (m *Manager) handleAdapterPropertiesChanged(path dbus.ObjectPath, changed map[string]dbus.Variant) {
+	powered, hasPowered := dbusutil.Get[bool](changed, "Powered")
+	discovering, hasDiscovering := dbusutil.Get[bool](changed, "Discovering")
+	if !hasPowered && !hasDiscovering {
+		return
+	}
+
 	m.stateMutex.Lock()
 	dirty := false
-
-	if powered, ok := dbusutil.Get[bool](changed, "Powered"); ok {
-		m.state.Powered = powered
+	for i := range m.state.Adapters {
+		if m.state.Adapters[i].Path != string(path) {
+			continue
+		}
+		if hasPowered {
+			m.state.Adapters[i].Powered = powered
+		}
+		if hasDiscovering {
+			m.state.Adapters[i].Discovering = discovering
+		}
 		dirty = true
 	}
-	if discovering, ok := dbusutil.Get[bool](changed, "Discovering"); ok {
-		m.state.Discovering = discovering
+	if len(m.adapterPaths) > 0 && m.adapterPaths[0] == path {
+		if hasPowered {
+			m.state.Powered = powered
+		}
+		if hasDiscovering {
+			m.state.Discovering = discovering
+		}
 		dirty = true
 	}
-
 	m.stateMutex.Unlock()
 
-	if dirty {
-		m.notifySubscribers()
+	if !dirty {
+		return
 	}
+	m.notifySubscribers()
 }
 
 func (m *Manager) handleDevicePropertiesChanged(path dbus.ObjectPath, changed map[string]dbus.Variant) {
@@ -348,6 +495,8 @@ func (m *Manager) eventWorker() {
 			return
 		case event := <-m.eventQueue:
 			event()
+		case <-m.adapterRefresh:
+			m.refreshAdapters()
 		}
 	}
 }
@@ -444,6 +593,132 @@ func (m *Manager) UnsubscribePairing(id string) {
 	}
 }
 
+func newPlayerCommandLease() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("generate MPRIS command lease: %w", err)
+	}
+	return hex.EncodeToString(value[:]), nil
+}
+
+func (m *Manager) hasPlayerCommandWaiterLocked() bool {
+	for _, id := range m.commandWaiters {
+		if _, ok := m.commandSubscribers.Load(id); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) promotePlayerCommandSubscriberLocked() error {
+	for len(m.commandWaiters) > 0 {
+		id := m.commandWaiters[0]
+		ch, ok := m.commandSubscribers.Load(id)
+		if !ok {
+			m.commandWaiters = m.commandWaiters[1:]
+			continue
+		}
+		lease, err := newPlayerCommandLease()
+		if err != nil {
+			return err
+		}
+		m.commandWaiters = m.commandWaiters[1:]
+		m.commandLease = lease
+		m.commandSubscription = id
+		ch <- PlayerCommand{Lease: lease}
+		return nil
+	}
+	return nil
+}
+
+func (m *Manager) SubscribePlayerCommands(id string) (chan PlayerCommand, error) {
+	ch := make(chan PlayerCommand, 16)
+	m.commandMutex.Lock()
+	defer m.commandMutex.Unlock()
+	if _, exists := m.commandSubscribers.Load(id); exists {
+		return nil, fmt.Errorf("mpris command subscriber %q already exists", id)
+	}
+	m.commandSubscribers.Store(id, ch)
+	m.commandWaiters = append(m.commandWaiters, id)
+	if m.commandSubscription == "" {
+		if err := m.promotePlayerCommandSubscriberLocked(); err != nil {
+			m.commandSubscribers.Delete(id)
+			close(ch)
+			return nil, err
+		}
+	}
+	return ch, nil
+}
+
+func (m *Manager) UnsubscribePlayerCommands(id string) {
+	m.commandMutex.Lock()
+	defer m.commandMutex.Unlock()
+
+	ch, removed := m.commandSubscribers.LoadAndDelete(id)
+	if removed {
+		close(ch)
+	}
+	m.commandWaiters = slices.DeleteFunc(m.commandWaiters, func(waiter string) bool {
+		return waiter == id
+	})
+	if m.commandSubscription != id {
+		return
+	}
+	m.commandLease = ""
+	m.commandSubscription = ""
+	if m.mprisPlayer != nil {
+		transition := disabledPlayerSnapshot()
+		if m.hasPlayerCommandWaiterLocked() {
+			transition = stalePlayerSnapshot(m.mprisPlayer.currentSnapshot())
+		}
+		if err := m.mprisPlayer.publish(transition, m.adapterPathsSnapshot()); err != nil {
+			log.Warnf("[BluezManager] MPRIS owner loss publish failed: %v", err)
+		}
+	}
+	if err := m.promotePlayerCommandSubscriberLocked(); err != nil {
+		if m.mprisPlayer != nil {
+			if disableErr := m.mprisPlayer.publish(disabledPlayerSnapshot(), m.adapterPathsSnapshot()); disableErr != nil {
+				log.Warnf("[BluezManager] MPRIS disable after promotion failure failed: %v", disableErr)
+			}
+		}
+		log.Warnf("[BluezManager] MPRIS command subscriber promotion failed: %v", err)
+	}
+}
+
+func (m *Manager) dispatchPlayerCommand(command PlayerCommand) *dbus.Error {
+	m.commandMutex.RLock()
+	defer m.commandMutex.RUnlock()
+
+	if m.commandSubscription == "" || m.commandLease == "" {
+		return commandDeliveryError("no active MPRIS command owner")
+	}
+	if m.mprisPlayer == nil || !supportsPlayerCommand(m.mprisPlayer.currentSnapshot(), command.Command) {
+		return notSupportedError(command.Command)
+	}
+	ch, ok := m.commandSubscribers.Load(m.commandSubscription)
+	if !ok {
+		return commandDeliveryError("active MPRIS command owner is unavailable")
+	}
+	select {
+	case ch <- command:
+		return nil
+	default:
+		return commandDeliveryError("active MPRIS command owner is not accepting commands")
+	}
+}
+
+func (m *Manager) PublishMPRIS(lease string, snapshot PlayerSnapshot) error {
+	if m.mprisPlayer == nil {
+		return fmt.Errorf("MPRIS player not initialized")
+	}
+	m.commandMutex.RLock()
+	defer m.commandMutex.RUnlock()
+	if lease == "" || lease != m.commandLease || m.commandSubscription == "" {
+		return fmt.Errorf("MPRIS publisher does not hold the active command lease")
+	}
+	return m.mprisPlayer.publish(snapshot, m.adapterPathsSnapshot())
+}
+
 func (m *Manager) broadcastPairingPrompt(prompt PairingPrompt) {
 	m.pairingSubscribers.Range(func(key string, ch chan PairingPrompt) bool {
 		select {
@@ -476,18 +751,57 @@ func (m *Manager) CancelPairing(token string) error {
 	})
 }
 
-func (m *Manager) StartDiscovery() error {
-	obj := m.dbusConn.Object(bluezService, m.adapterPath)
+func (m *Manager) StartDiscovery(adapterPath string) error {
+	path, err := m.resolveAdapter(adapterPath)
+	if err != nil {
+		return err
+	}
+	obj := m.dbusConn.Object(bluezService, path)
 	return obj.Call(adapter1Iface+".StartDiscovery", 0).Err
 }
 
-func (m *Manager) StopDiscovery() error {
-	obj := m.dbusConn.Object(bluezService, m.adapterPath)
+func (m *Manager) StopDiscovery(adapterPath string) error {
+	path, err := m.resolveAdapter(adapterPath)
+	if err != nil {
+		return err
+	}
+	obj := m.dbusConn.Object(bluezService, path)
 	return obj.Call(adapter1Iface+".StopDiscovery", 0).Err
 }
 
-func (m *Manager) SetPowered(powered bool) error {
-	obj := m.dbusConn.Object(bluezService, m.adapterPath)
+func (m *Manager) SetPowered(adapterPath string, powered bool) error {
+	path, err := m.resolveAdapter(adapterPath)
+	if err != nil {
+		return err
+	}
+	return m.setPoweredAt(path, powered)
+}
+
+func (m *Manager) TogglePowered(adapterPath string) (bool, error) {
+	path, err := m.resolveAdapter(adapterPath)
+	if err != nil {
+		return false, err
+	}
+
+	poweredVar, err := m.dbusConn.Object(bluezService, path).GetProperty(adapter1Iface + ".Powered")
+	if err != nil {
+		return false, err
+	}
+
+	target := !dbusutil.AsOr(poweredVar, false)
+	if err := m.setPoweredAt(path, target); err != nil {
+		return false, err
+	}
+	return target, nil
+}
+
+func (m *Manager) setPoweredAt(path dbus.ObjectPath, powered bool) error {
+	if powered {
+		if err := rfkillUnblockBluetooth(); err != nil {
+			log.Debugf("[BluezManager] rfkill unblock failed: %v", err)
+		}
+	}
+	obj := m.dbusConn.Object(bluezService, path)
 	return obj.Call(propertiesIface+".Set", 0, adapter1Iface, "Powered", dbus.MakeVariant(powered)).Err
 }
 
@@ -515,7 +829,11 @@ func (m *Manager) DisconnectDevice(devicePath string) error {
 }
 
 func (m *Manager) RemoveDevice(devicePath string) error {
-	obj := m.dbusConn.Object(bluezService, m.adapterPath)
+	idx := strings.LastIndex(devicePath, "/")
+	if idx <= 0 {
+		return fmt.Errorf("invalid device path: %s", devicePath)
+	}
+	obj := m.dbusConn.Object(bluezService, dbus.ObjectPath(devicePath[:idx]))
 	return obj.Call(adapter1Iface+".RemoveDevice", 0, dbus.ObjectPath(devicePath)).Err
 }
 
@@ -535,6 +853,15 @@ func (m *Manager) Close() {
 		m.dbusConn.RemoveSignal(m.signals)
 		close(m.signals)
 	}
+	for _, rule := range bluezMatchRules {
+		_ = m.dbusConn.RemoveMatchSignal(rule...)
+	}
+
+	if m.mprisPlayer != nil {
+		if err := m.mprisPlayer.close(); err != nil {
+			log.Debugf("[BluezManager] MPRIS player close failed: %v", err)
+		}
+	}
 
 	if m.agent != nil {
 		m.agent.Close()
@@ -552,9 +879,16 @@ func (m *Manager) Close() {
 		return true
 	})
 
-	if m.dbusConn != nil {
-		m.dbusConn.Close()
-	}
+	m.commandMutex.Lock()
+	m.commandSubscribers.Range(func(key string, ch chan PlayerCommand) bool {
+		close(ch)
+		m.commandSubscribers.Delete(key)
+		return true
+	})
+	m.commandLease = ""
+	m.commandSubscription = ""
+	m.commandWaiters = nil
+	m.commandMutex.Unlock()
 }
 
 func stateChanged(old, new *BluetoothState) bool {
@@ -562,6 +896,9 @@ func stateChanged(old, new *BluetoothState) bool {
 		return true
 	}
 	if old.Discovering != new.Discovering {
+		return true
+	}
+	if !slices.Equal(old.Adapters, new.Adapters) {
 		return true
 	}
 	if len(old.Devices) != len(new.Devices) {

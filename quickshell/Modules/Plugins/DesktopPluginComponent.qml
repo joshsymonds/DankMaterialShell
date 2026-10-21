@@ -8,11 +8,15 @@ Item {
     property string pluginId: ""
     property string instanceId: ""
     property var instanceData: null
+    property bool lockScreen: false
 
     property real widgetWidth: 200
     property real widgetHeight: 200
     property real minWidth: 100
     property real minHeight: 100
+
+    property var requestResize: null
+    property var clearResize: null
 
     readonly property bool isInstance: instanceId !== "" && instanceData !== null
     readonly property var instanceConfig: instanceData?.config ?? {}

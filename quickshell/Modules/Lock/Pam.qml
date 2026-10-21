@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pam
 import qs.Common
+import qs.Services
 
 Scope {
     id: root
@@ -20,21 +21,30 @@ Scope {
     property string fprintState
     property string u2fState
     property bool u2fPending: false
+    property string u2fPendingMode
     property string buffer
+
+    // the prompt pam asked for, e.g. "PIN: "
+    property string authPromptText: ""
+    property bool responseSubmitted: false
+    property bool awaitingUserInput: false
+    readonly property bool authBusy: passwd.active && !root.awaitingUserInput
+    property var attemptInfoMessages: []
+    property bool lockoutAnnouncedThisAttempt: false
 
     signal flashMsg
     signal unlockRequested
 
     function resetAuthFlows(): void {
         passwd.abort();
-        fprint.abort();
+        fprint.stop();
         u2f.abort();
-        errorRetry.running = false;
         u2fErrorRetry.running = false;
         u2fPendingTimeout.running = false;
         passwdActiveTimeout.running = false;
         unlockRequestTimeout.running = false;
         root.u2fPending = false;
+        root.u2fPendingMode = "";
         root.u2fState = "";
         root.unlockInProgress = false;
     }
@@ -48,16 +58,34 @@ Scope {
         u2f.checkAvail();
     }
 
+    // start() runs every auth module before the first prompt (howdy, fprintd), so only on submit
+    function submitPassword(): void {
+        root.responseSubmitted = true;
+        if (!passwd.active) {
+            passwd.start();
+            return;
+        }
+        if (passwd.responseRequired) {
+            root.responseSubmitted = false;
+            root.awaitingUserInput = false;
+            passwdActiveTimeout.restart();
+            passwd.respond(root.buffer);
+        } else {
+            // kept and sent when the prompt arrives; a stack that never asks still times out
+            passwdActiveTimeout.restart();
+        }
+    }
+
     function completeUnlock(): void {
         if (!root.unlockInProgress) {
             root.unlockInProgress = true;
             passwd.abort();
-            fprint.abort();
+            fprint.stop();
             u2f.abort();
-            errorRetry.running = false;
             u2fErrorRetry.running = false;
             u2fPendingTimeout.running = false;
             root.u2fPending = false;
+            root.u2fPendingMode = "";
             root.u2fState = "";
             unlockRequestTimeout.restart();
             unlockRequested();
@@ -65,7 +93,7 @@ Scope {
     }
 
     function proceedAfterPrimaryAuth(): void {
-        if (SettingsData.enableU2f && SettingsData.u2fMode === "and" && u2f.available) {
+        if (!root.u2fSuppressedByPrimaryPam && SettingsData.enableU2f && SettingsData.u2fMode === "and" && u2f.available) {
             u2f.startForSecondFactor();
         } else {
             completeUnlock();
@@ -79,8 +107,21 @@ Scope {
         u2fErrorRetry.running = false;
         u2fPendingTimeout.running = false;
         root.u2fPending = false;
+        root.u2fPendingMode = "";
         root.u2fState = "";
         fprint.checkAvail();
+    }
+
+    readonly property bool customPamActive: SettingsData.lockPamPath !== "" && customPamWatcher.loaded
+    readonly property bool fprintSuppressedByPrimaryPam: SettingsData.lockPamExternallyManaged || (customPamActive && SettingsData.lockPamInlineFprint)
+    readonly property bool u2fSuppressedByPrimaryPam: SettingsData.lockPamExternallyManaged || (customPamActive && SettingsData.lockPamInlineU2f)
+    readonly property bool customU2fPamActive: SettingsData.lockU2fPamPath !== "" && customU2fPamWatcher.loaded
+
+    FileView {
+        id: customPamWatcher
+
+        path: SettingsData.lockPamPath !== "" ? SettingsData.lockPamPath : ""
+        printErrors: false
     }
 
     FileView {
@@ -91,49 +132,125 @@ Scope {
     }
 
     FileView {
-        id: nixosMarker
+        id: u2fConfigWatcher
 
-        path: "/etc/NIXOS"
+        path: "/etc/pam.d/dankshell-u2f"
+        watchChanges: true
         printErrors: false
     }
 
     FileView {
-        id: u2fConfigWatcher
+        id: customU2fPamWatcher
 
-        path: "/etc/pam.d/dankshell-u2f"
+        path: SettingsData.lockU2fPamPath !== "" ? SettingsData.lockU2fPamPath : ""
         printErrors: false
     }
 
-    // Detects Nix-installed DMS on non-NixOS systems
-    readonly property bool runningFromNixStore: Quickshell.shellDir.startsWith("/nix/store/")
+    // Fallback stack written by `dms auth resolve-lock` when no managed
+    // /etc/pam.d/dankshell exists. See #2789.
+    readonly property string userPamDir: Paths.strip(Paths.state) + "/pam"
+
+    FileView {
+        id: userPamWatcher
+
+        path: root.userPamDir + "/dankshell"
+        printErrors: false
+    }
+
+    Process {
+        id: resolveUserPam
+
+        command: ["dms", "auth", "resolve-lock", "--quiet"]
+        running: false
+        onExited: exitCode => {
+            if (exitCode === 0)
+                userPamWatcher.reload();
+        }
+    }
+
+    function ensureUserPamConfig(): void {
+        if (SettingsData.lockPamExternallyManaged || resolveUserPam.running)
+            return;
+        resolveUserPam.running = true;
+    }
+
+    Component.onCompleted: ensureUserPamConfig()
 
     PamContext {
         id: passwd
 
-        config: dankshellConfigWatcher.loaded ? "dankshell" : "login"
-        configDirectory: (dankshellConfigWatcher.loaded || nixosMarker.loaded || root.runningFromNixStore) ? "/etc/pam.d" : Quickshell.shellDir + "/assets/pam"
-
-        onMessageChanged: {
-            if (message.startsWith("The account is locked")) {
-                root.lockMessage = message;
-            } else if (root.lockMessage && message.endsWith(" left to unlock)")) {
-                root.lockMessage += "\n" + message;
-            } else if (root.lockMessage && message && message.length > 0) {
-                root.lockMessage = "";
+        config: {
+            if (root.customPamActive)
+                return SettingsData.lockPamPath.slice(SettingsData.lockPamPath.lastIndexOf("/") + 1);
+            if (SettingsData.lockPamExternallyManaged)
+                return "login";
+            if (dankshellConfigWatcher.loaded)
+                return "dankshell";
+            if (userPamWatcher.loaded)
+                return "dankshell";
+            return "login";
+        }
+        configDirectory: {
+            if (root.customPamActive) {
+                const idx = SettingsData.lockPamPath.lastIndexOf("/");
+                return idx > 0 ? SettingsData.lockPamPath.slice(0, idx) : "/";
             }
+            if (SettingsData.lockPamExternallyManaged)
+                return "/etc/pam.d";
+            if (dankshellConfigWatcher.loaded)
+                return "/etc/pam.d";
+            if (userPamWatcher.loaded)
+                return root.userPamDir;
+            return Quickshell.shellDir + "/assets/pam";
         }
 
-        onResponseRequiredChanged: {
+        onMessageChanged: {
+            // collected by position, not text, so it works in any locale
+            if (message.length > 0 && !responseRequired)
+                root.attemptInfoMessages = root.attemptInfoMessages.concat([message]);
+        }
+
+        // not responseRequiredChanged: that only fires on change, so two prompts in
+        // a row leave the second unhandled
+        onPamMessage: {
             if (!responseRequired)
                 return;
 
-            respond(root.buffer);
+            root.authPromptText = (message || "").replace(/:\s*$/, "").trim();
+
+            const notice = root.attemptInfoMessages.filter(m => m !== message);
+            if (notice.length > 0) {
+                root.lockMessage = notice.join("\n");
+                root.lockoutAnnouncedThisAttempt = true;
+            }
+            root.attemptInfoMessages = [];
+
+            // each prompt needs its own submission, or the second gets the first answer
+            if (root.responseSubmitted) {
+                root.responseSubmitted = false;
+                root.awaitingUserInput = false;
+                respond(root.buffer);
+            } else {
+                root.awaitingUserInput = true;
+                passwdActiveTimeout.running = false;
+            }
         }
 
         onCompleted: res => {
+            // requisite preauth can lock without ever prompting; surface it here too
+            if (!root.lockoutAnnouncedThisAttempt) {
+                if (root.attemptInfoMessages.length > 0) {
+                    root.lockMessage = root.attemptInfoMessages.join("\n");
+                    root.lockoutAnnouncedThisAttempt = true;
+                } else {
+                    root.lockMessage = "";
+                }
+                root.attemptInfoMessages = [];
+            }
+
             if (res === PamResult.Success) {
                 if (!root.unlockInProgress) {
-                    fprint.abort();
+                    fprint.stop();
                     root.proceedAfterPrimaryAuth();
                 }
                 return;
@@ -142,6 +259,7 @@ Scope {
             unlockRequestTimeout.running = false;
             root.unlockInProgress = false;
             root.u2fPending = false;
+            root.u2fPendingMode = "";
             root.u2fState = "";
             u2fPendingTimeout.running = false;
             u2f.abort();
@@ -153,6 +271,7 @@ Scope {
             else if (res === PamResult.Failed)
                 root.state = "fail";
 
+            root.responseSubmitted = false;
             root.flashMsg();
             stateReset.restart();
         }
@@ -162,8 +281,15 @@ Scope {
         target: passwd
 
         function onActiveChanged() {
+            root.authPromptText = "";
+            root.awaitingUserInput = false;
             if (passwd.active) {
-                passwdActiveTimeout.restart();
+                root.attemptInfoMessages = [];
+                root.lockoutAnnouncedThisAttempt = false;
+                if (root.responseSubmitted)
+                    passwdActiveTimeout.restart();
+                else
+                    passwdActiveTimeout.running = false;
             } else {
                 passwdActiveTimeout.running = false;
             }
@@ -173,62 +299,147 @@ Scope {
     PamContext {
         id: fprint
 
-        property bool available: SettingsData.lockFingerprintReady
-        property int tries
-        property int errorTries
+        readonly property bool available: SettingsData.lockFingerprintReady
+        property int tries: 0
+        property int errorTries: 0
+        property double attemptStartedAt: 0
+        property bool completedDuringStart: false
+        readonly property int maxErrorTries: 200
+        readonly property int daemonIdleExitMs: 30000
+        // sessionTimeoutMs mirrors `timeout=` in assets/pam/fprint
+        readonly property int sessionTimeoutMs: 90000
+        readonly property int verifyStartSlackMs: 10000
+        readonly property bool retrying: errorRetry.running
+        readonly property int retryInterval: errorRetry.interval
+        readonly property bool allowed: available && SettingsData.enableFprint && root.lockSecured && !root.fprintSuppressedByPrimaryPam && !root.unlockInProgress && !root.u2fPending && !SessionService.preparingForSleep && !SessionService.sleepRequested && !IdleService.monitorsOff && tries < SettingsData.maxFprintTries
+        readonly property string status: {
+            if (!available || !SettingsData.enableFprint || !root.lockSecured || root.fprintSuppressedByPrimaryPam)
+                return "disabled";
+            if (tries >= SettingsData.maxFprintTries)
+                return "max";
+            if (!allowed)
+                return "paused";
+            if (active)
+                return "active";
+            if (retrying)
+                return "retrying";
+            return errorTries >= maxErrorTries ? "stopped" : "idle";
+        }
+
+        function stop(): void {
+            errorRetry.stop();
+            attemptStartedAt = 0;
+            abort();
+        }
+
+        // pam_fprintd reports an expired timeout as PAM_AUTHINFO_UNAVAIL, the same
+        // result a device fault gives, and its "Verification timed out" message is
+        // translated, so age is the signal we can rely on. Its timeout runs from the
+        // verify rather than from the claim, which is why the age is measured from
+        // the message announcing the verify: a slow claim then cannot make a fault
+        // look old enough, and a session that never reached a verify never qualifies.
+        // That message lands after pam_fprintd has already armed its deadline, so the
+        // age read here runs short of the real timeout and the slack makes it up. The
+        // bias is deliberate: a timeout misread as a fault parks the reader behind the
+        // backoff, while a fault misread as a timeout costs one extra retry.
+        function attemptSettled(): bool {
+            return attemptStartedAt > 0 && Date.now() - attemptStartedAt >= sessionTimeoutMs - verifyStartSlackMs;
+        }
 
         function checkAvail(): void {
-            if (!available || !SettingsData.enableFprint || !root.lockSecured) {
-                abort();
+            if (!allowed) {
+                stop();
+                return;
+            }
+            if (!active && !retrying)
+                startAttempt();
+        }
+
+        function startAttempt(): void {
+            if (!allowed || errorTries >= maxErrorTries) {
+                stop();
                 return;
             }
             if (active)
                 return;
+            errorRetry.stop();
+            if (root.fprintState === "error")
+                root.fprintState = "";
+            attemptStartedAt = 0;
+            completedDuringStart = false;
+            if (start())
+                return;
+            if (!completedDuringStart)
+                scheduleErrorRetry();
+        }
 
-            tries = 0;
+        function scheduleErrorRetry(): void {
+            stop();
+            if (!allowed)
+                return;
+            errorTries++;
+            root.fprintState = "error";
+            if (errorTries === 1)
+                root.flashMsg();
+            fprintStateReset.restart();
+            if (errorTries < maxErrorTries)
+                errorRetry.restart();
+        }
+
+        function recover(): void {
+            if (!allowed)
+                return;
             errorTries = 0;
-            start();
+            if (!active)
+                startAttempt();
+        }
+
+        onAllowedChanged: {
+            if (!allowed)
+                stop();
+            else
+                Qt.callLater(checkAvail);
         }
 
         config: "fprint"
         configDirectory: Quickshell.shellDir + "/assets/pam"
 
+        onPamMessage: {
+            if (attemptStartedAt === 0)
+                attemptStartedAt = Date.now();
+        }
+
         onCompleted: res => {
-            if (!available)
+            completedDuringStart = true;
+            if (!allowed)
                 return;
 
             switch (res) {
             case PamResult.Success:
-                if (!root.unlockInProgress) {
-                    passwd.abort();
-                    root.proceedAfterPrimaryAuth();
-                }
+                stop();
+                passwd.abort();
+                root.proceedAfterPrimaryAuth();
                 return;
             case PamResult.Error:
-                errorTries++;
-                if (errorTries < 200) {
-                    abort();
-                    errorRetry.restart();
+                if (attemptSettled()) {
+                    stop();
+                    errorTries = 0;
+                    startAttempt();
                     return;
                 }
-                abort();
+                scheduleErrorRetry();
                 return;
+            case PamResult.Failed:
             case PamResult.MaxTries:
+                stop();
                 tries++;
-                if (tries < SettingsData.maxFprintTries) {
-                    root.fprintState = "fail";
-                    start();
-                } else {
-                    root.fprintState = "max";
-                    abort();
-                }
-                break;
-            default:
+                errorTries = 0;
+                root.fprintState = tries < SettingsData.maxFprintTries ? "fail" : "max";
+                root.flashMsg();
+                fprintStateReset.restart();
+                startAttempt();
                 return;
             }
-
-            root.flashMsg();
-            fprintStateReset.start();
         }
     }
 
@@ -238,30 +449,51 @@ Scope {
         property bool available: SettingsData.lockU2fReady
 
         function checkAvail(): void {
-            if (!available || !SettingsData.enableU2f || !root.lockSecured) {
+            if (!available || !SettingsData.enableU2f || !root.lockSecured || root.u2fSuppressedByPrimaryPam) {
                 abort();
                 return;
             }
 
-            if (SettingsData.u2fMode === "or") {
-                start();
-            }
+            if (SettingsData.u2fMode === "or")
+                abort();
         }
 
         function startForSecondFactor(): void {
-            if (!available || !SettingsData.enableU2f) {
+            if (!available || !SettingsData.enableU2f || root.u2fSuppressedByPrimaryPam) {
                 root.completeUnlock();
                 return;
             }
             abort();
             root.u2fPending = true;
+            root.u2fPendingMode = "and";
             root.u2fState = "";
             u2fPendingTimeout.restart();
             start();
         }
 
-        config: u2fConfigWatcher.loaded ? "dankshell-u2f" : "u2f"
-        configDirectory: u2fConfigWatcher.loaded ? "/etc/pam.d" : Quickshell.shellDir + "/assets/pam"
+        function startForAlternativeAuth(): void {
+            if (!available || !SettingsData.enableU2f || root.u2fSuppressedByPrimaryPam || SettingsData.u2fMode !== "or" || root.unlockInProgress || root.authBusy || active)
+                return;
+            abort();
+            root.u2fPending = true;
+            root.u2fPendingMode = "or";
+            root.u2fState = "";
+            u2fPendingTimeout.restart();
+            start();
+        }
+
+        config: {
+            if (root.customU2fPamActive)
+                return SettingsData.lockU2fPamPath.slice(SettingsData.lockU2fPamPath.lastIndexOf("/") + 1);
+            return u2fConfigWatcher.loaded ? "dankshell-u2f" : "u2f";
+        }
+        configDirectory: {
+            if (root.customU2fPamActive) {
+                const idx = SettingsData.lockU2fPamPath.lastIndexOf("/");
+                return idx > 0 ? SettingsData.lockU2fPamPath.slice(0, idx) : "/";
+            }
+            return u2fConfigWatcher.loaded ? "/etc/pam.d" : Quickshell.shellDir + "/assets/pam";
+        }
 
         onMessageChanged: {
             if (message.toLowerCase().includes("touch"))
@@ -281,9 +513,19 @@ Scope {
                 abort();
 
                 if (root.u2fPending) {
+                    if (root.u2fPendingMode === "or") {
+                        root.u2fPending = false;
+                        root.u2fPendingMode = "";
+                        root.u2fState = root.u2fState === "waiting" ? "" : "insert";
+                        u2fPendingTimeout.running = false;
+                        fprint.checkAvail();
+                        return;
+                    }
+
                     if (root.u2fState === "waiting") {
                         // AND mode: device was found but auth failed → back to password
                         root.u2fPending = false;
+                        root.u2fPendingMode = "";
                         root.u2fState = "";
                         fprint.checkAvail();
                     } else {
@@ -292,9 +534,7 @@ Scope {
                         u2fErrorRetry.restart();
                     }
                 } else {
-                    // OR mode: prompt to insert key, silently retry
                     root.u2fState = "insert";
-                    u2fErrorRetry.restart();
                 }
             }
         }
@@ -303,8 +543,36 @@ Scope {
     Timer {
         id: errorRetry
 
-        interval: 1500
-        onTriggered: fprint.start()
+        // A device wedged by a suspend mid-verify only comes back when fprintd
+        // restarts, and fprintd only exits after its idle timeout with no client
+        // attached, so the second retry outlasts that instead of climbing to it.
+        interval: {
+            if (fprint.errorTries <= 1)
+                return 1500;
+            if (fprint.errorTries === 2)
+                return fprint.daemonIdleExitMs + 5000;
+            return 60000;
+        }
+        onTriggered: fprint.startAttempt()
+    }
+
+    readonly property bool awaitingActivityRetry: fprint.errorTries > 0 && !fprint.retrying && !fprint.active
+
+    function retryFprintOnActivity(): void {
+        if (root.awaitingActivityRetry)
+            fprint.recover();
+    }
+
+    Connections {
+        target: SessionService
+
+        function onSessionResumed() {
+            fprint.recover();
+        }
+
+        function onLidOpened() {
+            fprint.recover();
+        }
     }
 
     Timer {
@@ -355,7 +623,10 @@ Scope {
         id: fprintStateReset
 
         interval: 4000
-        onTriggered: root.fprintState = ""
+        onTriggered: {
+            if (root.fprintState !== "max")
+                root.fprintState = "";
+        }
     }
 
     onLockSecuredChanged: {
@@ -367,8 +638,19 @@ Scope {
         root.fprintState = "";
         root.u2fState = "";
         root.u2fPending = false;
+        root.u2fPendingMode = "";
         root.lockMessage = "";
+        root.attemptInfoMessages = [];
+        root.lockoutAnnouncedThisAttempt = false;
         root.resetAuthFlows();
+        root.responseSubmitted = false;
+        fprint.tries = 0;
+        fprint.errorTries = 0;
+        if (!SettingsData.lockPamExternallyManaged && !dankshellConfigWatcher.loaded && !userPamWatcher.loaded)
+            ensureUserPamConfig();
+        // FileView cannot watch a path that does not exist yet; re-read so a
+        // dedicated service created after startup is used on the next lock.
+        u2fConfigWatcher.reload();
         fprint.checkAvail();
         u2f.checkAvail();
     }
@@ -377,11 +659,17 @@ Scope {
         target: SettingsData
 
         function onEnableFprintChanged(): void {
-            fprint.checkAvail();
+            if (SettingsData.enableFprint)
+                fprint.recover();
+            else
+                fprint.checkAvail();
         }
 
         function onLockFingerprintReadyChanged(): void {
-            fprint.checkAvail();
+            if (SettingsData.lockFingerprintReady)
+                fprint.recover();
+            else
+                fprint.checkAvail();
         }
 
         function onEnableU2fChanged(): void {
@@ -392,6 +680,32 @@ Scope {
             u2f.checkAvail();
         }
 
+        function onLockPamPathChanged(): void {
+            fprint.checkAvail();
+            u2f.checkAvail();
+        }
+
+        function onLockPamInlineFprintChanged(): void {
+            fprint.checkAvail();
+        }
+
+        function onLockPamInlineU2fChanged(): void {
+            u2f.checkAvail();
+        }
+
+        function onLockPamExternallyManagedChanged(): void {
+            root.resetAuthFlows();
+            if (!SettingsData.lockPamExternallyManaged)
+                root.ensureUserPamConfig();
+            fprint.checkAvail();
+            u2f.checkAvail();
+        }
+
+        function onLockU2fPamPathChanged(): void {
+            u2f.abort();
+            u2f.checkAvail();
+        }
+
         function onU2fModeChanged(): void {
             if (root.lockSecured) {
                 u2f.abort();
@@ -399,6 +713,7 @@ Scope {
                 u2fPendingTimeout.running = false;
                 unlockRequestTimeout.running = false;
                 root.u2fPending = false;
+                root.u2fPendingMode = "";
                 root.u2fState = "";
                 u2f.checkAvail();
             }

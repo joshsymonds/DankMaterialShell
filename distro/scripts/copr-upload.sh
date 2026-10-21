@@ -5,7 +5,6 @@ set -euo pipefail
 # Usage: ./copr-upload.sh [PACKAGE] [VERSION] [RELEASE]
 # Examples:
 #   ./copr-upload.sh dms 1.0.3 1
-#   ./copr-upload.sh dms-greeter 1.0.3 1
 
 PACKAGE="${1:-dms}"
 VERSION="${2:-}"
@@ -17,18 +16,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # Determine Copr project based on package
 if [ "$PACKAGE" = "dms" ]; then
     COPR_PROJECT="avengemedia/dms"
-elif [ "$PACKAGE" = "dms-greeter" ]; then
-    COPR_PROJECT="avengemedia/danklinux"
 else
     echo "❌ Unknown package: $PACKAGE"
-    echo "Supported packages: dms, dms-greeter"
+    echo "Supported packages: dms"
     exit 1
 fi
 
 # Get version from latest release if not provided
 if [ -z "$VERSION" ]; then
     echo "📦 Determining latest version..."
-    VERSION=$(curl -s https://api.github.com/repos/AvengeMedia/DankMaterialShell/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+    VERSION=$(curl -s https://api.github.com/repos/duxlabs-dev/dux-shell/releases/latest | jq -r '.tag_name' | sed 's/^v//')
     if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
         echo "❌ Failed to determine version. Please specify manually."
         exit 1
@@ -45,7 +42,7 @@ cd ~/rpmbuild/SOURCES
 # Download source tarball from GitHub releases
 echo "📦 Downloading source tarball for v${VERSION}..."
 if [ ! -f ~/rpmbuild/SOURCES/dms-qml.tar.gz ]; then
-    wget -O ~/rpmbuild/SOURCES/dms-qml.tar.gz "https://github.com/AvengeMedia/DankMaterialShell/releases/download/v${VERSION}/dms-qml.tar.gz" || {
+    wget -O ~/rpmbuild/SOURCES/dms-qml.tar.gz "https://github.com/duxlabs-dev/dux-shell/releases/download/v${VERSION}/dms-qml.tar.gz" || {
         echo "❌ Failed to download dms-qml.tar.gz for v${VERSION}"
         exit 1
     }

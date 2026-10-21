@@ -1,7 +1,8 @@
 import QtQuick
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
+import qs.Modules.Settings.Widgets
 
 Rectangle {
     id: root
@@ -29,14 +30,14 @@ Rectangle {
 
     color: {
         if (!isConnected)
-            return Theme.surfaceContainerHighest;
+            return SettingsMetrics.controlColor;
         if (!isValidPosition)
             return Theme.withAlpha(Theme.error, 0.3);
         if (isDragging)
             return Theme.withAlpha(Theme.primary, 0.4);
         if (dragArea.containsMouse)
             return Theme.withAlpha(Theme.primary, 0.2);
-        return Theme.surfaceContainerHigh;
+        return SettingsMetrics.controlColor;
     }
 
     border.color: {
@@ -50,7 +51,7 @@ Rectangle {
             return Theme.primary;
         return Theme.outline;
     }
-    border.width: isDragging ? 3 : 2
+    border.width: isDragging ? 3 : Theme.outlineWidthFocused
     z: isDragging ? 100 : (isConnected ? 1 : 0)
 
     Rectangle {
@@ -63,15 +64,15 @@ Rectangle {
         radius: Theme.cornerRadius
         color: "transparent"
         border.color: Theme.primary
-        border.width: 2
+        border.width: Theme.outlineWidthFocused
         opacity: 0.6
     }
 
     Column {
         anchors.centerIn: parent
-        spacing: 2
+        spacing: Theme.spacingXXS
 
-        DankIcon {
+        DIcon {
             name: root.isConnected ? "desktop_windows" : "desktop_access_disabled"
             size: Math.min(24, Math.min(root.width * 0.3, root.height * 0.25))
             color: root.isConnected ? (root.isValidPosition ? Theme.primary : Theme.error) : Theme.surfaceVariantText
@@ -81,10 +82,12 @@ Rectangle {
         StyledText {
             text: DisplayConfigState.getOutputDisplayName(root.outputData, root.outputName)
             font.pixelSize: Math.max(10, Math.min(14, root.width * 0.12))
-            font.weight: Font.Medium
+            font.weight: Theme.fontWeightMedium
             color: root.isConnected ? Theme.surfaceText : Theme.surfaceVariantText
             horizontalAlignment: Text.AlignHCenter
             anchors.horizontalCenter: parent.horizontalCenter
+            wrapMode: Text.NoWrap
+            maximumLineCount: 1
             elide: Text.ElideMiddle
             width: Math.min(implicitWidth, root.width - 8)
         }

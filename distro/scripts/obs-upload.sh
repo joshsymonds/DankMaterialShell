@@ -68,14 +68,13 @@ fi
 
 OBS_BASE_PROJECT="home:AvengeMedia"
 OBS_BASE="$HOME/.cache/osc-checkouts"
-AVAILABLE_PACKAGES=(dms dms-git dms-greeter)
+AVAILABLE_PACKAGES=(dms dms-git)
 
 if [[ -z "$PACKAGE" ]]; then
     echo "Available packages:"
     echo ""
     echo "  1. dms         - Stable DMS"
     echo "  2. dms-git     - Nightly DMS"
-    echo "  3. dms-greeter - DMS greeter for greetd"
     echo "  a. all"
     echo ""
     read -r -p "Select package (1-${#AVAILABLE_PACKAGES[@]}, a): " selection
@@ -112,6 +111,40 @@ osc_retry() {
         echo "Retrying in $((5*attempt))s (attempt $attempt/$max)..."
         sleep $((5*attempt))
         ((attempt++))
+    done
+}
+
+# Bundled Go for dms-git OBS builds (offline VM); filenames must match distro/opensuse/dms-git.spec Source1/2.
+GO_TOOLCHAIN_CACHE="${GO_TOOLCHAIN_CACHE:-$HOME/.cache/dms-obs-go-toolchain}"
+
+dms_git_go_toolchain_version() {
+    grep -m1 '^go ' "$REPO_ROOT/core/go.mod" 2>/dev/null | awk '{print $2}'
+}
+
+ensure_dms_git_go_tarballs() {
+    local dest="$1"
+    local ver arch url cached
+    ver="$(dms_git_go_toolchain_version)"
+    if [[ -z "$ver" ]]; then
+        echo "ERROR: Could not read Go version from core/go.mod"
+        exit 1
+    fi
+    mkdir -p "$GO_TOOLCHAIN_CACHE/$ver"
+    for arch in amd64 arm64; do
+        url="https://go.dev/dl/go${ver}.linux-${arch}.tar.gz"
+        cached="$GO_TOOLCHAIN_CACHE/$ver/go${ver}.linux-${arch}.tar.gz"
+        if [[ ! -f "$cached" ]]; then
+            echo "    Downloading Go ${ver} (${arch})…"
+            if wget -q -O "${cached}.tmp" "$url" 2>/dev/null || curl -L -f -s -o "${cached}.tmp" "$url"; then
+                mv "${cached}.tmp" "$cached"
+            else
+                rm -f "${cached}.tmp"
+                echo "ERROR: Failed to download $url"
+                exit 1
+            fi
+        fi
+        cp -f "$cached" "$dest/go${ver}.linux-${arch}.tar.gz"
+        echo "    ✓ Go toolchain ready: $dest/go${ver}.linux-${arch}.tar.gz"
     done
 }
 
@@ -182,31 +215,21 @@ update_debian_dms_service() {
         return 0
     fi
 
-    sed -i "s|/archive/refs/tags/v[0-9][^\"]*\.tar\.gz|/archive/refs/tags/v${base_version}.tar.gz|" "$service_path"
+    sed -i "s|/releases/download/v[0-9][^\"]*/dms-source\.tar\.gz|/releases/download/v${base_version}/dms-source.tar.gz|" "$service_path"
     sed -i "s|/releases/download/v[0-9][^\"]*/dms-distropkg-amd64\.gz|/releases/download/v${base_version}/dms-distropkg-amd64.gz|" "$service_path"
     sed -i "s|/releases/download/v[0-9][^\"]*/dms-distropkg-arm64\.gz|/releases/download/v${base_version}/dms-distropkg-arm64.gz|" "$service_path"
 }
 
-update_debian_dms_greeter_service() {
-    local service_path="$1"
-    if [[ -z "$service_path" || ! -f "$service_path" ]]; then
-        return 0
-    fi
-    if [[ -z "$CHANGELOG_VERSION" ]]; then
-        return 0
-    fi
-    local base_version
-    base_version=$(echo "$CHANGELOG_VERSION" | sed -E 's/^([0-9]+(\.[0-9]+)*).*/\1/')
-    if [[ -z "$base_version" ]]; then
-        return 0
-    fi
-    sed -i "s|/releases/download/v[0-9][^\"]*/dms-qml\.tar\.gz|/releases/download/v${base_version}/dms-qml.tar.gz|" "$service_path"
-}
-
 update_opensuse_git_spec() {
     local spec_path="$1"
+    local go_ver
     if [[ -z "$spec_path" || ! -f "$spec_path" ]]; then
         return 0
+    fi
+    go_ver="$(dms_git_go_toolchain_version)"
+    if [[ -n "$go_ver" ]] && grep -q '^%global go_toolchain_version' "$spec_path"; then
+        sed -i "s/^%global go_toolchain_version .*/%global go_toolchain_version ${go_ver}/" "$spec_path"
+        echo "    Synced %global go_toolchain_version to ${go_ver} (core/go.mod)"
     fi
     if [[ -n "$CHANGELOG_VERSION" ]]; then
         echo "    Updating OpenSUSE spec to version $CHANGELOG_VERSION"
@@ -282,9 +305,6 @@ dms)
     ;;
 dms-git)
     PROJECT="dms-git"
-    ;;
-dms-greeter)
-    PROJECT="danklinux"
     ;;
 *)
     echo "Error: Unknown package '$PACKAGE'"
@@ -385,8 +405,6 @@ if [[ -d "distro/debian/$PACKAGE/debian" ]]; then
     # Keep Debian _service in sync with changelog version
     if [[ "$PACKAGE" == "dms" ]] && [[ -f "distro/debian/$PACKAGE/_service" ]]; then
         update_debian_dms_service "distro/debian/$PACKAGE/_service"
-    elif [[ "$PACKAGE" == "dms-greeter" ]] && [[ -f "distro/debian/$PACKAGE/_service" ]]; then
-        update_debian_dms_greeter_service "distro/debian/$PACKAGE/_service"
     fi
 
     # Check if this version already exists in OBS
@@ -438,18 +456,8 @@ if [[ "$UPLOAD_OPENSUSE" == true ]] && [[ -f "distro/opensuse/$PACKAGE.spec" ]];
     echo "  - Copying $PACKAGE.spec for OpenSUSE"
     cp "distro/opensuse/$PACKAGE.spec" "$WORK_DIR/"
 
-    if [[ "$PACKAGE" == *"-git" ]] && [[ -n "$CHANGELOG_VERSION" ]]; then
+    if [[ "$PACKAGE" == *"-git" ]]; then
         update_opensuse_git_spec "$WORK_DIR/$PACKAGE.spec"
-    elif [[ "$PACKAGE" == "dms-greeter" ]] && [[ -n "$CHANGELOG_VERSION" ]]; then
-        DMS_GREETER_BASE_VERSION=$(echo "$CHANGELOG_VERSION" | sed -E 's/^([0-9]+(\.[0-9]+)*).*/\1/')
-        DMS_GREETER_RELEASE=$(echo "$CHANGELOG_VERSION" | sed -E 's/.*db([0-9]+)$/\1/' || echo "1")
-        CHANGELOG_DATE=$(date '+%a %b %d %Y')
-        sed -i "s/VERSION_PLACEHOLDER/${DMS_GREETER_BASE_VERSION}/g" "$WORK_DIR/$PACKAGE.spec"
-        sed -i "s/RELEASE_PLACEHOLDER/${DMS_GREETER_RELEASE}/g" "$WORK_DIR/$PACKAGE.spec"
-        sed -i "s/CHANGELOG_DATE_PLACEHOLDER/${CHANGELOG_DATE}/g" "$WORK_DIR/$PACKAGE.spec"
-        # Explicitly set Version:/Release: in case the spec uses %{version} macro
-        sed -i "s/^Version:.*/Version:        ${DMS_GREETER_BASE_VERSION}/" "$WORK_DIR/$PACKAGE.spec"
-        sed -i "s/^Release:.*/Release:        ${DMS_GREETER_RELEASE}%{?dist}/" "$WORK_DIR/$PACKAGE.spec"
     fi
 
     if [[ -f "$WORK_DIR/.osc/$PACKAGE.spec" ]]; then
@@ -502,32 +510,14 @@ if [[ "$UPLOAD_OPENSUSE" == true ]] && [[ "$UPLOAD_DEBIAN" == false ]] && [[ -f 
         if [[ -n "$GIT_URL" ]]; then
             echo "    Cloning git source from: $GIT_URL (revision: ${GIT_REVISION:-master})"
             SOURCE_DIR="$TEMP_DIR/dms-git-source"
-            if git clone --depth 1 --branch "${GIT_REVISION:-master}" "$GIT_URL" "$SOURCE_DIR" 2>/dev/null ||
-                git clone --depth 1 "$GIT_URL" "$SOURCE_DIR" 2>/dev/null; then
+            if git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${GIT_REVISION:-master}" "$GIT_URL" "$SOURCE_DIR" 2>/dev/null ||
+                git clone --depth 1 --recurse-submodules --shallow-submodules "$GIT_URL" "$SOURCE_DIR" 2>/dev/null; then
                 cd "$SOURCE_DIR"
                 if [[ -n "$GIT_REVISION" ]]; then
                     git checkout "$GIT_REVISION" 2>/dev/null || true
                 fi
                 rm -rf .git
                 SOURCE_DIR=$(pwd)
-                cd "$REPO_ROOT"
-            fi
-        fi
-    fi
-
-    # For dms-greeter: download dms-qml.tar.gz from _service URL
-    if [[ -z "${SOURCE_DIR:-}" ]] && [[ "$PACKAGE" == "dms-greeter" ]] && [[ -f "distro/debian/$PACKAGE/_service" ]]; then
-        DMS_GREETER_URL=$(grep -A 5 'name="download_url"' "distro/debian/$PACKAGE/_service" | grep "path" | sed 's/.*<param name="path">\(.*\)<\/param>.*/\1/' | head -1)
-        if [[ -n "$DMS_GREETER_URL" ]]; then
-            DMS_GREETER_FULL_URL="https://github.com${DMS_GREETER_URL}"
-            echo "    Downloading dms-greeter source from: $DMS_GREETER_FULL_URL"
-            if wget -q -O "$TEMP_DIR/dms-qml.tar.gz" "$DMS_GREETER_FULL_URL" 2>/dev/null || \
-                curl -L -f -s -o "$TEMP_DIR/dms-qml.tar.gz" "$DMS_GREETER_FULL_URL" 2>/dev/null; then
-                cd "$TEMP_DIR"
-                tar -xzf dms-qml.tar.gz
-                if [[ -f "Modules/Greetd/assets/dms-greeter" ]]; then
-                    SOURCE_DIR="$TEMP_DIR"
-                fi
                 cd "$REPO_ROOT"
             fi
         fi
@@ -541,15 +531,6 @@ if [[ "$UPLOAD_OPENSUSE" == true ]] && [[ "$UPLOAD_DEBIAN" == false ]] && [[ -f 
             cd "$OBS_TARBALL_DIR"
 
             case "$PACKAGE" in
-            dms-greeter)
-                EXPECTED_DIR="dms-qml"
-                echo "    Creating $SOURCE0 (directory: $EXPECTED_DIR)"
-                mkdir -p "$EXPECTED_DIR"
-                cp -a "$SOURCE_DIR"/. "$EXPECTED_DIR/"
-                tar -czf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
-                rm -rf "$EXPECTED_DIR"
-                echo "    Created $SOURCE0 ($(stat -c%s "$WORK_DIR/$SOURCE0" 2>/dev/null || echo 0) bytes)"
-                ;;
             dms)
                 DMS_VERSION=$(grep "^Version:" "$REPO_ROOT/distro/opensuse/$PACKAGE.spec" | sed 's/^Version:[[:space:]]*//' | head -1)
                 EXPECTED_DIR="DankMaterialShell-${DMS_VERSION}"
@@ -564,12 +545,17 @@ if [[ "$UPLOAD_OPENSUSE" == true ]] && [[ "$UPLOAD_DEBIAN" == false ]] && [[ -f 
 
             echo "    Creating $SOURCE0 (directory: $EXPECTED_DIR)"
             cp -r "$SOURCE_DIR" "$EXPECTED_DIR"
-            tar -czf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
+            tar -czhf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
             rm -rf "$EXPECTED_DIR"
             echo "    Created $SOURCE0 ($(stat -c%s "$WORK_DIR/$SOURCE0" 2>/dev/null || echo 0) bytes)"
 
             cd "$REPO_ROOT"
             rm -rf "$OBS_TARBALL_DIR"
+
+            if [[ "$PACKAGE" == "dms-git" ]]; then
+                echo "  - Staging bundled Go toolchains for RPM (Source1/Source2)"
+                ensure_dms_git_go_tarballs "$WORK_DIR"
+            fi
         fi
     else
         echo "  - Warning: Could not obtain source for OpenSUSE tarball"
@@ -611,8 +597,8 @@ if [[ "$UPLOAD_DEBIAN" == true ]] && [[ -d "distro/debian/$PACKAGE/debian" ]]; t
                 if [[ -n "$GIT_URL" ]]; then
                     echo "    Cloning git source from: $GIT_URL (revision: ${GIT_REVISION:-master})"
                     SOURCE_DIR="$TEMP_DIR/dms-git-source"
-                    if git clone --depth 1 --branch "${GIT_REVISION:-master}" "$GIT_URL" "$SOURCE_DIR" 2>/dev/null ||
-                        git clone --depth 1 "$GIT_URL" "$SOURCE_DIR" 2>/dev/null; then
+                    if git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${GIT_REVISION:-master}" "$GIT_URL" "$SOURCE_DIR" 2>/dev/null ||
+                        git clone --depth 1 --recurse-submodules --shallow-submodules "$GIT_URL" "$SOURCE_DIR" 2>/dev/null; then
                         cd "$SOURCE_DIR"
                         if [[ -n "$GIT_REVISION" ]]; then
                             git checkout "$GIT_REVISION" 2>/dev/null || true
@@ -681,17 +667,6 @@ if [[ "$UPLOAD_DEBIAN" == true ]] && [[ -d "distro/debian/$PACKAGE/debian" ]]; t
                         SOURCE_DIR=$(find . -maxdepth 1 -type d -name "DankMaterialShell-*" | head -1)
                         if [[ -z "$SOURCE_DIR" ]]; then
                             SOURCE_DIR=$(find . -maxdepth 1 -type d ! -name "." | head -1)
-                        fi
-                        # dms-qml.tar.gz extracts flat (quickshell contents, no top-level dir)
-                        # Create dms-qml wrapper so combined tarball has correct top-level dir (like dms)
-                        if [[ "$PACKAGE" == "dms-greeter" ]] && [[ -f "Modules/Greetd/assets/dms-greeter" ]]; then
-                            mkdir -p dms-qml
-                            for f in *; do
-                                if [[ -e "$f" && "$f" != "dms-qml" && "$f" != "source-archive" ]]; then
-                                    mv "$f" dms-qml/ 2>/dev/null || true
-                                fi
-                            done
-                            SOURCE_DIR="dms-qml"
                         fi
                         if [[ -z "$SOURCE_DIR" || ! -d "$SOURCE_DIR" ]]; then
                             echo "Error: Failed to extract source archive or find source directory"
@@ -769,32 +744,17 @@ if [[ "$UPLOAD_DEBIAN" == true ]] && [[ -d "distro/debian/$PACKAGE/debian" ]]; t
                 cd "$OBS_TARBALL_DIR"
 
                 case "$PACKAGE" in
-                dms-greeter)
-                    EXPECTED_DIR="dms-qml"
-                    echo "    Creating $SOURCE0 (directory: $EXPECTED_DIR)"
-                    mkdir -p "$EXPECTED_DIR"
-                    cp -a "$SOURCE_DIR"/. "$EXPECTED_DIR/"
-                    if [[ "$SOURCE0" == *.tar.xz ]]; then
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cJf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
-                    elif [[ "$SOURCE0" == *.tar.bz2 ]]; then
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cjf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
-                    else
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -czf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
-                    fi
-                    rm -rf "$EXPECTED_DIR"
-                    echo "    Created $SOURCE0 ($(stat -c%s "$WORK_DIR/$SOURCE0" 2>/dev/null || echo 0) bytes)"
-                    ;;
                 dms)
                     DMS_VERSION=$(grep "^Version:" "$REPO_ROOT/distro/opensuse/$PACKAGE.spec" | sed 's/^Version:[[:space:]]*//' | head -1)
                     EXPECTED_DIR="DankMaterialShell-${DMS_VERSION}"
                     echo "    Creating $SOURCE0 (directory: $EXPECTED_DIR)"
                     cp -r "$SOURCE_DIR" "$EXPECTED_DIR"
                     if [[ "$SOURCE0" == *.tar.xz ]]; then
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cJf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cJhf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
                     elif [[ "$SOURCE0" == *.tar.bz2 ]]; then
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cjf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cjhf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
                     else
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -czf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -czhf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
                     fi
                     rm -rf "$EXPECTED_DIR"
                     echo "    Created $SOURCE0 ($(stat -c%s "$WORK_DIR/$SOURCE0" 2>/dev/null || echo 0) bytes)"
@@ -804,11 +764,11 @@ if [[ "$UPLOAD_DEBIAN" == true ]] && [[ -d "distro/debian/$PACKAGE/debian" ]]; t
                     echo "    Creating $SOURCE0 (directory: $EXPECTED_DIR)"
                     cp -r "$SOURCE_DIR" "$EXPECTED_DIR"
                     if [[ "$SOURCE0" == *.tar.xz ]]; then
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cJf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cJhf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
                     elif [[ "$SOURCE0" == *.tar.bz2 ]]; then
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cjf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cjhf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
                     else
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -czf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -czhf "$WORK_DIR/$SOURCE0" "$EXPECTED_DIR"
                     fi
                     rm -rf "$EXPECTED_DIR"
                     echo "    Created $SOURCE0 ($(stat -c%s "$WORK_DIR/$SOURCE0" 2>/dev/null || echo 0) bytes)"
@@ -818,11 +778,11 @@ if [[ "$UPLOAD_DEBIAN" == true ]] && [[ -d "distro/debian/$PACKAGE/debian" ]]; t
                     echo "    Creating $SOURCE0 (directory: $DIR_NAME)"
                     cp -r "$SOURCE_DIR" "$DIR_NAME"
                     if [[ "$SOURCE0" == *.tar.xz ]]; then
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cJf "$WORK_DIR/$SOURCE0" "$DIR_NAME"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cJhf "$WORK_DIR/$SOURCE0" "$DIR_NAME"
                     elif [[ "$SOURCE0" == *.tar.bz2 ]]; then
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cjf "$WORK_DIR/$SOURCE0" "$DIR_NAME"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -cjhf "$WORK_DIR/$SOURCE0" "$DIR_NAME"
                     else
-                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -czf "$WORK_DIR/$SOURCE0" "$DIR_NAME"
+                        tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -czhf "$WORK_DIR/$SOURCE0" "$DIR_NAME"
                     fi
                     rm -rf "$DIR_NAME"
                     echo "    Created $SOURCE0 ($(stat -c%s "$WORK_DIR/$SOURCE0" 2>/dev/null || echo 0) bytes)"
@@ -830,23 +790,19 @@ if [[ "$UPLOAD_DEBIAN" == true ]] && [[ -d "distro/debian/$PACKAGE/debian" ]]; t
                 esac
                 cd "$REPO_ROOT"
                 rm -rf "$OBS_TARBALL_DIR"
+
+                if [[ "$PACKAGE" == "dms-git" ]]; then
+                    echo "  - Staging bundled Go toolchains for RPM (Source1/Source2)"
+                    ensure_dms_git_go_tarballs "$WORK_DIR"
+                fi
+
                 echo "  - OpenSUSE source tarballs created"
             fi
 
             # Copy and update OpenSUSE spec file with the correct version
             cp "distro/opensuse/$PACKAGE.spec" "$WORK_DIR/"
-            if [[ "$PACKAGE" == *"-git" ]] && [[ -n "$CHANGELOG_VERSION" ]]; then
+            if [[ "$PACKAGE" == *"-git" ]]; then
                 update_opensuse_git_spec "$WORK_DIR/$PACKAGE.spec"
-            elif [[ "$PACKAGE" == "dms-greeter" ]] && [[ -n "$CHANGELOG_VERSION" ]]; then
-                DMS_GREETER_BASE_VERSION=$(echo "$CHANGELOG_VERSION" | sed -E 's/^([0-9]+(\.[0-9]+)*).*/\1/')
-                DMS_GREETER_RELEASE=$(echo "$CHANGELOG_VERSION" | sed -E 's/.*db([0-9]+)$/\1/' || echo "1")
-                CHANGELOG_DATE=$(date '+%a %b %d %Y')
-                sed -i "s/VERSION_PLACEHOLDER/${DMS_GREETER_BASE_VERSION}/g" "$WORK_DIR/$PACKAGE.spec"
-                sed -i "s/RELEASE_PLACEHOLDER/${DMS_GREETER_RELEASE}/g" "$WORK_DIR/$PACKAGE.spec"
-                sed -i "s/CHANGELOG_DATE_PLACEHOLDER/${CHANGELOG_DATE}/g" "$WORK_DIR/$PACKAGE.spec"
-                # Explicitly set Version:/Release: in case the spec uses %{version} macro
-                sed -i "s/^Version:.*/Version:        ${DMS_GREETER_BASE_VERSION}/" "$WORK_DIR/$PACKAGE.spec"
-                sed -i "s/^Release:.*/Release:        ${DMS_GREETER_RELEASE}%{?dist}/" "$WORK_DIR/$PACKAGE.spec"
             fi
         fi
 
@@ -889,6 +845,11 @@ if [[ "$UPLOAD_DEBIAN" == true ]] && [[ -d "distro/debian/$PACKAGE/debian" ]]; t
                         cd "$REPO_ROOT"
                     fi
                 fi
+            fi
+
+            if [[ "$PACKAGE" == "dms-git" ]]; then
+                echo "    Bundling Go toolchains into Debian source tree (offline build)"
+                ensure_dms_git_go_tarballs "$SOURCE_DIR"
             fi
 
             rm -f "$WORK_DIR/$COMBINED_TARBALL"
@@ -973,47 +934,10 @@ EOF
             echo "  - Quilt format detected: creating debian.tar.gz"
             tar -czf "$WORK_DIR/debian.tar.gz" -C "distro/debian/$PACKAGE" debian/
 
-            # For dms-greeter: create orig tarball so Debian build gets upstream (OBS only passes .dsc Files to Debian)
-            DSC_FILES_DEBIAN=""
-            if [[ "$PACKAGE" == "dms-greeter" ]]; then
-                UPSTREAM_VER=$(echo "$VERSION" | sed 's/-[^-]*$//')
-                ORIG_TARBALL="${PACKAGE}_${UPSTREAM_VER}.orig.tar.gz"
-                ORIG_DIR="${PACKAGE}-${UPSTREAM_VER}"
-
-                if [[ -f "distro/debian/$PACKAGE/_service" ]] && grep -q "download_url" "distro/debian/$PACKAGE/_service"; then
-                    DG_TEMP=$(mktemp -d)
-                    DMS_GREETER_PATH=$(grep -A 5 'name="download_url"' "distro/debian/$PACKAGE/_service" | grep "path" | sed 's/.*<param name="path">\(.*\)<\/param>.*/\1/' | head -1)
-                    if [[ -n "$DMS_GREETER_PATH" ]]; then
-                        DG_URL="https://github.com${DMS_GREETER_PATH}"
-                        echo "  - Downloading dms-greeter source for orig tarball: $DG_URL"
-                        if wget -q -O "$DG_TEMP/dms-qml.tar.gz" "$DG_URL" 2>/dev/null || curl -L -f -s -o "$DG_TEMP/dms-qml.tar.gz" "$DG_URL" 2>/dev/null; then
-                            ( cd "$DG_TEMP" && tar --no-same-owner -xzf dms-qml.tar.gz && mkdir -p "$ORIG_DIR" && \
-                              for f in *; do [[ "$f" != "dms-qml.tar.gz" && "$f" != "$ORIG_DIR" ]] && mv "$f" "$ORIG_DIR/"; done )
-                            if [[ -d "$DG_TEMP/$ORIG_DIR/Modules" ]] || [[ -f "$DG_TEMP/$ORIG_DIR/LICENSE" ]]; then
-                                tar --sort=name --mtime='2000-01-01 00:00:00' --owner=0 --group=0 -czf "$WORK_DIR/$ORIG_TARBALL" -C "$DG_TEMP" "$ORIG_DIR"
-                                ORIG_MD5=$(md5sum "$WORK_DIR/$ORIG_TARBALL" | cut -d' ' -f1)
-                                ORIG_SIZE=$(stat -c%s "$WORK_DIR/$ORIG_TARBALL" 2>/dev/null || stat -f%z "$WORK_DIR/$ORIG_TARBALL" 2>/dev/null)
-                                DSC_FILES_DEBIAN=" $ORIG_MD5 $ORIG_SIZE $ORIG_TARBALL
-"
-                                echo "  - Created $ORIG_TARBALL for Debian orig"
-                            fi
-                            rm -rf "$DG_TEMP"
-                        fi
-                    fi
-                fi
-            fi
-
             DEBIAN_MD5=$(md5sum "$WORK_DIR/debian.tar.gz" | cut -d' ' -f1)
             DEBIAN_SIZE=$(stat -c%s "$WORK_DIR/debian.tar.gz" 2>/dev/null || stat -f%z "$WORK_DIR/debian.tar.gz" 2>/dev/null)
 
             echo "  - Generating $PACKAGE.dsc for quilt format"
-            # debtransform: DEBTRANSFORM-TAR = orig (upstream), DEBTRANSFORM-FILES-TAR = debian archive
-            DEBTRANSFORM_EXTRA=""
-            if [[ -n "$DSC_FILES_DEBIAN" ]] && [[ -n "$ORIG_TARBALL" ]]; then
-                DEBTRANSFORM_EXTRA="DEBTRANSFORM-TAR: $ORIG_TARBALL
-DEBTRANSFORM-FILES-TAR: debian.tar.gz
-"
-            fi
             cat >"$WORK_DIR/$PACKAGE.dsc" <<DSCEOF
 Format: 3.0 (quilt)
 Source: $PACKAGE
@@ -1022,7 +946,7 @@ Architecture: any
 Version: $VERSION
 Maintainer: Avenge Media <AvengeMedia.US@gmail.com>
 Build-Depends: debhelper-compat (= 13), wget, gzip
-${DEBTRANSFORM_EXTRA}Files:${DSC_FILES_DEBIAN}
+Files:
  $DEBIAN_MD5 $DEBIAN_SIZE debian.tar.gz
 DSCEOF
         fi
@@ -1055,10 +979,9 @@ if [[ -n "$OBS_FILES" ]]; then
             continue
         fi
 
-        # Keep current orig tarball for dms-greeter (Debian 3.0 quilt needs it)
-        UPSTREAM_VER_CLEAN=$(echo "$CHANGELOG_VERSION" | sed 's/-[^-]*$//' 2>/dev/null)
-        if [[ "$PACKAGE" == "dms-greeter" ]] && [[ "$old_file" == "${PACKAGE}_${UPSTREAM_VER_CLEAN}.orig.tar.gz" ]]; then
-            echo "  - Keeping orig tarball: $old_file"
+        # Keep pinned Go toolchain archives (bundled for dms-git offline builds)
+        if [[ "$old_file" =~ ^go[0-9].+\.linux-(amd64|arm64)\.tar\.gz$ ]]; then
+            echo "  - Keeping Go toolchain tarball: $old_file"
             continue
         fi
 
@@ -1130,11 +1053,11 @@ ls -la 2>&1 | head -20
 echo "==> Staging changes"
 echo "Files to upload:"
 if [[ "$UPLOAD_DEBIAN" == true ]] && [[ "$UPLOAD_OPENSUSE" == true ]]; then
-    ls -lh ./*.tar.gz ./*.tar.xz ./*.tar ./*.spec ./*.dsc _service 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+    ls -lh ./*.tar.gz ./*.tar.xz ./*.tar ./*.spec ./*.dsc _service ./go*.linux-*.tar.gz 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 elif [[ "$UPLOAD_DEBIAN" == true ]]; then
-    ls -lh ./*.tar.gz ./*.dsc _service 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+    ls -lh ./*.tar.gz ./*.dsc _service ./go*.linux-*.tar.gz 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 elif [[ "$UPLOAD_OPENSUSE" == true ]]; then
-    ls -lh ./*.tar.gz ./*.tar.xz ./*.tar ./*.spec _service 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+    ls -lh ./*.tar.gz ./*.tar.xz ./*.tar ./*.spec _service ./go*.linux-*.tar.gz 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 fi
 echo ""
 

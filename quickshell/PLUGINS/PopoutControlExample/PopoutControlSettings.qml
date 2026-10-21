@@ -1,6 +1,6 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginSettings {
@@ -11,7 +11,7 @@ PluginSettings {
         width: parent.width
         text: "Popout Control Settings"
         font.pixelSize: Theme.fontSizeLarge
-        font.weight: Font.Bold
+        font.weight: Theme.fontWeightMedium
         color: Theme.surfaceText
     }
 

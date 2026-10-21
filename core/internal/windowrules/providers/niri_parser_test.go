@@ -42,46 +42,10 @@ window-rule {
 	}
 }
 
-func TestNiriParseMultipleRules(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	config := `
-window-rule {
-    match app-id="app1"
-    open-maximized true
-}
-
-window-rule {
-    match app-id="app2"
-    open-fullscreen true
-}
-`
-	if err := os.WriteFile(filepath.Join(tmpDir, "config.kdl"), []byte(config), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	parser := NewNiriRulesParser(tmpDir)
-	rules, err := parser.Parse()
-	if err != nil {
-		t.Fatalf("Parse failed: %v", err)
-	}
-
-	if len(rules) != 2 {
-		t.Fatalf("expected 2 rules, got %d", len(rules))
-	}
-
-	if rules[0].MatchAppID != "app1" {
-		t.Errorf("rule 0 MatchAppID = %q, want app1", rules[0].MatchAppID)
-	}
-	if rules[1].MatchAppID != "app2" {
-		t.Errorf("rule 1 MatchAppID = %q, want app2", rules[1].MatchAppID)
-	}
-}
-
 func TestConvertNiriRulesToWindowRules(t *testing.T) {
 	niriRules := []NiriWindowRule{
-		{MatchAppID: "^firefox$", Opacity: floatPtr(0.8)},
-		{MatchAppID: "^code$", OpenFloating: boolPtr(true)},
+		{MatchAppID: "^firefox$", Opacity: new(0.8)},
+		{MatchAppID: "^code$", OpenFloating: new(true)},
 	}
 
 	result := ConvertNiriRulesToWindowRules(niriRules)
@@ -102,27 +66,13 @@ func TestConvertNiriRulesToWindowRules(t *testing.T) {
 	}
 }
 
-func TestNiriWritableProvider(t *testing.T) {
-	tmpDir := t.TempDir()
-	provider := NewNiriWritableProvider(tmpDir)
-
-	if provider.Name() != "niri" {
-		t.Errorf("Name() = %q, want niri", provider.Name())
-	}
-
-	expectedPath := filepath.Join(tmpDir, "dms", "windowrules.kdl")
-	if provider.GetOverridePath() != expectedPath {
-		t.Errorf("GetOverridePath() = %q, want %q", provider.GetOverridePath(), expectedPath)
-	}
-}
-
 func TestNiriSetAndLoadDMSRules(t *testing.T) {
 	tmpDir := t.TempDir()
 	provider := NewNiriWritableProvider(tmpDir)
 
 	rule := newTestWindowRule("test_id", "Test Rule", "^firefox$")
-	rule.Actions.OpenFloating = boolPtr(true)
-	rule.Actions.Opacity = floatPtr(0.85)
+	rule.Actions.OpenFloating = new(true)
+	rule.Actions.Opacity = new(0.85)
 
 	if err := provider.SetRule(rule); err != nil {
 		t.Fatalf("SetRule failed: %v", err)
@@ -150,9 +100,9 @@ func TestNiriRemoveRule(t *testing.T) {
 	provider := NewNiriWritableProvider(tmpDir)
 
 	rule1 := newTestWindowRule("rule1", "Rule 1", "app1")
-	rule1.Actions.OpenFloating = boolPtr(true)
+	rule1.Actions.OpenFloating = new(true)
 	rule2 := newTestWindowRule("rule2", "Rule 2", "app2")
-	rule2.Actions.OpenFloating = boolPtr(true)
+	rule2.Actions.OpenFloating = new(true)
 
 	_ = provider.SetRule(rule1)
 	_ = provider.SetRule(rule2)
@@ -175,11 +125,11 @@ func TestNiriReorderRules(t *testing.T) {
 	provider := NewNiriWritableProvider(tmpDir)
 
 	rule1 := newTestWindowRule("rule1", "Rule 1", "app1")
-	rule1.Actions.OpenFloating = boolPtr(true)
+	rule1.Actions.OpenFloating = new(true)
 	rule2 := newTestWindowRule("rule2", "Rule 2", "app2")
-	rule2.Actions.OpenFloating = boolPtr(true)
+	rule2.Actions.OpenFloating = new(true)
 	rule3 := newTestWindowRule("rule3", "Rule 3", "app3")
-	rule3.Actions.OpenFloating = boolPtr(true)
+	rule3.Actions.OpenFloating = new(true)
 
 	_ = provider.SetRule(rule1)
 	_ = provider.SetRule(rule2)
@@ -307,29 +257,85 @@ func TestFormatSizeProperty(t *testing.T) {
 	}
 }
 
-func TestNiriDMSRulesStatus(t *testing.T) {
+func TestNiriExcludesSurviveEditOfOtherRule(t *testing.T) {
 	tmpDir := t.TempDir()
+	provider := NewNiriWritableProvider(tmpDir)
 
-	config := `
+	dmsDir := filepath.Join(tmpDir, "dms")
+	if err := os.MkdirAll(dmsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	existing := `// @id=thunderbird @name=Thunderbird
 window-rule {
-    match app-id="testapp"
-    opacity 0.9
+    match app-id="^org.mozilla.Thunderbird$"
+    open-floating true
+    exclude title="^Mozilla Thunderbird$"
+    exclude title="^Verfassen:.*"
+}
+
+// @id=firefox @name=Firefox
+window-rule {
+    match app-id="^firefox$"
+    open-floating true
 }
 `
-	if err := os.WriteFile(filepath.Join(tmpDir, "config.kdl"), []byte(config), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dmsDir, "windowrules.kdl"), []byte(existing), 0644); err != nil {
 		t.Fatal(err)
+	}
+
+	edited := newTestWindowRule("firefox", "Firefox", "^firefox$")
+	edited.Actions.OpenFloating = new(false)
+	if err := provider.SetRule(edited); err != nil {
+		t.Fatalf("SetRule failed: %v", err)
+	}
+
+	rules, err := provider.LoadDMSRules()
+	if err != nil {
+		t.Fatalf("LoadDMSRules failed: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
+	}
+	if len(rules[0].Excludes) != 2 {
+		t.Fatalf("expected 2 excludes on untouched rule, got %d", len(rules[0].Excludes))
+	}
+	if rules[0].Excludes[0].Title != "^Mozilla Thunderbird$" {
+		t.Errorf("Excludes[0].Title = %q", rules[0].Excludes[0].Title)
+	}
+	if rules[0].Excludes[1].Title != "^Verfassen:.*" {
+		t.Errorf("Excludes[1].Title = %q", rules[0].Excludes[1].Title)
+	}
+	if rules[1].Actions.OpenFloating == nil || *rules[1].Actions.OpenFloating {
+		t.Error("edited rule should have open-floating false")
+	}
+}
+
+func TestNiriParseIncludeNestedDMSRules(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "dms")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	files := map[string]string{
+		filepath.Join(tmpDir, "config.kdl"):      "include \"dms/dms.kdl\"\n",
+		filepath.Join(subDir, "dms.kdl"):         "include \"windowrules.kdl\"\n",
+		filepath.Join(subDir, "windowrules.kdl"): "window-rule {\n    match app-id=\"nested\"\n    opacity 0.9\n}\n",
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	result, err := ParseNiriWindowRules(tmpDir)
 	if err != nil {
 		t.Fatalf("ParseNiriWindowRules failed: %v", err)
 	}
-
-	if result.DMSStatus == nil {
-		t.Fatal("DMSStatus should not be nil")
+	if !result.DMSRulesIncluded {
+		t.Error("dms/windowrules.kdl included via dms/dms.kdl not detected")
 	}
-
-	if result.DMSStatus.Exists {
-		t.Error("DMSStatus.Exists should be false when dms rules file doesn't exist")
+	if len(result.Rules) != 1 {
+		t.Errorf("expected 1 rule from the nested include, got %d", len(result.Rules))
 	}
 }

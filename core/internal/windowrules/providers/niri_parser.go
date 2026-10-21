@@ -2,6 +2,7 @@ package providers
 
 import (
 	"fmt"
+	"github.com/duxlabs-dev/dux-shell/core/internal/configfrag"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,8 +12,20 @@ import (
 	"github.com/sblinch/kdl-go"
 	"github.com/sblinch/kdl-go/document"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/windowrules"
+	"github.com/duxlabs-dev/dux-shell/core/internal/windowrules"
 )
+
+type NiriMatch struct {
+	AppID              string
+	Title              string
+	IsFloating         *bool
+	IsActive           *bool
+	IsFocused          *bool
+	IsActiveInColumn   *bool
+	IsWindowCastTarget *bool
+	IsUrgent           *bool
+	AtStartup          *bool
+}
 
 type NiriWindowRule struct {
 	MatchAppID              string
@@ -24,6 +37,8 @@ type NiriWindowRule struct {
 	MatchIsWindowCastTarget *bool
 	MatchIsUrgent           *bool
 	MatchAtStartup          *bool
+	Matches                 []NiriMatch
+	Excludes                []NiriMatch
 	Opacity                 *float64
 	OpenFloating            *bool
 	OpenMaximized           *bool
@@ -50,6 +65,13 @@ type NiriWindowRule struct {
 	FocusRingOff            *bool
 	BorderOff               *bool
 	DrawBorderWithBg        *bool
+	BgBlur                  *bool
+	BgXray                  *bool
+	BgNoise                 *float64
+	BgSaturation            *float64
+	DefaultFloatingX        *int
+	DefaultFloatingY        *int
+	DefaultFloatingRelative string
 	Source                  string
 }
 
@@ -160,18 +182,17 @@ func (p *NiriRulesParser) handleInclude(node *document.Node, baseDir string) {
 	}
 
 	includePath := strings.Trim(node.Arguments[0].String(), "\"")
-	isDMSInclude := includePath == "dms/windowrules.kdl" || strings.HasSuffix(includePath, "/dms/windowrules.kdl")
+	fullPath := filepath.Join(baseDir, includePath)
+	if filepath.IsAbs(includePath) {
+		fullPath = includePath
+	}
+	isDMSInclude := strings.HasSuffix(fullPath, "/dms/windowrules.kdl")
 
 	p.includeCount++
 	if isDMSInclude {
 		p.dmsRulesIncluded = true
 		p.dmsIncludePos = p.includeCount
 		p.dmsProcessed = true
-	}
-
-	fullPath := filepath.Join(baseDir, includePath)
-	if filepath.IsAbs(includePath) {
-		fullPath = includePath
 	}
 
 	_ = p.parseFile(fullPath)
@@ -191,7 +212,9 @@ func (p *NiriRulesParser) parseWindowRuleNode(node *document.Node) {
 
 		switch childName {
 		case "match":
-			p.parseMatchNode(child, &rule)
+			rule.Matches = append(rule.Matches, p.parseMatchNode(child))
+		case "exclude":
+			rule.Excludes = append(rule.Excludes, p.parseMatchNode(child))
 		case "opacity":
 			if len(child.Arguments) > 0 {
 				val := child.Arguments[0].ResolvedValue()
@@ -297,7 +320,24 @@ func (p *NiriRulesParser) parseWindowRuleNode(node *document.Node) {
 		case "draw-border-with-background":
 			b := p.parseBoolArg(child)
 			rule.DrawBorderWithBg = &b
+		case "background-effect":
+			p.parseBackgroundEffectNode(child, &rule)
+		case "default-floating-position":
+			p.parseFloatingPositionNode(child, &rule)
 		}
+	}
+
+	if len(rule.Matches) > 0 {
+		first := rule.Matches[0]
+		rule.MatchAppID = first.AppID
+		rule.MatchTitle = first.Title
+		rule.MatchIsFloating = first.IsFloating
+		rule.MatchIsActive = first.IsActive
+		rule.MatchIsFocused = first.IsFocused
+		rule.MatchIsActiveInColumn = first.IsActiveInColumn
+		rule.MatchIsWindowCastTarget = first.IsWindowCastTarget
+		rule.MatchIsUrgent = first.IsUrgent
+		rule.MatchAtStartup = first.AtStartup
 	}
 
 	p.rules = append(p.rules, rule)
@@ -326,45 +366,47 @@ func (p *NiriRulesParser) parseSizeNode(node *document.Node) string {
 	return ""
 }
 
-func (p *NiriRulesParser) parseMatchNode(node *document.Node, rule *NiriWindowRule) {
+func (p *NiriRulesParser) parseMatchNode(node *document.Node) NiriMatch {
+	m := NiriMatch{}
 	if node.Properties == nil {
-		return
+		return m
 	}
 
 	if val, ok := node.Properties.Get("app-id"); ok {
-		rule.MatchAppID = val.ValueString()
+		m.AppID = val.ValueString()
 	}
 	if val, ok := node.Properties.Get("title"); ok {
-		rule.MatchTitle = val.ValueString()
+		m.Title = val.ValueString()
 	}
 	if val, ok := node.Properties.Get("is-floating"); ok {
 		b := val.ValueString() == "true"
-		rule.MatchIsFloating = &b
+		m.IsFloating = &b
 	}
 	if val, ok := node.Properties.Get("is-active"); ok {
 		b := val.ValueString() == "true"
-		rule.MatchIsActive = &b
+		m.IsActive = &b
 	}
 	if val, ok := node.Properties.Get("is-focused"); ok {
 		b := val.ValueString() == "true"
-		rule.MatchIsFocused = &b
+		m.IsFocused = &b
 	}
 	if val, ok := node.Properties.Get("is-active-in-column"); ok {
 		b := val.ValueString() == "true"
-		rule.MatchIsActiveInColumn = &b
+		m.IsActiveInColumn = &b
 	}
 	if val, ok := node.Properties.Get("is-window-cast-target"); ok {
 		b := val.ValueString() == "true"
-		rule.MatchIsWindowCastTarget = &b
+		m.IsWindowCastTarget = &b
 	}
 	if val, ok := node.Properties.Get("is-urgent"); ok {
 		b := val.ValueString() == "true"
-		rule.MatchIsUrgent = &b
+		m.IsUrgent = &b
 	}
 	if val, ok := node.Properties.Get("at-startup"); ok {
 		b := val.ValueString() == "true"
-		rule.MatchAtStartup = &b
+		m.AtStartup = &b
 	}
+	return m
 }
 
 func (p *NiriRulesParser) parseBorderNode(node *document.Node, rule *NiriWindowRule) {
@@ -383,6 +425,64 @@ func (p *NiriRulesParser) parseBorderNode(node *document.Node, rule *NiriWindowR
 			}
 		}
 	}
+}
+
+func (p *NiriRulesParser) parseBackgroundEffectNode(node *document.Node, rule *NiriWindowRule) {
+	if node.Children == nil {
+		return
+	}
+
+	for _, child := range node.Children {
+		switch child.Name.String() {
+		case "blur":
+			b := p.parseBoolArg(child)
+			rule.BgBlur = &b
+		case "xray":
+			b := p.parseBoolArg(child)
+			rule.BgXray = &b
+		case "noise":
+			if f, ok := p.parseFloatArg(child); ok {
+				rule.BgNoise = &f
+			}
+		case "saturation":
+			if f, ok := p.parseFloatArg(child); ok {
+				rule.BgSaturation = &f
+			}
+		}
+	}
+}
+
+func (p *NiriRulesParser) parseFloatingPositionNode(node *document.Node, rule *NiriWindowRule) {
+	if node.Properties == nil {
+		return
+	}
+	if val, ok := node.Properties.Get("x"); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(val.ValueString())); err == nil {
+			rule.DefaultFloatingX = &n
+		}
+	}
+	if val, ok := node.Properties.Get("y"); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(val.ValueString())); err == nil {
+			rule.DefaultFloatingY = &n
+		}
+	}
+	if val, ok := node.Properties.Get("relative-to"); ok {
+		rule.DefaultFloatingRelative = val.ValueString()
+	}
+}
+
+func (p *NiriRulesParser) parseFloatArg(node *document.Node) (float64, bool) {
+	if len(node.Arguments) == 0 {
+		return 0, false
+	}
+	val := node.Arguments[0].ResolvedValue()
+	switch v := val.(type) {
+	case float64:
+		return v, true
+	case int64:
+		return float64(v), true
+	}
+	return 0, false
 }
 
 func (p *NiriRulesParser) parseFocusRingNode(node *document.Node, rule *NiriWindowRule) {
@@ -414,32 +514,16 @@ func (p *NiriRulesParser) HasDMSRulesIncluded() bool {
 	return p.dmsRulesIncluded
 }
 
+var niriRulesMessages = configfrag.Messages{
+	Missing:     "dms/windowrules.kdl does not exist",
+	NotIncluded: "dms/windowrules.kdl is not included in config.kdl",
+	Overridden:  "Some DMS rules may be overridden by config rules",
+	Active:      "DMS window rules are active",
+}
+
 func (p *NiriRulesParser) buildDMSStatus() *windowrules.DMSRulesStatus {
-	status := &windowrules.DMSRulesStatus{
-		Exists:          p.dmsRulesExists,
-		Included:        p.dmsRulesIncluded,
-		IncludePosition: p.dmsIncludePos,
-		TotalIncludes:   p.includeCount,
-		RulesAfterDMS:   p.rulesAfterDMS,
-	}
-
-	switch {
-	case !p.dmsRulesExists:
-		status.Effective = false
-		status.StatusMessage = "dms/windowrules.kdl does not exist"
-	case !p.dmsRulesIncluded:
-		status.Effective = false
-		status.StatusMessage = "dms/windowrules.kdl is not included in config.kdl"
-	case p.rulesAfterDMS > 0:
-		status.Effective = true
-		status.OverriddenBy = p.rulesAfterDMS
-		status.StatusMessage = "Some DMS rules may be overridden by config rules"
-	default:
-		status.Effective = true
-		status.StatusMessage = "DMS window rules are active"
-	}
-
-	return status
+	scan := configfrag.IncludeScan{Count: p.includeCount, DMSPosition: p.dmsIncludePos, DMSSeen: p.dmsRulesIncluded}
+	return windowrules.DMSRulesStatusFrom(configfrag.BuildStatus(scan, p.dmsRulesExists, p.rulesAfterDMS, "", false, niriRulesMessages))
 }
 
 type NiriRulesParseResult struct {
@@ -461,6 +545,27 @@ func ParseNiriWindowRules(configDir string) (*NiriRulesParseResult, error) {
 	}, nil
 }
 
+func convertNiriMatches(matches []NiriMatch) []windowrules.MatchCriteria {
+	if len(matches) == 0 {
+		return nil
+	}
+	result := make([]windowrules.MatchCriteria, 0, len(matches))
+	for _, m := range matches {
+		result = append(result, windowrules.MatchCriteria{
+			AppID:              m.AppID,
+			Title:              m.Title,
+			IsFloating:         m.IsFloating,
+			IsActive:           m.IsActive,
+			IsFocused:          m.IsFocused,
+			IsActiveInColumn:   m.IsActiveInColumn,
+			IsWindowCastTarget: m.IsWindowCastTarget,
+			IsUrgent:           m.IsUrgent,
+			AtStartup:          m.AtStartup,
+		})
+	}
+	return result
+}
+
 func ConvertNiriRulesToWindowRules(niriRules []NiriWindowRule) []windowrules.WindowRule {
 	result := make([]windowrules.WindowRule, 0, len(niriRules))
 	for i, nr := range niriRules {
@@ -479,33 +584,42 @@ func ConvertNiriRulesToWindowRules(niriRules []NiriWindowRule) []windowrules.Win
 				IsUrgent:           nr.MatchIsUrgent,
 				AtStartup:          nr.MatchAtStartup,
 			},
+			Matches:  convertNiriMatches(nr.Matches),
+			Excludes: convertNiriMatches(nr.Excludes),
 			Actions: windowrules.Actions{
-				Opacity:              nr.Opacity,
-				OpenFloating:         nr.OpenFloating,
-				OpenMaximized:        nr.OpenMaximized,
-				OpenMaximizedToEdges: nr.OpenMaximizedToEdges,
-				OpenFullscreen:       nr.OpenFullscreen,
-				OpenFocused:          nr.OpenFocused,
-				OpenOnOutput:         nr.OpenOnOutput,
-				OpenOnWorkspace:      nr.OpenOnWorkspace,
-				DefaultColumnWidth:   nr.DefaultColumnWidth,
-				DefaultWindowHeight:  nr.DefaultWindowHeight,
-				VariableRefreshRate:  nr.VariableRefreshRate,
-				BlockOutFrom:         nr.BlockOutFrom,
-				DefaultColumnDisplay: nr.DefaultColumnDisplay,
-				ScrollFactor:         nr.ScrollFactor,
-				CornerRadius:         nr.CornerRadius,
-				ClipToGeometry:       nr.ClipToGeometry,
-				TiledState:           nr.TiledState,
-				MinWidth:             nr.MinWidth,
-				MaxWidth:             nr.MaxWidth,
-				MinHeight:            nr.MinHeight,
-				MaxHeight:            nr.MaxHeight,
-				BorderColor:          nr.BorderColor,
-				FocusRingColor:       nr.FocusRingColor,
-				FocusRingOff:         nr.FocusRingOff,
-				BorderOff:            nr.BorderOff,
-				DrawBorderWithBg:     nr.DrawBorderWithBg,
+				Opacity:                   nr.Opacity,
+				OpenFloating:              nr.OpenFloating,
+				OpenMaximized:             nr.OpenMaximized,
+				OpenMaximizedToEdges:      nr.OpenMaximizedToEdges,
+				OpenFullscreen:            nr.OpenFullscreen,
+				OpenFocused:               nr.OpenFocused,
+				OpenOnOutput:              nr.OpenOnOutput,
+				OpenOnWorkspace:           nr.OpenOnWorkspace,
+				DefaultColumnWidth:        nr.DefaultColumnWidth,
+				DefaultWindowHeight:       nr.DefaultWindowHeight,
+				VariableRefreshRate:       nr.VariableRefreshRate,
+				BlockOutFrom:              nr.BlockOutFrom,
+				DefaultColumnDisplay:      nr.DefaultColumnDisplay,
+				ScrollFactor:              nr.ScrollFactor,
+				CornerRadius:              nr.CornerRadius,
+				ClipToGeometry:            nr.ClipToGeometry,
+				TiledState:                nr.TiledState,
+				MinWidth:                  nr.MinWidth,
+				MaxWidth:                  nr.MaxWidth,
+				MinHeight:                 nr.MinHeight,
+				MaxHeight:                 nr.MaxHeight,
+				BorderColor:               nr.BorderColor,
+				FocusRingColor:            nr.FocusRingColor,
+				FocusRingOff:              nr.FocusRingOff,
+				BorderOff:                 nr.BorderOff,
+				DrawBorderWithBg:          nr.DrawBorderWithBg,
+				BackgroundBlur:            nr.BgBlur,
+				BackgroundXray:            nr.BgXray,
+				BackgroundNoise:           nr.BgNoise,
+				BackgroundSaturation:      nr.BgSaturation,
+				DefaultFloatingX:          nr.DefaultFloatingX,
+				DefaultFloatingY:          nr.DefaultFloatingY,
+				DefaultFloatingRelativeTo: nr.DefaultFloatingRelative,
 			},
 		}
 		result = append(result, wr)
@@ -543,67 +657,20 @@ func (p *NiriWritableProvider) GetRuleSet() (*windowrules.RuleSet, error) {
 	}, nil
 }
 
+func (p *NiriWritableProvider) EnsureWritable() error {
+	return nil
+}
+
 func (p *NiriWritableProvider) SetRule(rule windowrules.WindowRule) error {
-	rules, err := p.LoadDMSRules()
-	if err != nil {
-		rules = []windowrules.WindowRule{}
-	}
-
-	found := false
-	for i, r := range rules {
-		if r.ID == rule.ID {
-			rules[i] = rule
-			found = true
-			break
-		}
-	}
-	if !found {
-		rules = append(rules, rule)
-	}
-
-	return p.writeDMSRules(rules)
+	return windowrules.Set(p, rule)
 }
 
 func (p *NiriWritableProvider) RemoveRule(id string) error {
-	rules, err := p.LoadDMSRules()
-	if err != nil {
-		return err
-	}
-
-	newRules := make([]windowrules.WindowRule, 0, len(rules))
-	for _, r := range rules {
-		if r.ID != id {
-			newRules = append(newRules, r)
-		}
-	}
-
-	return p.writeDMSRules(newRules)
+	return windowrules.Remove(p, id)
 }
 
 func (p *NiriWritableProvider) ReorderRules(ids []string) error {
-	rules, err := p.LoadDMSRules()
-	if err != nil {
-		return err
-	}
-
-	ruleMap := make(map[string]windowrules.WindowRule)
-	for _, r := range rules {
-		ruleMap[r.ID] = r
-	}
-
-	newRules := make([]windowrules.WindowRule, 0, len(ids))
-	for _, id := range ids {
-		if r, ok := ruleMap[id]; ok {
-			newRules = append(newRules, r)
-			delete(ruleMap, id)
-		}
-	}
-
-	for _, r := range ruleMap {
-		newRules = append(newRules, r)
-	}
-
-	return p.writeDMSRules(newRules)
+	return windowrules.Reorder(p, ids)
 }
 
 var niriMetaCommentRegex = regexp.MustCompile(`^//\s*@id=(\S*)\s*@name=(.*)$`)
@@ -684,33 +751,42 @@ func (p *NiriWritableProvider) LoadDMSRules() ([]windowrules.WindowRule, error) 
 				IsUrgent:           nr.MatchIsUrgent,
 				AtStartup:          nr.MatchAtStartup,
 			},
+			Matches:  convertNiriMatches(nr.Matches),
+			Excludes: convertNiriMatches(nr.Excludes),
 			Actions: windowrules.Actions{
-				Opacity:              nr.Opacity,
-				OpenFloating:         nr.OpenFloating,
-				OpenMaximized:        nr.OpenMaximized,
-				OpenMaximizedToEdges: nr.OpenMaximizedToEdges,
-				OpenFullscreen:       nr.OpenFullscreen,
-				OpenFocused:          nr.OpenFocused,
-				OpenOnOutput:         nr.OpenOnOutput,
-				OpenOnWorkspace:      nr.OpenOnWorkspace,
-				DefaultColumnWidth:   nr.DefaultColumnWidth,
-				DefaultWindowHeight:  nr.DefaultWindowHeight,
-				VariableRefreshRate:  nr.VariableRefreshRate,
-				BlockOutFrom:         nr.BlockOutFrom,
-				DefaultColumnDisplay: nr.DefaultColumnDisplay,
-				ScrollFactor:         nr.ScrollFactor,
-				CornerRadius:         nr.CornerRadius,
-				ClipToGeometry:       nr.ClipToGeometry,
-				TiledState:           nr.TiledState,
-				MinWidth:             nr.MinWidth,
-				MaxWidth:             nr.MaxWidth,
-				MinHeight:            nr.MinHeight,
-				MaxHeight:            nr.MaxHeight,
-				BorderColor:          nr.BorderColor,
-				FocusRingColor:       nr.FocusRingColor,
-				FocusRingOff:         nr.FocusRingOff,
-				BorderOff:            nr.BorderOff,
-				DrawBorderWithBg:     nr.DrawBorderWithBg,
+				Opacity:                   nr.Opacity,
+				OpenFloating:              nr.OpenFloating,
+				OpenMaximized:             nr.OpenMaximized,
+				OpenMaximizedToEdges:      nr.OpenMaximizedToEdges,
+				OpenFullscreen:            nr.OpenFullscreen,
+				OpenFocused:               nr.OpenFocused,
+				OpenOnOutput:              nr.OpenOnOutput,
+				OpenOnWorkspace:           nr.OpenOnWorkspace,
+				DefaultColumnWidth:        nr.DefaultColumnWidth,
+				DefaultWindowHeight:       nr.DefaultWindowHeight,
+				VariableRefreshRate:       nr.VariableRefreshRate,
+				BlockOutFrom:              nr.BlockOutFrom,
+				DefaultColumnDisplay:      nr.DefaultColumnDisplay,
+				ScrollFactor:              nr.ScrollFactor,
+				CornerRadius:              nr.CornerRadius,
+				ClipToGeometry:            nr.ClipToGeometry,
+				TiledState:                nr.TiledState,
+				MinWidth:                  nr.MinWidth,
+				MaxWidth:                  nr.MaxWidth,
+				MinHeight:                 nr.MinHeight,
+				MaxHeight:                 nr.MaxHeight,
+				BorderColor:               nr.BorderColor,
+				FocusRingColor:            nr.FocusRingColor,
+				FocusRingOff:              nr.FocusRingOff,
+				BorderOff:                 nr.BorderOff,
+				DrawBorderWithBg:          nr.DrawBorderWithBg,
+				BackgroundBlur:            nr.BgBlur,
+				BackgroundXray:            nr.BgXray,
+				BackgroundNoise:           nr.BgNoise,
+				BackgroundSaturation:      nr.BgSaturation,
+				DefaultFloatingX:          nr.DefaultFloatingX,
+				DefaultFloatingY:          nr.DefaultFloatingY,
+				DefaultFloatingRelativeTo: nr.DefaultFloatingRelative,
 			},
 		}
 
@@ -720,7 +796,7 @@ func (p *NiriWritableProvider) LoadDMSRules() ([]windowrules.WindowRule, error) 
 	return rules, nil
 }
 
-func (p *NiriWritableProvider) writeDMSRules(rules []windowrules.WindowRule) error {
+func (p *NiriWritableProvider) WriteDMSRules(rules []windowrules.WindowRule) error {
 	rulesPath := p.GetOverridePath()
 
 	if err := os.MkdirAll(filepath.Dir(rulesPath), 0755); err != nil {
@@ -728,7 +804,7 @@ func (p *NiriWritableProvider) writeDMSRules(rules []windowrules.WindowRule) err
 	}
 
 	var lines []string
-	lines = append(lines, "// DMS Window Rules - Managed by DankMaterialShell")
+	lines = append(lines, "// DMS Window Rules - Managed by Dux Shell")
 	lines = append(lines, "// Do not edit manually - changes may be overwritten")
 	lines = append(lines, "")
 
@@ -740,52 +816,67 @@ func (p *NiriWritableProvider) writeDMSRules(rules []windowrules.WindowRule) err
 	return os.WriteFile(rulesPath, []byte(strings.Join(lines, "\n")), 0644)
 }
 
+func formatNiriMatchLine(keyword string, m windowrules.MatchCriteria) (string, bool) {
+	var matchProps []string
+	if m.AppID != "" {
+		matchProps = append(matchProps, fmt.Sprintf("app-id=%q", m.AppID))
+	}
+	if m.Title != "" {
+		matchProps = append(matchProps, fmt.Sprintf("title=%q", m.Title))
+	}
+	if m.IsFloating != nil {
+		matchProps = append(matchProps, fmt.Sprintf("is-floating=%t", *m.IsFloating))
+	}
+	if m.IsActive != nil {
+		matchProps = append(matchProps, fmt.Sprintf("is-active=%t", *m.IsActive))
+	}
+	if m.IsFocused != nil {
+		matchProps = append(matchProps, fmt.Sprintf("is-focused=%t", *m.IsFocused))
+	}
+	if m.IsActiveInColumn != nil {
+		matchProps = append(matchProps, fmt.Sprintf("is-active-in-column=%t", *m.IsActiveInColumn))
+	}
+	if m.IsWindowCastTarget != nil {
+		matchProps = append(matchProps, fmt.Sprintf("is-window-cast-target=%t", *m.IsWindowCastTarget))
+	}
+	if m.IsUrgent != nil {
+		matchProps = append(matchProps, fmt.Sprintf("is-urgent=%t", *m.IsUrgent))
+	}
+	if m.AtStartup != nil {
+		matchProps = append(matchProps, fmt.Sprintf("at-startup=%t", *m.AtStartup))
+	}
+	if len(matchProps) == 0 {
+		return "", false
+	}
+	return "    " + keyword + " " + strings.Join(matchProps, " "), true
+}
+
 func (p *NiriWritableProvider) formatRule(rule windowrules.WindowRule) string {
 	var lines []string
 	lines = append(lines, fmt.Sprintf("// @id=%s @name=%s", rule.ID, rule.Name))
 	lines = append(lines, "window-rule {")
 
-	m := rule.MatchCriteria
-	if m.AppID != "" || m.Title != "" || m.IsFloating != nil || m.IsActive != nil ||
-		m.IsFocused != nil || m.IsActiveInColumn != nil || m.IsWindowCastTarget != nil ||
-		m.IsUrgent != nil || m.AtStartup != nil {
-		var matchProps []string
-		if m.AppID != "" {
-			matchProps = append(matchProps, fmt.Sprintf("app-id=%q", m.AppID))
+	matches := rule.Matches
+	if len(matches) == 0 {
+		matches = []windowrules.MatchCriteria{rule.MatchCriteria}
+	}
+	for _, m := range matches {
+		if line, ok := formatNiriMatchLine("match", m); ok {
+			lines = append(lines, line)
 		}
-		if m.Title != "" {
-			matchProps = append(matchProps, fmt.Sprintf("title=%q", m.Title))
+	}
+	for _, m := range rule.Excludes {
+		if line, ok := formatNiriMatchLine("exclude", m); ok {
+			lines = append(lines, line)
 		}
-		if m.IsFloating != nil {
-			matchProps = append(matchProps, fmt.Sprintf("is-floating=%t", *m.IsFloating))
-		}
-		if m.IsActive != nil {
-			matchProps = append(matchProps, fmt.Sprintf("is-active=%t", *m.IsActive))
-		}
-		if m.IsFocused != nil {
-			matchProps = append(matchProps, fmt.Sprintf("is-focused=%t", *m.IsFocused))
-		}
-		if m.IsActiveInColumn != nil {
-			matchProps = append(matchProps, fmt.Sprintf("is-active-in-column=%t", *m.IsActiveInColumn))
-		}
-		if m.IsWindowCastTarget != nil {
-			matchProps = append(matchProps, fmt.Sprintf("is-window-cast-target=%t", *m.IsWindowCastTarget))
-		}
-		if m.IsUrgent != nil {
-			matchProps = append(matchProps, fmt.Sprintf("is-urgent=%t", *m.IsUrgent))
-		}
-		if m.AtStartup != nil {
-			matchProps = append(matchProps, fmt.Sprintf("at-startup=%t", *m.AtStartup))
-		}
-		lines = append(lines, "    match "+strings.Join(matchProps, " "))
 	}
 
 	a := rule.Actions
 	if a.Opacity != nil {
 		lines = append(lines, fmt.Sprintf("    opacity %.2f", *a.Opacity))
 	}
-	if a.OpenFloating != nil && *a.OpenFloating {
-		lines = append(lines, "    open-floating true")
+	if a.OpenFloating != nil {
+		lines = append(lines, fmt.Sprintf("    open-floating %t", *a.OpenFloating))
 	}
 	if a.OpenMaximized != nil && *a.OpenMaximized {
 		lines = append(lines, "    open-maximized true")
@@ -858,8 +949,37 @@ func (p *NiriWritableProvider) formatRule(rule windowrules.WindowRule) string {
 		lines = append(lines, fmt.Sprintf("    draw-border-with-background %t", *a.DrawBorderWithBg))
 	}
 
+	if a.BackgroundBlur != nil || a.BackgroundXray != nil || a.BackgroundNoise != nil || a.BackgroundSaturation != nil {
+		lines = append(lines, "    background-effect {")
+		if a.BackgroundBlur != nil {
+			lines = append(lines, fmt.Sprintf("        blur %t", *a.BackgroundBlur))
+		}
+		if a.BackgroundXray != nil {
+			lines = append(lines, fmt.Sprintf("        xray %t", *a.BackgroundXray))
+		}
+		if a.BackgroundNoise != nil {
+			lines = append(lines, fmt.Sprintf("        noise %s", formatFloat(*a.BackgroundNoise)))
+		}
+		if a.BackgroundSaturation != nil {
+			lines = append(lines, fmt.Sprintf("        saturation %s", formatFloat(*a.BackgroundSaturation)))
+		}
+		lines = append(lines, "    }")
+	}
+
+	if a.DefaultFloatingX != nil && a.DefaultFloatingY != nil {
+		line := fmt.Sprintf("    default-floating-position x=%d y=%d", *a.DefaultFloatingX, *a.DefaultFloatingY)
+		if a.DefaultFloatingRelativeTo != "" {
+			line += fmt.Sprintf(" relative-to=%q", a.DefaultFloatingRelativeTo)
+		}
+		lines = append(lines, line)
+	}
+
 	lines = append(lines, "}")
 	return strings.Join(lines, "\n")
+}
+
+func formatFloat(f float64) string {
+	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
 func formatSizeProperty(name, value string) string {

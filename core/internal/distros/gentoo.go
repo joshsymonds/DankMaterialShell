@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/deps"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/privesc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/deps"
+	"github.com/duxlabs-dev/dux-shell/core/internal/privesc"
 )
 
 var GentooGlobalUseFlags = []string{
@@ -51,6 +51,11 @@ func NewGentooDistribution(config DistroConfig, logChan chan<- string) *GentooDi
 		ManualPackageInstaller: &ManualPackageInstaller{BaseDistribution: base},
 		config:                 config,
 	}
+}
+
+func emergeInstallArgs(packages []string) []string {
+	args := []string{"emerge", "--ask=n", "--quiet", "--autounmask-continue=y", "--autounmask-keep-keywords=y", "--autounmask-keep-masks=y"}
+	return append(args, packages...)
 }
 
 func (g *GentooDistribution) getArchKeyword() string {
@@ -106,14 +111,33 @@ func (g *GentooDistribution) DetectDependenciesWithTerminal(ctx context.Context,
 		dependencies = append(dependencies, g.detectXwaylandSatellite())
 	}
 
+	// Mango-specific tools (dwl-based, uses xwayland-satellite like niri)
+	if wm == deps.WindowManagerMango {
+		dependencies = append(dependencies, g.detectXwaylandSatellite())
+	}
+
 	dependencies = append(dependencies, g.detectMatugen())
-	dependencies = append(dependencies, g.detectDgop())
+	dependencies = append(dependencies, g.detectDanksearch())
 
 	return dependencies, nil
 }
 
 func (g *GentooDistribution) detectXDGPortal() deps.Dependency {
 	return g.detectPackage("xdg-desktop-portal-gtk", "Desktop integration portal for GTK", g.packageInstalled("sys-apps/xdg-desktop-portal-gtk"))
+}
+
+func (g *GentooDistribution) detectDMS() deps.Dependency {
+	dep := deps.Dependency{
+		Name:        "dms (Dux Shell)",
+		Status:      deps.StatusMissing,
+		Description: "Desktop Management System configuration",
+		Required:    true,
+		CanToggle:   false,
+	}
+	if g.packageInstalled("gui-apps/dankmaterialshell") {
+		dep.Status = deps.StatusInstalled
+	}
+	return dep
 }
 
 func (g *GentooDistribution) detectXwaylandSatellite() deps.Dependency {
@@ -148,10 +172,10 @@ func (g *GentooDistribution) GetPackageMappingWithVariants(wm deps.WindowManager
 		"qtwayland":     {Name: "dev-qt/qtwayland", Repository: RepoTypeSystem},
 		"mesa":          {Name: "media-libs/mesa", Repository: RepoTypeSystem, UseFlags: "opengl vulkan"},
 
-		"quickshell":              g.getQuickshellMapping(variants["quickshell"]),
-		"matugen":                 {Name: "x11-misc/matugen", Repository: RepoTypeGURU, AcceptKeywords: archKeyword},
-		"dms (DankMaterialShell)": g.getDmsMapping(variants["dms (DankMaterialShell)"]),
-		"dgop":                    {Name: "dgop", Repository: RepoTypeManual, BuildFunc: "installDgop"},
+		"quickshell":      g.getQuickshellMapping(variants["quickshell"]),
+		"matugen":         {Name: "x11-misc/matugen", Repository: RepoTypeGURU, AcceptKeywords: archKeyword},
+		"dms (Dux Shell)": g.getDmsMapping(),
+		"danksearch":      {Name: "gui-apps/danksearch", Repository: RepoTypeGURU, AcceptKeywords: archKeyword},
 	}
 
 	switch wm {
@@ -162,6 +186,10 @@ func (g *GentooDistribution) GetPackageMappingWithVariants(wm deps.WindowManager
 	case deps.WindowManagerNiri:
 		packages["niri"] = g.getNiriMapping(variants["niri"])
 		packages["xwayland-satellite"] = PackageMapping{Name: "gui-apps/xwayland-satellite", Repository: RepoTypeGURU, AcceptKeywords: archKeyword}
+	case deps.WindowManagerMango:
+		packages["mango"] = g.getMangoMapping(variants["mango"])
+		packages["scenefx"] = PackageMapping{Name: "gui-libs/scenefx", Repository: RepoTypeGURU, AcceptKeywords: archKeyword}
+		packages["xwayland-satellite"] = PackageMapping{Name: "gui-apps/xwayland-satellite", Repository: RepoTypeGURU, AcceptKeywords: archKeyword}
 	}
 
 	return packages
@@ -171,8 +199,8 @@ func (g *GentooDistribution) getQuickshellMapping(_ deps.PackageVariant) Package
 	return PackageMapping{Name: "gui-apps/quickshell", Repository: RepoTypeGURU, UseFlags: "breakpad jemalloc sockets wayland layer-shell session-lock toplevel-management screencopy X pipewire tray mpris pam hyprland hyprland-global-shortcuts hyprland-focus-grab i3 i3-ipc bluetooth", AcceptKeywords: "**"}
 }
 
-func (g *GentooDistribution) getDmsMapping(_ deps.PackageVariant) PackageMapping {
-	return PackageMapping{Name: "dms", Repository: RepoTypeManual, BuildFunc: "installDankMaterialShell"}
+func (g *GentooDistribution) getDmsMapping() PackageMapping {
+	return PackageMapping{Name: "gui-apps/dankmaterialshell", Repository: RepoTypeGURU, AcceptKeywords: g.getArchKeyword()}
 }
 
 func (g *GentooDistribution) getHyprlandMapping(_ deps.PackageVariant) PackageMapping {
@@ -181,6 +209,10 @@ func (g *GentooDistribution) getHyprlandMapping(_ deps.PackageVariant) PackageMa
 
 func (g *GentooDistribution) getNiriMapping(_ deps.PackageVariant) PackageMapping {
 	return PackageMapping{Name: "gui-wm/niri", Repository: RepoTypeGURU, UseFlags: "dbus screencast", AcceptKeywords: g.getArchKeyword()}
+}
+
+func (g *GentooDistribution) getMangoMapping(_ deps.PackageVariant) PackageMapping {
+	return PackageMapping{Name: "gui-wm/mangowm", Repository: RepoTypeGURU, AcceptKeywords: g.getArchKeyword()}
 }
 
 func (g *GentooDistribution) getPrerequisites() []string {
@@ -290,6 +322,7 @@ func (g *GentooDistribution) InstallPrerequisites(ctx context.Context, sudoPassw
 	}
 	g.log("Portage tree synced successfully")
 
+	args := emergeInstallArgs(missingPkgs)
 	g.log(fmt.Sprintf("Installing prerequisites: %s", strings.Join(missingPkgs, ", ")))
 	progressChan <- InstallProgressMsg{
 		Phase:       PhasePrerequisites,
@@ -297,12 +330,10 @@ func (g *GentooDistribution) InstallPrerequisites(ctx context.Context, sudoPassw
 		Step:        fmt.Sprintf("Installing %d prerequisites...", len(missingPkgs)),
 		IsComplete:  false,
 		NeedsSudo:   true,
-		CommandInfo: fmt.Sprintf("sudo emerge --ask=n %s", strings.Join(missingPkgs, " ")),
+		CommandInfo: fmt.Sprintf("sudo %s", strings.Join(args, " ")),
 		LogOutput:   fmt.Sprintf("Installing prerequisites: %s", strings.Join(missingPkgs, ", ")),
 	}
 
-	args := []string{"emerge", "--ask=n", "--quiet"}
-	args = append(args, missingPkgs...)
 	cmd := privesc.ExecCommand(ctx, sudoPassword, strings.Join(args, " "))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -492,8 +523,7 @@ func (g *GentooDistribution) installPortagePackages(ctx context.Context, package
 		}
 	}
 
-	args := []string{"emerge", "--ask=n", "--quiet"}
-	args = append(args, packageNames...)
+	args := emergeInstallArgs(packageNames)
 
 	progressChan <- InstallProgressMsg{
 		Phase:       PhaseSystemPackages,
@@ -684,8 +714,7 @@ func (g *GentooDistribution) installGURUPackages(ctx context.Context, packages [
 		guruPackages[i] = pkg + "::guru"
 	}
 
-	args := []string{"emerge", "--ask=n", "--quiet"}
-	args = append(args, guruPackages...)
+	args := emergeInstallArgs(guruPackages)
 
 	progressChan <- InstallProgressMsg{
 		Phase:       PhaseAURPackages,

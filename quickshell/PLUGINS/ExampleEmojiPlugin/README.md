@@ -11,7 +11,7 @@ An example dms plugin that displays cycling emojis in your bar with an emoji pic
 
 ## Installation
 
-1. Copy this directory to `~/.config/DankMaterialShell/plugins/ExampleEmojiPlugin`
+1. Copy this directory to `~/.config/dms/plugins/ExampleEmojiPlugin`
 2. Open DMS Settings → Plugins
 3. Click "Scan for Plugins"
 4. Enable "Emoji Cycler"
@@ -43,6 +43,7 @@ How many emojis to display at once (1-8)
 This plugin demonstrates:
 - Using `PluginComponent` for bar integration
 - `SelectionSetting`, `SliderSetting` for configuration
+- Plugin-local translations (`translations/` + `I18n.trFor`)
 - Timer-based animation
 - Popout content with grid layout
 - External command execution (`Quickshell.execDetached`)

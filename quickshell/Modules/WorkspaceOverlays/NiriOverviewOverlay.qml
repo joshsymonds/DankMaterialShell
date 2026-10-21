@@ -3,7 +3,8 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Wayland
 import qs.Common
-import qs.Modals.DankLauncherV2
+import qs.Modals.DLauncherV2
+import qs.Modals.DLauncherV2.Components
 import qs.Services
 import qs.Widgets
 
@@ -101,6 +102,24 @@ Scope {
                 readonly property bool overlayVisible: NiriService.inOverview || niriOverviewScope.isClosing
                 property bool hasActivePopout: !!PopoutManager.currentPopoutsByScreen[screen.name]
                 property bool hasActiveModal: !!ModalManager.currentModalsByScreen[screen.name]
+                readonly property bool useSpotlightStyle: SettingsData.niriOverviewLauncherStyle === "spotlight"
+                readonly property var launcherContent: useSpotlightStyle ? spotlightLauncherLoader.item : fullLauncherLoader.item
+
+                readonly property QtObject fakeParentModal: QtObject {
+                    readonly property bool spotlightOpen: spotlightContainer.visible
+                    readonly property bool isClosing: niriOverviewScope.isClosing
+                    readonly property real alignedX: spotlightContainer.x
+                    readonly property real alignedY: spotlightContainer.y
+                    readonly property real screenHeight: overlayWindow.screen?.height ?? 1080
+                    readonly property real frameBottomRadius: spotlightContainer.bottomRadius
+                    function hide() {
+                        if (niriOverviewScope.searchActive) {
+                            niriOverviewScope.hideSpotlight();
+                            return;
+                        }
+                        NiriService.closeOverview();
+                    }
+                }
 
                 Connections {
                     target: PopoutManager
@@ -124,6 +143,8 @@ Scope {
                 WlrLayershell.layer: WlrLayer.Overlay
                 WlrLayershell.exclusiveZone: -1
                 WlrLayershell.keyboardFocus: {
+                    if (PopoutManager.screenshotActive)
+                        return WlrKeyboardFocus.None;
                     if (!NiriService.inOverview)
                         return WlrKeyboardFocus.None;
                     if (!isActiveScreen)
@@ -141,15 +162,15 @@ Scope {
 
                 WindowBlur {
                     targetWindow: overlayWindow
-                    // Track the container's scale so blur shrinks with the content
-                    // during exit — otherwise blur pops away one frame after content.
+                    surfaceColor: Theme.floatingWindowSurface
                     readonly property real s: Math.min(1, spotlightContainer.scale)
                     readonly property bool active: overlayWindow.shouldShowSpotlight && spotlightContainer.opacity > 0
                     blurX: spotlightContainer.x + spotlightContainer.width * (1 - s) * 0.5
                     blurY: spotlightContainer.y + spotlightContainer.height * (1 - s) * 0.5
                     blurWidth: active ? spotlightContainer.width * s : 0
                     blurHeight: active ? spotlightContainer.height * s : 0
-                    blurRadius: Theme.cornerRadius
+                    blurRadius: spotlightContainer.cornerRadius
+                    blurBottomRadius: spotlightContainer.bottomRadius
                 }
 
                 onShouldShowSpotlightChanged: {
@@ -181,31 +202,39 @@ Scope {
                         if (overlayWindow.shouldShowSpotlight || niriOverviewScope.isClosing)
                             return;
                         if ([Qt.Key_Escape, Qt.Key_Return].includes(event.key)) {
-                            NiriService.toggleOverview();
+                            NiriService.closeOverview();
                             event.accepted = true;
                             return;
                         }
 
                         if (event.key === Qt.Key_Left) {
-                            NiriService.moveColumnLeft();
+                            NiriService.focusColumnLeft();
                             event.accepted = true;
                             return;
                         }
 
                         if (event.key === Qt.Key_Right) {
-                            NiriService.moveColumnRight();
+                            NiriService.focusColumnRight();
                             event.accepted = true;
                             return;
                         }
 
                         if (event.key === Qt.Key_Up) {
-                            NiriService.moveWorkspaceUp();
+                            NiriService.send({
+                                "Action": {
+                                    "FocusWorkspaceUp": {}
+                                }
+                            });
                             event.accepted = true;
                             return;
                         }
 
                         if (event.key === Qt.Key_Down) {
-                            NiriService.moveWorkspaceDown();
+                            NiriService.send({
+                                "Action": {
+                                    "FocusWorkspaceDown": {}
+                                }
+                            });
                             event.accepted = true;
                             return;
                         }
@@ -217,13 +246,13 @@ Scope {
 
                         if (event.isAutoRepeat || !event.text)
                             return;
-                        if (!launcherContent?.searchField)
+                        if (!overlayWindow.launcherContent?.searchField)
                             return;
                         const trimmedText = event.text.trim();
-                        launcherContent.searchField.text = trimmedText;
-                        launcherContent.controller.setSearchQuery(trimmedText);
+                        overlayWindow.launcherContent.searchField.text = trimmedText;
+                        overlayWindow.launcherContent.controller.setSearchQuery(trimmedText);
                         niriOverviewScope.showSpotlight(overlayWindow.screen.name);
-                        Qt.callLater(() => launcherContent.searchField.forceActiveFocus());
+                        Qt.callLater(() => overlayWindow.launcherContent.searchField.forceActiveFocus());
                         event.accepted = true;
                     }
                 }
@@ -231,11 +260,8 @@ Scope {
                 Item {
                     id: spotlightContainer
 
-                    // Connected-frame mode: dock flush against the emerge-side frame
-                    // edge and slide in from beyond that edge. In any other mode the
-                    // spotlight stays centered — identical to master.
                     readonly property string connectedEmergeSide: SettingsData.frameLauncherEmergeSide || "bottom"
-                    readonly property real _centerY: (parent.height - height) / 2
+                    readonly property real _centerY: overlayWindow.useSpotlightStyle ? LauncherMetrics.spotlightY(parent.height, 0, 0) : (parent.height - height) / 2
                     readonly property real _connectedRestY: {
                         if (!Theme.isConnectedEffect || !overlayWindow.screen)
                             return _centerY;
@@ -248,39 +274,69 @@ Scope {
                     y: {
                         if (!Theme.isConnectedEffect)
                             return Theme.snap(_centerY, overlayWindow.dpr);
-                        return Theme.snap(overlayWindow.shouldShowSpotlight ? _connectedRestY : _connectedCollapsedY, overlayWindow.dpr);
+                        const rest = _connectedRestY;
+                        const collapsed = _connectedCollapsedY;
+                        return Theme.snap(collapsed + (rest - collapsed) * slideMorph.value, overlayWindow.dpr);
                     }
 
-                    readonly property int baseWidth: {
-                        switch (SettingsData.dankLauncherV2Size) {
-                        case "micro":
-                            return 500;
-                        case "medium":
-                            return 720;
-                        case "large":
-                            return 860;
-                        default:
-                            return 620;
-                        }
-                    }
-                    readonly property int baseHeight: {
-                        switch (SettingsData.dankLauncherV2Size) {
-                        case "micro":
-                            return 480;
-                        case "medium":
-                            return 720;
-                        case "large":
-                            return 860;
-                        default:
-                            return 600;
-                        }
-                    }
-                    width: Math.min(baseWidth, overlayWindow.screen.width - 100)
-                    height: Math.min(baseHeight, overlayWindow.screen.height - 100)
+                    readonly property int baseWidth: overlayWindow.useSpotlightStyle ? LauncherMetrics.spotlightWidth : LauncherMetrics.sizeWidth(SettingsData.dankLauncherV2Size)
+                    readonly property int baseHeight: LauncherMetrics.sizeHeight(SettingsData.dankLauncherV2Size)
+                    readonly property real cornerRadius: overlayWindow.useSpotlightStyle ? LauncherMetrics.spotlightRadius(width) : Theme.windowRadius
+                    readonly property real bottomRadius: overlayWindow.useSpotlightStyle ? LauncherMetrics.spotlightBottomRadius(width, height) : cornerRadius
+                    width: Math.min(baseWidth, overlayWindow.screen.width - LauncherMetrics.screenMargin)
+                    height: overlayWindow.useSpotlightStyle ? Math.ceil(overlayWindow.launcherContent?.implicitHeight ?? LauncherMetrics.pillHeight) : Math.min(baseHeight, overlayWindow.screen.height - LauncherMetrics.screenMargin)
 
                     readonly property bool animatingOut: niriOverviewScope.isClosing && overlayWindow.isSpotlightScreen
 
-                    scale: Theme.isConnectedEffect ? 1.0 : (overlayWindow.shouldShowSpotlight ? 1.0 : 0.96)
+                    readonly property var scaleSpringParams: Theme.springPreset("fast", Theme.expressiveDurations.fast)
+                    readonly property var slideSpringParams: Theme.springPreset("default", Theme.popoutAnimationDuration)
+
+                    function checkExitSettled() {
+                        if (!spotlightContainer.animatingOut)
+                            return;
+                        const spring = Theme.isConnectedEffect ? slideMorph : scaleMorph;
+                        if (!spring.running)
+                            niriOverviewScope.resetState();
+                    }
+
+                    SpringMotion {
+                        id: scaleMorph
+                        enabled: !Theme.isConnectedEffect
+                        reducedMotion: Theme.expressiveDurations.fast <= 0
+                        positionEpsilon: 0.001
+                        velocityEpsilon: 0.001
+                        stiffness: spotlightContainer.scaleSpringParams.stiffness
+                        damping: spotlightContainer.scaleSpringParams.damping
+                        value: overlayWindow.shouldShowSpotlight ? 1 : 0
+
+                        Component.onCompleted: snapTo(overlayWindow.shouldShowSpotlight ? 1 : 0)
+                        onRunningChanged: spotlightContainer.checkExitSettled()
+                    }
+
+                    SpringMotion {
+                        id: slideMorph
+                        enabled: Theme.isConnectedEffect
+                        reducedMotion: Theme.popoutAnimationDuration <= 0
+                        positionEpsilon: 0.05
+                        velocityEpsilon: 0.05
+                        stiffness: spotlightContainer.slideSpringParams.stiffness
+                        damping: spotlightContainer.slideSpringParams.damping
+                        value: overlayWindow.shouldShowSpotlight ? 1 : 0
+
+                        Component.onCompleted: snapTo(overlayWindow.shouldShowSpotlight ? 1 : 0)
+                        onRunningChanged: spotlightContainer.checkExitSettled()
+                    }
+
+                    Connections {
+                        target: overlayWindow
+                        function onShouldShowSpotlightChanged() {
+                            scaleMorph.retarget(overlayWindow.shouldShowSpotlight ? 1 : 0);
+                            slideMorph.retarget(overlayWindow.shouldShowSpotlight ? 1 : 0);
+                            spotlightContainer.checkExitSettled();
+                        }
+                    }
+
+                    scale: Theme.isConnectedEffect ? 1.0 : (0.96 + 0.04 * scaleMorph.value)
                     opacity: Theme.isConnectedEffect ? 1 : (overlayWindow.shouldShowSpotlight ? 1 : 0)
                     visible: overlayWindow.shouldShowSpotlight || animatingOut
                     enabled: overlayWindow.shouldShowSpotlight
@@ -288,21 +344,6 @@ Scope {
                     layer.enabled: visible
                     layer.smooth: false
                     layer.textureSize: layer.enabled ? Qt.size(Math.round(width * overlayWindow.dpr), Math.round(height * overlayWindow.dpr)) : Qt.size(0, 0)
-
-                    Behavior on scale {
-                        id: scaleAnimation
-                        enabled: !Theme.isConnectedEffect
-                        NumberAnimation {
-                            duration: Theme.expressiveDurations.fast
-                            easing.type: Easing.BezierSpline
-                            easing.bezierCurve: spotlightContainer.visible ? Theme.expressiveCurves.expressiveFastSpatial : Theme.expressiveCurves.standardAccel
-                            onRunningChanged: {
-                                if (running || !spotlightContainer.animatingOut)
-                                    return;
-                                niriOverviewScope.resetState();
-                            }
-                        }
-                    }
 
                     Behavior on opacity {
                         enabled: !Theme.isConnectedEffect
@@ -313,68 +354,63 @@ Scope {
                         }
                     }
 
-                    // Connected-mode slide — only animates in full connected-frame mode.
-                    // Drives resetState when the slide-out finishes (scale/opacity are
-                    // static in connected mode so their onRunningChanged never fires).
-                    Behavior on y {
-                        enabled: Theme.isConnectedEffect
-                        NumberAnimation {
-                            duration: Theme.variantDuration(Theme.popoutAnimationDuration, overlayWindow.shouldShowSpotlight)
-                            easing.type: Easing.BezierSpline
-                            easing.bezierCurve: overlayWindow.shouldShowSpotlight ? Theme.variantPopoutEnterCurve : Theme.variantPopoutExitCurve
-                            onRunningChanged: {
-                                if (running || !spotlightContainer.animatingOut)
-                                    return;
-                                niriOverviewScope.resetState();
-                            }
-                        }
-                    }
-
                     Rectangle {
                         anchors.fill: parent
-                        color: Theme.withAlpha(Theme.surfaceContainer, Theme.popupTransparency)
-                        radius: Theme.cornerRadius
+                        color: Theme.floatingWindowSurface
+                        radius: spotlightContainer.cornerRadius
+                        bottomLeftRadius: spotlightContainer.bottomRadius
+                        bottomRightRadius: spotlightContainer.bottomRadius
                         border.color: Theme.outlineMedium
-                        border.width: 1
+                        border.width: overlayWindow.useSpotlightStyle ? 0 : 1
                     }
 
-                    LauncherContent {
-                        id: launcherContent
+                    FocusScope {
                         anchors.fill: parent
-                        anchors.margins: 0
+                        focus: true
 
-                        property var fakeParentModal: QtObject {
-                            property bool spotlightOpen: spotlightContainer.visible
-                            property bool isClosing: niriOverviewScope.isClosing
-                            function hide() {
-                                if (niriOverviewScope.searchActive) {
-                                    niriOverviewScope.hideSpotlight();
-                                    return;
-                                }
-                                NiriService.toggleOverview();
+                        Keys.onPressed: event => overlayWindow.launcherContent?.activeContextMenu?.handleKey(event)
+
+                        Keys.onEscapePressed: event => {
+                            overlayWindow.launcherContent?.activeContextMenu?.handleKey(event);
+                            if (!event.accepted)
+                                overlayWindow.launcherContent?.parentModal?.hide();
+                            event.accepted = true;
+                        }
+
+                        Loader {
+                            id: fullLauncherLoader
+                            anchors.fill: parent
+                            active: !overlayWindow.useSpotlightStyle
+                            sourceComponent: LauncherContent {
+                                parentModal: overlayWindow.fakeParentModal
+                            }
+                        }
+
+                        Loader {
+                            id: spotlightLauncherLoader
+                            anchors.fill: parent
+                            active: overlayWindow.useSpotlightStyle
+                            sourceComponent: SpotlightLauncherContent {
+                                parentModal: overlayWindow.fakeParentModal
                             }
                         }
 
                         Connections {
-                            target: launcherContent.searchField
+                            target: overlayWindow.launcherContent?.searchField ?? null
                             function onTextChanged() {
-                                if (launcherContent.searchField.text.length > 0 || !niriOverviewScope.searchActive)
+                                if (overlayWindow.launcherContent.searchField.text.length > 0 || !niriOverviewScope.searchActive)
                                     return;
                                 niriOverviewScope.hideSpotlight();
                             }
                         }
 
-                        Component.onCompleted: {
-                            parentModal = fakeParentModal;
-                        }
-
                         Connections {
-                            target: launcherContent.controller
+                            target: overlayWindow.launcherContent?.controller ?? null
                             function onItemExecuted() {
                                 niriOverviewScope.releaseKeyboard = true;
                             }
                             function onModeChanged(mode) {
-                                if (launcherContent.controller.autoSwitchedToFiles)
+                                if (overlayWindow.launcherContent.controller.autoSwitchedToFiles)
                                     return;
                                 SessionData.setNiriOverviewLastMode(mode);
                             }

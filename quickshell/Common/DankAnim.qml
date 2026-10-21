@@ -1,9 +1,7 @@
 import QtQuick
-import qs.Common
+import qs.DCommon.Common as DCommon
 
-// Reusable NumberAnimation wrapper
-NumberAnimation {
-    duration: Theme.expressiveDurations.normal
-    easing.type: Easing.BezierSpline
-    easing.bezierCurve: Theme.expressiveCurves.standard
+DCommon.DAnim {
+    id: shim
+    Component.onCompleted: Deprecation.type(shim, "DankAnim", "DAnim", "qs.DCommon.Common")
 }

@@ -1,6 +1,6 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginComponent {
@@ -54,17 +54,17 @@ PluginComponent {
         Row {
             spacing: Theme.spacingXS
 
-            DankIcon {
+            DIcon {
                 name: "widgets"
                 color: Theme.primary
-                font.pixelSize: Theme.iconSize - 6
+                size: root.iconSize
                 anchors.verticalCenter: parent.verticalCenter
             }
 
             StyledText {
                 text: popoutNames[selectedPopout] || "Popouts"
                 color: Theme.primary
-                font.pixelSize: Theme.fontSizeMedium
+                font.pixelSize: root.textSize
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
@@ -74,17 +74,17 @@ PluginComponent {
         Column {
             spacing: Theme.spacingXS
 
-            DankIcon {
+            DIcon {
                 name: "widgets"
                 color: Theme.primary
-                font.pixelSize: Theme.iconSize - 6
+                size: root.iconSize
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
             StyledText {
                 text: popoutNames[selectedPopout] || "Popouts"
                 color: Theme.primary
-                font.pixelSize: Theme.fontSizeSmall
+                font.pixelSize: root.textSize
                 anchors.horizontalCenter: parent.horizontalCenter
                 horizontalAlignment: Text.AlignHCenter
             }

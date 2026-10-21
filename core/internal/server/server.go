@@ -1,46 +1,45 @@
 package server
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
+	"errors"
 	"fmt"
-	"net"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
+	"runtime/debug"
+	"slices"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/geolocation"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/apppicker"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/bluez"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/brightness"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/clipboard"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/cups"
-	serverDbus "github.com/AvengeMedia/DankMaterialShell/core/internal/server/dbus"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/dwl"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/evdev"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/extworkspace"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/freedesktop"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/location"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/loginctl"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/network"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/sysupdate"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/tailscale"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/thememode"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/trayrecovery"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/wayland"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/wlcontext"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/wlroutput"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/syncmap"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-go/syncmap"
+	"github.com/duxlabs-dev/dux-shell/core/internal/geolocation"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/matugen"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/apppicker"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/bluez"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/brightness"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/clipboard"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/cups"
+	serverDbus "github.com/duxlabs-dev/dux-shell/core/internal/server/dbus"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/evdev"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/freedesktop"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/location"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/loginctl"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/network"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/notifyactions"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/sysupdate"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/tailscale"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/thememode"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/trayrecovery"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/wallpaper"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/wayland"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/wellbeing"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/wlcontext"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/wlroutput"
+	"github.com/duxlabs-dev/dux-shell/core/internal/systemd"
+	"github.com/duxlabs-dev/dux-shell/core/internal/utils"
 )
 
-const APIVersion = 24
+const APIVersion = 38
 
 var CLIVersion = "dev"
 
@@ -67,8 +66,6 @@ var bluezManager *bluez.Manager
 var appPickerManager *apppicker.Manager
 var cupsManager *cups.Manager
 var tailscaleManager *tailscale.Manager
-var dwlManager *dwl.Manager
-var extWorkspaceManager *extworkspace.Manager
 var brightnessManager *brightness.Manager
 var wlrOutputManager *wlroutput.Manager
 var evdevManager *evdev.Manager
@@ -76,87 +73,25 @@ var clipboardManager *clipboard.Manager
 var dbusManager *serverDbus.Manager
 var wlContext *wlcontext.SharedContext
 var themeModeManager *thememode.Manager
+var wallpaperManager *wallpaper.Manager
 var trayRecoveryManager *trayrecovery.Manager
 var locationManager *location.Manager
 var sysUpdateManager *sysupdate.Manager
+var notifyActionsManager *notifyactions.Manager
+var wellbeingManager *wellbeing.Manager
 var geoClientInstance geolocation.Client
 
 const dbusClientID = "dms-dbus-client"
 
 var capabilitySubscribers syncmap.Map[string, chan ServerInfo]
-var cupsSubscribers syncmap.Map[string, bool]
-var cupsSubscriberCount atomic.Int32
-var extWorkspaceAvailable atomic.Bool
-var extWorkspaceInitMutex sync.Mutex
+var cupsMu sync.Mutex
+var cupsSubscriberCount int
+var cupsEverAvailable bool
 
-func getSocketDir() string {
-	if runtime := os.Getenv("XDG_RUNTIME_DIR"); runtime != "" {
-		return runtime
-	}
-
-	if os.Getuid() == 0 {
-		if _, err := os.Stat("/run"); err == nil {
-			return "/run/dankdots"
-		}
-		return "/var/run/dankdots"
-	}
-
-	return os.TempDir()
-}
+var appPaths = utils.App()
 
 func GetSocketPath() string {
-	return filepath.Join(getSocketDir(), fmt.Sprintf("danklinux-%d.sock", os.Getpid()))
-}
-
-func FindSocket() (string, error) {
-	dir := getSocketDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", err
-	}
-
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "danklinux-") && strings.HasSuffix(entry.Name(), ".sock") {
-			return filepath.Join(dir, entry.Name()), nil
-		}
-	}
-	return "", fmt.Errorf("no dms socket found")
-}
-
-func cleanupStaleSockets() {
-	dir := getSocketDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "danklinux-") || !strings.HasSuffix(entry.Name(), ".sock") {
-			continue
-		}
-
-		pidStr := strings.TrimPrefix(entry.Name(), "danklinux-")
-		pidStr = strings.TrimSuffix(pidStr, ".sock")
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
-			continue
-		}
-
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			socketPath := filepath.Join(dir, entry.Name())
-			os.Remove(socketPath)
-			log.Debugf("Removed stale socket: %s", socketPath)
-			continue
-		}
-
-		err = process.Signal(syscall.Signal(0))
-		if err != nil {
-			socketPath := filepath.Join(dir, entry.Name())
-			os.Remove(socketPath)
-			log.Debugf("Removed stale socket: %s", socketPath)
-		}
-	}
+	return appPaths.SocketPath()
 }
 
 func InitializeNetworkManager() error {
@@ -193,6 +128,7 @@ func InitializeFreedeskManager() error {
 	}
 
 	freedesktopManager = manager
+	matugen.SetColorSchemeEchoHook(manager.ExpectColorSchemeEcho)
 
 	log.Info("Freedesktop manager initialized")
 	return nil
@@ -210,7 +146,7 @@ func InitializeWaylandManager() error {
 		wlContext = ctx
 	}
 
-	config := wayland.DefaultConfig()
+	config := wayland.LoadConfig()
 	manager, err := wayland.NewManager(wlContext.Display(), config)
 	if err != nil {
 		log.Errorf("Failed to initialize wayland manager: %v", err)
@@ -243,41 +179,60 @@ func InitializeAppPickerManager() error {
 	return nil
 }
 
-func InitializeCupsManager() error {
+// Reports whether the cups capability was newly gained, not whether a manager was created.
+func initializeCupsManagerLocked() (bool, error) {
+	if cupsManager != nil {
+		return false, nil
+	}
 	manager, err := cups.NewManager()
 	if err != nil {
 		log.Warnf("Failed to initialize cups manager: %v", err)
-		return err
+		return false, err
 	}
-
 	cupsManager = manager
-
 	log.Info("CUPS manager initialized")
-	return nil
+	gained := !cupsEverAvailable
+	cupsEverAvailable = true
+	return gained, nil
 }
 
-func InitializeDwlManager() error {
-	log.Info("Attempting to initialize DWL IPC...")
-
-	if wlContext == nil {
-		ctx, err := wlcontext.New()
-		if err != nil {
-			log.Errorf("Failed to create shared Wayland context: %v", err)
-			return err
-		}
-		wlContext = ctx
-	}
-
-	manager, err := dwl.NewManager(wlContext.Display())
+func ensureCupsManager() (*cups.Manager, error) {
+	cupsMu.Lock()
+	gained, err := initializeCupsManagerLocked()
+	mgr := cupsManager
+	cupsMu.Unlock()
 	if err != nil {
-		log.Debug("Failed to initialize dwl manager: %v", err)
-		return err
+		return nil, err
 	}
+	if gained {
+		notifyCapabilityChange()
+	}
+	return mgr, nil
+}
 
-	dwlManager = manager
+// Sticky: the manager is torn down when nobody is subscribed, but CUPS itself stays available.
+func cupsAvailable() bool {
+	cupsMu.Lock()
+	defer cupsMu.Unlock()
+	return cupsEverAvailable
+}
 
-	log.Info("DWL IPC initialized successfully")
-	return nil
+func releaseCupsSubscriber() {
+	cupsMu.Lock()
+	if cupsSubscriberCount > 0 {
+		cupsSubscriberCount--
+	}
+	var mgr *cups.Manager
+	if cupsSubscriberCount == 0 && cupsManager != nil {
+		mgr = cupsManager
+		cupsManager = nil
+	}
+	cupsMu.Unlock()
+	if mgr == nil {
+		return
+	}
+	log.Info("Last CUPS subscriber disconnected, shutting down CUPS manager")
+	mgr.Close()
 }
 
 func InitializeBrightnessManager() error {
@@ -288,32 +243,11 @@ func InitializeBrightnessManager() error {
 	}
 
 	brightnessManager = manager
+	if waylandManager != nil {
+		manager.AttachGamma(waylandManager)
+	}
 
 	log.Info("Brightness manager initialized")
-	return nil
-}
-
-func InitializeExtWorkspaceManager() error {
-	log.Info("Attempting to initialize ExtWorkspace...")
-
-	if wlContext == nil {
-		ctx, err := wlcontext.New()
-		if err != nil {
-			log.Errorf("Failed to create shared Wayland context: %v", err)
-			return err
-		}
-		wlContext = ctx
-	}
-
-	manager, err := extworkspace.NewManager(wlContext.Display())
-	if err != nil {
-		log.Debug("Failed to initialize extworkspace manager: %v", err)
-		return err
-	}
-
-	extWorkspaceManager = manager
-
-	log.Info("ExtWorkspace initialized successfully")
 	return nil
 }
 
@@ -400,6 +334,13 @@ func InitializeThemeModeManager() error {
 	return nil
 }
 
+func InitializeWallpaperManager() error {
+	wallpaperManager = wallpaper.NewManager()
+
+	log.Info("Wallpaper rotation scheduler initialized")
+	return nil
+}
+
 func InitializeTrayRecoveryManager() error {
 	manager, err := trayrecovery.NewManager()
 	if err != nil {
@@ -407,8 +348,19 @@ func InitializeTrayRecoveryManager() error {
 	}
 
 	trayRecoveryManager = manager
+	manager.WatchWatcherOwner()
 
 	log.Info("TrayRecovery manager initialized")
+	return nil
+}
+
+func InitializeWellbeingManager() error {
+	manager, err := wellbeing.NewManager()
+	if err != nil {
+		return err
+	}
+	wellbeingManager = manager
+	log.Info("Wellbeing manager initialized")
 	return nil
 }
 
@@ -425,8 +377,18 @@ func InitializeLocationManager(geoClient geolocation.Client) error {
 	return nil
 }
 
+func InitializeNotifyActionsManager() error {
+	manager, err := notifyactions.NewManager()
+	if err != nil {
+		return err
+	}
+	notifyActionsManager = manager
+	log.Info("Notification action manager initialized")
+	return nil
+}
+
 func InitializeSysUpdateManager() error {
-	manager, err := sysupdate.NewManager()
+	manager, err := sysupdate.NewManager(CLIVersion)
 	if err != nil {
 		log.Warnf("Failed to initialize sysupdate manager: %v", err)
 		return err
@@ -438,30 +400,34 @@ func InitializeSysUpdateManager() error {
 	return nil
 }
 
-func handleConnection(conn net.Conn) {
-	defer conn.Close()
-
-	caps := getCapabilities()
-	capsData, _ := json.Marshal(caps)
-	conn.Write(capsData)
-	conn.Write([]byte("\n"))
-	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-
-		var req models.Request
-		if err := json.Unmarshal(line, &req); err != nil {
-			log.Warnf("handleConnection: Failed to unmarshal JSON: %v, line: %s", err, string(line))
-			models.RespondError(conn, 0, "invalid json")
-			continue
-		}
-
-		go RouteRequest(conn, req)
+func routeHandler(mux *ipc.Mux) ipc.Handler {
+	return func(ctx context.Context, conn *ipc.ConnWriter, req ipc.Request, _ *ipc.Subscriber) {
+		routeRequestRecovered(ctx, conn, req, mux)
 	}
+}
+
+func subscribeHandler(ctx context.Context, conn *ipc.ConnWriter, req ipc.Request, _ *ipc.Subscriber) {
+	switch req.Method {
+	case "subscribe":
+		routeRequestRecovered(ctx, conn, req, requestMux)
+	default:
+		conn.RespondError(req.ID, fmt.Sprintf("unknown method: %s", req.Method))
+	}
+}
+
+// routeRequestRecovered keeps a panicking handler from taking down the whole daemon
+func routeRequestRecovered(ctx context.Context, conn *ipc.ConnWriter, req ipc.Request, mux *ipc.Mux) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("RouteRequest panic recovered: method=%s panic=%v\n%s", req.Method, r, debug.Stack())
+			conn.RespondError(req.ID, "internal server error")
+		}
+	}()
+	mux.ServeIPC(ctx, conn, req, nil)
 }
 
 func getCapabilities() Capabilities {
-	caps := []string{"plugins"}
+	caps := []string{"plugins", "dgop", "lyrics", "lyrics.plugins"}
 
 	if networkManager != nil {
 		caps = append(caps, "network")
@@ -487,20 +453,12 @@ func getCapabilities() Capabilities {
 		caps = append(caps, "browser")
 	}
 
-	if cupsManager != nil {
+	if cupsAvailable() {
 		caps = append(caps, "cups")
 	}
 
 	if tailscaleManager != nil && tailscaleManager.IsAvailable() {
 		caps = append(caps, "tailscale")
-	}
-
-	if dwlManager != nil {
-		caps = append(caps, "dwl")
-	}
-
-	if extWorkspaceAvailable.Load() {
-		caps = append(caps, "extworkspace")
 	}
 
 	if brightnessManager != nil {
@@ -523,84 +481,18 @@ func getCapabilities() Capabilities {
 		caps = append(caps, "theme.auto")
 	}
 
-	if dbusManager != nil {
-		caps = append(caps, "dbus")
-	}
-
-	if sysUpdateManager != nil {
-		caps = append(caps, "sysupdate")
-	}
-
-	return Capabilities{Capabilities: caps}
-}
-
-func getServerInfo() ServerInfo {
-	caps := []string{"plugins"}
-
-	if networkManager != nil {
-		caps = append(caps, "network")
-	}
-
-	if loginctlManager != nil {
-		caps = append(caps, "loginctl")
-	}
-
-	if freedesktopManager != nil {
-		caps = append(caps, "freedesktop")
-	}
-
-	if waylandManager != nil {
-		caps = append(caps, "gamma")
-	}
-
-	if bluezManager != nil {
-		caps = append(caps, "bluetooth")
-	}
-
-	if appPickerManager != nil {
-		caps = append(caps, "browser")
-	}
-
-	if cupsManager != nil {
-		caps = append(caps, "cups")
-	}
-
-	if tailscaleManager != nil && tailscaleManager.IsAvailable() {
-		caps = append(caps, "tailscale")
-	}
-
-	if dwlManager != nil {
-		caps = append(caps, "dwl")
-	}
-
-	if extWorkspaceAvailable.Load() {
-		caps = append(caps, "extworkspace")
-	}
-
-	if brightnessManager != nil {
-		caps = append(caps, "brightness")
-	}
-
-	if wlrOutputManager != nil {
-		caps = append(caps, "wlroutput")
-	}
-
-	if evdevManager != nil {
-		caps = append(caps, "evdev")
-	}
-
-	if clipboardManager != nil {
-		caps = append(caps, "clipboard")
-	}
-
-	if themeModeManager != nil {
-		caps = append(caps, "theme.auto")
+	if wallpaperManager != nil {
+		caps = append(caps, "wallpaper")
 	}
 
 	if locationManager != nil {
 		caps = append(caps, "location")
 	}
 
+	if wellbeingManager != nil {
+		caps = append(caps, "wellbeing")
+	}
+
 	if dbusManager != nil {
 		caps = append(caps, "dbus")
 	}
@@ -609,10 +501,18 @@ func getServerInfo() ServerInfo {
 		caps = append(caps, "sysupdate")
 	}
 
+	if filesService != nil {
+		caps = append(caps, "files")
+	}
+
+	return Capabilities{Capabilities: caps}
+}
+
+func getServerInfo() ServerInfo {
 	return ServerInfo{
 		APIVersion:   APIVersion,
 		CLIVersion:   CLIVersion,
-		Capabilities: caps,
+		Capabilities: getCapabilities().Capabilities,
 	}
 }
 
@@ -627,11 +527,20 @@ func notifyCapabilityChange() {
 	})
 }
 
-func handleSubscribe(conn net.Conn, req models.Request) {
+func serviceSubscribed(services []string, service string, includeAll bool) bool {
+	return slices.Contains(services, service) || includeAll && slices.Contains(services, "all")
+}
+
+func handleSubscribe(ctx context.Context, conn *ipc.ConnWriter, req ipc.Request) {
 	clientID := fmt.Sprintf("meta-client-%p", conn)
 
+	dbusClient := dbusClientID
+	if id, ok := req.Get[string]("clientId"); ok && id != "" {
+		dbusClient = id
+	}
+
 	var services []string
-	if servicesParam, ok := models.Get[[]any](req, "services"); ok {
+	if servicesParam, ok := req.Get[[]any]("services"); ok {
 		for _, s := range servicesParam {
 			if str, ok := s.(string); ok {
 				services = append(services, str)
@@ -643,726 +552,237 @@ func handleSubscribe(conn net.Conn, req models.Request) {
 		services = []string{"all"}
 	}
 
-	subscribeAll := false
-	for _, s := range services {
-		if s == "all" {
-			subscribeAll = true
-			break
-		}
-	}
+	subscribeAll := slices.Contains(services, "all")
 
 	var wg sync.WaitGroup
 	eventChan := make(chan ServiceEvent, 256)
 	stopChan := make(chan struct{})
+	stop := sync.OnceFunc(func() { close(stopChan) })
+	stopContext := context.AfterFunc(ctx, stop)
+	defer func() {
+		stopContext()
+		stop()
+		wg.Wait()
+	}()
 
 	capChan := make(chan ServerInfo, 64)
 	capabilitySubscribers.Store(clientID+"-capabilities", capChan)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer capabilitySubscribers.Delete(clientID + "-capabilities")
-
-		for {
-			select {
-			case info, ok := <-capChan:
-				if !ok {
-					return
-				}
-				select {
-				case eventChan <- ServiceEvent{Service: "server", Data: info}:
-				case <-stopChan:
-					return
-				}
-			case <-stopChan:
-				return
-			}
-		}
-	}()
+	forwardSubscription(&wg, eventChan, stopChan, "server", capChan, func() {
+		capabilitySubscribers.Delete(clientID + "-capabilities")
+	}, nil)
 
 	shouldSubscribe := func(service string) bool {
-		if subscribeAll {
-			return true
-		}
-		for _, s := range services {
-			if s == service {
-				return true
-			}
-		}
-		return false
+		return serviceSubscribed(services, service, subscribeAll)
 	}
 
 	if shouldSubscribe("network") && networkManager != nil {
-		wg.Add(1)
-		netChan := networkManager.Subscribe(clientID + "-network")
-		go func() {
-			defer wg.Done()
-			defer networkManager.Unsubscribe(clientID + "-network")
-
-			initialState := networkManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "network", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-netChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "network", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := networkManager
+		id := clientID + "-network"
+		states := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "network", states, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
 	}
 
 	if shouldSubscribe("network.credentials") && networkManager != nil {
-		wg.Add(1)
-		credChan := networkManager.SubscribeCredentials(clientID + "-credentials")
-		go func() {
-			defer wg.Done()
-			defer networkManager.UnsubscribeCredentials(clientID + "-credentials")
-
-			for {
-				select {
-				case prompt, ok := <-credChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "network.credentials", Data: prompt}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := networkManager
+		id := clientID + "-credentials"
+		prompts := mgr.SubscribeCredentials(id)
+		forwardSubscription(&wg, eventChan, stopChan, "network.credentials", prompts, func() {
+			mgr.UnsubscribeCredentials(id)
+		}, nil)
 	}
 
 	if shouldSubscribe("loginctl") && loginctlManager != nil {
-		wg.Add(1)
-		loginChan := loginctlManager.Subscribe(clientID + "-loginctl")
-		go func() {
-			defer wg.Done()
-			defer loginctlManager.Unsubscribe(clientID + "-loginctl")
-
-			initialState := loginctlManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "loginctl", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-loginChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "loginctl", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := loginctlManager
+		id := clientID + "-loginctl"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "loginctl", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
 	}
 
 	if shouldSubscribe("freedesktop") && freedesktopManager != nil {
-		wg.Add(1)
-		freedesktopChan := freedesktopManager.Subscribe(clientID + "-freedesktop")
-		go func() {
-			defer wg.Done()
-			defer freedesktopManager.Unsubscribe(clientID + "-freedesktop")
-
-			initialState := freedesktopManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "freedesktop", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-freedesktopChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "freedesktop", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := freedesktopManager
+		id := clientID + "-freedesktop"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "freedesktop", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
 	}
 
 	if shouldSubscribe("freedesktop.screensaver") && freedesktopManager != nil {
-		wg.Add(1)
-		screensaverChan := freedesktopManager.SubscribeScreensaver(clientID + "-screensaver")
-		go func() {
-			defer wg.Done()
-			defer freedesktopManager.UnsubscribeScreensaver(clientID + "-screensaver")
-
-			initialState := freedesktopManager.GetScreensaverState()
-			select {
-			case eventChan <- ServiceEvent{Service: "freedesktop.screensaver", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-screensaverChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "freedesktop.screensaver", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := freedesktopManager
+		id := clientID + "-screensaver"
+		source := mgr.SubscribeScreensaver(id)
+		forwardSubscription(&wg, eventChan, stopChan, "freedesktop.screensaver", source, func() {
+			mgr.UnsubscribeScreensaver(id)
+		}, mgr.GetScreensaverState)
 	}
 
 	if shouldSubscribe("gamma") && waylandManager != nil {
-		wg.Add(1)
-		waylandChan := waylandManager.Subscribe(clientID + "-gamma")
-		go func() {
-			defer wg.Done()
-			defer waylandManager.Unsubscribe(clientID + "-gamma")
-
-			initialState := waylandManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "gamma", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-waylandChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "gamma", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := waylandManager
+		id := clientID + "-gamma"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "gamma", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
 	}
 
 	if shouldSubscribe("theme.auto") && themeModeManager != nil {
-		wg.Add(1)
-		themeAutoChan := themeModeManager.Subscribe(clientID + "-theme-auto")
-		go func() {
-			defer wg.Done()
-			defer themeModeManager.Unsubscribe(clientID + "-theme-auto")
+		mgr := themeModeManager
+		id := clientID + "-theme-auto"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "theme.auto", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
+	}
 
-			initialState := themeModeManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "theme.auto", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-themeAutoChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "theme.auto", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+	if shouldSubscribe("wallpaper") && wallpaperManager != nil {
+		mgr := wallpaperManager
+		id := clientID + "-wallpaper"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "wallpaper", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
 	}
 
 	if shouldSubscribe("bluetooth") && bluezManager != nil {
-		wg.Add(1)
-		bluezChan := bluezManager.Subscribe(clientID + "-bluetooth")
-		go func() {
-			defer wg.Done()
-			defer bluezManager.Unsubscribe(clientID + "-bluetooth")
+		mgr := bluezManager
+		id := clientID + "-bluetooth"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "bluetooth", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
+	}
 
-			initialState := bluezManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "bluetooth", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-bluezChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "bluetooth", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+	if serviceSubscribed(services, "mpris.command", false) && bluezManager != nil {
+		mgr := bluezManager
+		id := clientID + "-mpris-command"
+		commands, err := mgr.SubscribePlayerCommands(id)
+		if err != nil {
+			log.Warnf("MPRIS command subscription rejected: %v", err)
+		} else {
+			forwardSubscription(&wg, eventChan, stopChan, "mpris.command", commands, func() {
+				mgr.UnsubscribePlayerCommands(id)
+			}, nil)
+		}
 	}
 
 	if shouldSubscribe("bluetooth.pairing") && bluezManager != nil {
-		wg.Add(1)
-		pairingChan := bluezManager.SubscribePairing(clientID + "-pairing")
-		go func() {
-			defer wg.Done()
-			defer bluezManager.UnsubscribePairing(clientID + "-pairing")
-
-			for {
-				select {
-				case prompt, ok := <-pairingChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "bluetooth.pairing", Data: prompt}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := bluezManager
+		id := clientID + "-pairing"
+		source := mgr.SubscribePairing(id)
+		forwardSubscription(&wg, eventChan, stopChan, "bluetooth.pairing", source, func() {
+			mgr.UnsubscribePairing(id)
+		}, nil)
 	}
 
 	if shouldSubscribe("browser") && appPickerManager != nil {
-		wg.Add(1)
-		appPickerChan := appPickerManager.Subscribe(clientID + "-browser")
-		go func() {
-			defer wg.Done()
-			defer appPickerManager.Unsubscribe(clientID + "-browser")
-
-			for {
-				select {
-				case event, ok := <-appPickerChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "browser.open_requested", Data: event}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := appPickerManager
+		id := clientID + "-browser"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "browser.open_requested", source, func() {
+			mgr.Unsubscribe(id)
+		}, nil)
 	}
 
 	if shouldSubscribe("cups") {
-		cupsSubscribers.Store(clientID+"-cups", true)
-		count := cupsSubscriberCount.Add(1)
-
-		if count == 1 {
-			if err := InitializeCupsManager(); err != nil {
-				log.Warnf("Failed to initialize CUPS manager for subscription: %v", err)
-			} else {
-				notifyCapabilityChange()
-			}
-		}
-
-		if cupsManager != nil {
-			wg.Add(1)
-			cupsChan := cupsManager.Subscribe(clientID + "-cups")
-			go func() {
-				defer wg.Done()
-				defer func() {
-					cupsManager.Unsubscribe(clientID + "-cups")
-					cupsSubscribers.Delete(clientID + "-cups")
-					count := cupsSubscriberCount.Add(-1)
-
-					if count == 0 {
-						log.Info("Last CUPS subscriber disconnected, shutting down CUPS manager")
-						if cupsManager != nil {
-							cupsManager.Close()
-							cupsManager = nil
-							notifyCapabilityChange()
-						}
-					}
-				}()
-
-				initialState := cupsManager.GetState()
-				select {
-				case eventChan <- ServiceEvent{Service: "cups", Data: initialState}:
-				case <-stopChan:
-					return
-				}
-
-				for {
-					select {
-					case state, ok := <-cupsChan:
-						if !ok {
-							return
-						}
-						select {
-						case eventChan <- ServiceEvent{Service: "cups", Data: state}:
-						case <-stopChan:
-							return
-						}
-					case <-stopChan:
-						return
-					}
-				}
-			}()
-		}
+		subscribeCups(&wg, eventChan, stopChan, clientID)
 	}
 
 	if shouldSubscribe("tailscale") && tailscaleManager != nil && tailscaleManager.IsAvailable() {
-		wg.Add(1)
-		tailscaleChan := tailscaleManager.Subscribe(clientID + "-tailscale")
-		go func() {
-			defer wg.Done()
-			defer tailscaleManager.Unsubscribe(clientID + "-tailscale")
-
-			initialState := tailscaleManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "tailscale", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-tailscaleChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "tailscale", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
-	}
-
-	if shouldSubscribe("dwl") && dwlManager != nil {
-		wg.Add(1)
-		dwlChan := dwlManager.Subscribe(clientID + "-dwl")
-		go func() {
-			defer wg.Done()
-			defer dwlManager.Unsubscribe(clientID + "-dwl")
-
-			initialState := dwlManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "dwl", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-dwlChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "dwl", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
-	}
-
-	if shouldSubscribe("extworkspace") {
-		if extWorkspaceManager == nil && extWorkspaceAvailable.Load() {
-			extWorkspaceInitMutex.Lock()
-			if extWorkspaceManager == nil {
-				if err := InitializeExtWorkspaceManager(); err != nil {
-					log.Warnf("Failed to initialize ExtWorkspace manager for subscription: %v", err)
-				}
-			}
-			extWorkspaceInitMutex.Unlock()
-		}
-
-		if extWorkspaceManager != nil {
-			wg.Add(1)
-			extWorkspaceChan := extWorkspaceManager.Subscribe(clientID + "-extworkspace")
-			go func() {
-				defer wg.Done()
-				defer extWorkspaceManager.Unsubscribe(clientID + "-extworkspace")
-
-				initialState := extWorkspaceManager.GetState()
-				select {
-				case eventChan <- ServiceEvent{Service: "extworkspace", Data: initialState}:
-				case <-stopChan:
-					return
-				}
-
-				for {
-					select {
-					case state, ok := <-extWorkspaceChan:
-						if !ok {
-							return
-						}
-						select {
-						case eventChan <- ServiceEvent{Service: "extworkspace", Data: state}:
-						case <-stopChan:
-							return
-						}
-					case <-stopChan:
-						return
-					}
-				}
-			}()
-		}
+		mgr := tailscaleManager
+		id := clientID + "-tailscale"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "tailscale", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
 	}
 
 	if shouldSubscribe("brightness") && brightnessManager != nil {
-		wg.Add(2)
-		brightnessStateChan := brightnessManager.Subscribe(clientID + "-brightness-state")
-		brightnessUpdateChan := brightnessManager.SubscribeUpdates(clientID + "-brightness-updates")
-
-		go func() {
-			defer wg.Done()
-			defer brightnessManager.Unsubscribe(clientID + "-brightness-state")
-
-			initialState := brightnessManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "brightness", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-brightnessStateChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "brightness", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
-
-		go func() {
-			defer wg.Done()
-			defer brightnessManager.UnsubscribeUpdates(clientID + "-brightness-updates")
-
-			for {
-				select {
-				case update, ok := <-brightnessUpdateChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "brightness.update", Data: update}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := brightnessManager
+		stateID := clientID + "-brightness-state"
+		updateID := clientID + "-brightness-updates"
+		states := mgr.Subscribe(stateID)
+		updates := mgr.SubscribeUpdates(updateID)
+		forwardSubscription(&wg, eventChan, stopChan, "brightness", states, func() {
+			mgr.Unsubscribe(stateID)
+		}, mgr.GetState)
+		forwardSubscription(&wg, eventChan, stopChan, "brightness.update", updates, func() {
+			mgr.UnsubscribeUpdates(updateID)
+		}, nil)
 	}
 
 	if shouldSubscribe("wlroutput") && wlrOutputManager != nil {
-		wg.Add(1)
-		wlrOutputChan := wlrOutputManager.Subscribe(clientID + "-wlroutput")
-		go func() {
-			defer wg.Done()
-			defer wlrOutputManager.Unsubscribe(clientID + "-wlroutput")
-
-			initialState := wlrOutputManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "wlroutput", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-wlrOutputChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "wlroutput", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := wlrOutputManager
+		id := clientID + "-wlroutput"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "wlroutput", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
 	}
 
 	if shouldSubscribe("evdev") && evdevManager != nil {
-		wg.Add(1)
-		evdevChan := evdevManager.Subscribe(clientID + "-evdev")
-		go func() {
-			defer wg.Done()
-			defer evdevManager.Unsubscribe(clientID + "-evdev")
-
-			initialState := evdevManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "evdev", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-evdevChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "evdev", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := evdevManager
+		id := clientID + "-evdev"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "evdev", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
 	}
 
 	if shouldSubscribe("clipboard") && clipboardManager != nil {
-		wg.Add(1)
-		clipboardChan := clipboardManager.Subscribe(clientID + "-clipboard")
-		go func() {
-			defer wg.Done()
-			defer clipboardManager.Unsubscribe(clientID + "-clipboard")
+		mgr := clipboardManager
+		id := clientID + "-clipboard"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "clipboard", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
+	}
 
-			initialState := clipboardManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "clipboard", Data: initialState}:
-			case <-stopChan:
-				return
-			}
+	if shouldSubscribe("location") && locationManager != nil {
+		mgr := locationManager
+		id := clientID + "-location"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "location", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
+	}
 
-			for {
-				select {
-				case state, ok := <-clipboardChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "clipboard", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+	if shouldSubscribe("wellbeing") && wellbeingManager != nil {
+		mgr := wellbeingManager
+		id := clientID + "-wellbeing"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "wellbeing", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.Snapshot)
 	}
 
 	if shouldSubscribe("sysupdate") && sysUpdateManager != nil {
-		wg.Add(1)
-		sysupdateChan := sysUpdateManager.Subscribe(clientID + "-sysupdate")
-		go func() {
-			defer wg.Done()
-			defer sysUpdateManager.Unsubscribe(clientID + "-sysupdate")
+		mgr := sysUpdateManager
+		id := clientID + "-sysupdate"
+		source := mgr.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "sysupdate", source, func() {
+			mgr.Unsubscribe(id)
+		}, mgr.GetState)
+	}
 
-			initialState := sysUpdateManager.GetState()
-			select {
-			case eventChan <- ServiceEvent{Service: "sysupdate", Data: initialState}:
-			case <-stopChan:
-				return
-			}
-
-			for {
-				select {
-				case state, ok := <-sysupdateChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "sysupdate", Data: state}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+	if shouldSubscribe("files") && filesService != nil {
+		id := clientID + "-files"
+		source := filesEvents.Subscribe(id)
+		forwardSubscription(&wg, eventChan, stopChan, "files", source, func() {
+			filesEvents.Unsubscribe(id)
+		}, nil)
 	}
 
 	if shouldSubscribe("dbus") && dbusManager != nil {
-		wg.Add(1)
-		dbusChan := dbusManager.SubscribeSignals(dbusClientID)
-		go func() {
-			defer wg.Done()
-			defer dbusManager.UnsubscribeSignals(dbusClientID)
-
-			for {
-				select {
-				case event, ok := <-dbusChan:
-					if !ok {
-						return
-					}
-					select {
-					case eventChan <- ServiceEvent{Service: "dbus", Data: event}:
-					case <-stopChan:
-						return
-					}
-				case <-stopChan:
-					return
-				}
-			}
-		}()
+		mgr := dbusManager
+		events := mgr.SubscribeSignals(dbusClient)
+		forwardSubscription(&wg, eventChan, stopChan, "dbus", events, func() {
+			mgr.UnsubscribeSignals(dbusClient)
+		}, nil)
 	}
 
 	go func() {
@@ -1371,23 +791,55 @@ func handleSubscribe(conn net.Conn, req models.Request) {
 	}()
 
 	info := getServerInfo()
-	if err := json.NewEncoder(conn).Encode(models.Response[ServiceEvent]{
+	if err := conn.WriteResponse(ipc.Response[ServiceEvent]{
 		ID:     req.ID,
 		Result: &ServiceEvent{Service: "server", Data: info},
 	}); err != nil {
-		close(stopChan)
 		return
 	}
 
-	for event := range eventChan {
-		if err := json.NewEncoder(conn).Encode(models.Response[ServiceEvent]{
-			ID:     req.ID,
-			Result: &event,
-		}); err != nil {
-			close(stopChan)
+	for {
+		select {
+		case <-ctx.Done():
 			return
+		case event, ok := <-eventChan:
+			if !ok {
+				return
+			}
+			if err := conn.WriteResponse(ipc.Response[ServiceEvent]{
+				ID:     req.ID,
+				Result: &event,
+			}); err != nil {
+				return
+			}
 		}
 	}
+}
+
+func subscribeCups(wg *sync.WaitGroup, events chan<- ServiceEvent, stop <-chan struct{}, clientID string) {
+	cupsMu.Lock()
+	cupsSubscriberCount++
+	gained, err := initializeCupsManagerLocked()
+	mgr := cupsManager
+	cupsMu.Unlock()
+
+	if err != nil {
+		log.Warnf("Failed to initialize CUPS manager for subscription: %v", err)
+	}
+	if gained {
+		notifyCapabilityChange()
+	}
+	if mgr == nil {
+		releaseCupsSubscriber()
+		return
+	}
+
+	id := clientID + "-cups"
+	states := mgr.Subscribe(id)
+	forwardSubscription(wg, events, stop, "cups", states, func() {
+		mgr.Unsubscribe(id)
+		releaseCupsSubscriber()
+	}, mgr.GetState)
 }
 
 func cleanupManagers() {
@@ -1409,15 +861,12 @@ func cleanupManagers() {
 	if appPickerManager != nil {
 		appPickerManager.Close()
 	}
+	cupsMu.Lock()
 	if cupsManager != nil {
 		cupsManager.Close()
+		cupsManager = nil
 	}
-	if dwlManager != nil {
-		dwlManager.Close()
-	}
-	if extWorkspaceManager != nil {
-		extWorkspaceManager.Close()
-	}
+	cupsMu.Unlock()
 	if brightnessManager != nil {
 		brightnessManager.Close()
 	}
@@ -1433,8 +882,14 @@ func cleanupManagers() {
 	if dbusManager != nil {
 		dbusManager.Close()
 	}
+	if notifyActionsManager != nil {
+		notifyActionsManager.Close()
+	}
 	if themeModeManager != nil {
 		themeModeManager.Close()
+	}
+	if wallpaperManager != nil {
+		wallpaperManager.Close()
 	}
 	if trayRecoveryManager != nil {
 		trayRecoveryManager.Close()
@@ -1448,16 +903,61 @@ func cleanupManagers() {
 	if sysUpdateManager != nil {
 		sysUpdateManager.Close()
 	}
+	if wellbeingManager != nil {
+		wellbeingManager.Close()
+	}
 	if geoClientInstance != nil {
 		geoClientInstance.Close()
 	}
 	if tailscaleManager != nil {
 		tailscaleManager.Close()
 	}
+	if filesService != nil {
+		filesService.Close()
+	}
+}
+
+type Server struct {
+	ipc       *ipc.Server
+	readiness *systemd.Readiness
+}
+
+func New() *Server {
+	s := &Server{readiness: systemd.NewReadiness()}
+	s.ipc = ipc.NewServer(ipc.Config{
+		AppName:          appPaths.Name,
+		APIVersion:       APIVersion,
+		CapabilitiesFunc: func() []string { return getCapabilities().Capabilities },
+		MaxLineSize:      64 * 1024 * 1024, // large clipboard payloads
+		SubscribeHandler: subscribeHandler,
+	}, routeHandler(newRequestMux(s.readiness)))
+	return s
+}
+
+func (s *Server) WaitReady(ctx context.Context) { s.readiness.Wait(ctx) }
+
+func (s *Server) Listen() error { return s.ipc.Listen() }
+
+func (s *Server) SocketPath() string { return s.ipc.SocketPath() }
+
+func (s *Server) Close() {
+	s.ipc.Close()
 }
 
 func Start(printDocs bool) error {
-	cleanupStaleSockets()
+	s := New()
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	return s.Serve(printDocs)
+}
+
+func (s *Server) Serve(printDocs bool) error {
+	defer s.ipc.Close()
+	defer cleanupManagers()
+
+	tuneRuntime()
+	startPprof()
 
 	// Tailscale manager always starts — reconnects internally via WatchIPNBus.
 	// The capability is only advertised once tailscaled is reachable; the
@@ -1467,17 +967,7 @@ func Start(printDocs bool) error {
 		notifyCapabilityChange()
 	})
 
-	socketPath := GetSocketPath()
-	os.Remove(socketPath)
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-	defer cleanupManagers()
-
-	log.Infof("DMS API Server listening on: %s", socketPath)
+	log.Infof("DMS API Server listening on: %s", s.ipc.SocketPath())
 	log.Infof("API Version: %d", APIVersion)
 	log.Info("Protocol: JSON over Unix socket")
 	log.Info("Request format: {\"id\": <any>, \"method\": \"...\", \"params\": {...}}")
@@ -1509,6 +999,12 @@ func Start(printDocs bool) error {
 		log.Info(" network.ethernet.connect    - Connect Ethernet")
 		log.Info(" network.ethernet.connect.config - Connect Ethernet to a specific configuration")
 		log.Info(" network.ethernet.disconnect - Disconnect Ethernet")
+		log.Info(" network.cellular.connect    - Connect Cellular")
+		log.Info(" network.cellular.connect.config - Connect Cellular to a specific configuration (params: uuid)")
+		log.Info(" network.cellular.disconnect - Disconnect Cellular (params: device?)")
+		log.Info(" network.cellular.toggle     - Toggle Cellular radio")
+		log.Info(" network.cellular.enable     - Enable Cellular")
+		log.Info(" network.cellular.disable    - Disable Cellular")
 		log.Info(" network.vpn.profiles        - List VPN profiles")
 		log.Info(" network.vpn.active          - List active VPN connections")
 		log.Info(" network.vpn.connect         - Connect VPN (params: uuidOrName|name|uuid, singleActive?)")
@@ -1520,7 +1016,7 @@ func Start(printDocs bool) error {
 		log.Info(" network.vpn.getConfig       - Get VPN configuration (params: uuid|name|uuidOrName)")
 		log.Info(" network.vpn.updateConfig    - Update VPN configuration (params: uuid, name?, autoconnect?, data?)")
 		log.Info(" network.vpn.delete          - Delete VPN connection (params: uuid|name|uuidOrName)")
-		log.Info(" network.preference.set      - Set preference (params: preference [auto|wifi|ethernet])")
+		log.Info(" network.preference.set      - Set preference (params: preference [auto|wifi|ethernet|cellular])")
 		log.Info(" network.info                - Get network info (params: ssid)")
 		log.Info(" network.credentials.submit  - Submit credentials for prompt (params: token, secrets, save?)")
 		log.Info(" network.credentials.cancel  - Cancel credential prompt (params: token)")
@@ -1550,8 +1046,8 @@ func Start(printDocs bool) error {
 		log.Info(" wayland.gamma.getState                - Get current gamma control state")
 		log.Info(" wayland.gamma.setTemperature          - Set temperature range (params: low, high)")
 		log.Info(" wayland.gamma.setLocation             - Set location (params: latitude, longitude)")
-		log.Info(" wayland.gamma.setManualTimes          - Set manual times (params: sunrise, sunset)")
-		log.Info(" wayland.gamma.setGamma                - Set gamma value (params: gamma)")
+		log.Info(" wayland.gamma.setManualTimes          - Set manual times (params: sunrise, sunset, durationMinutes)")
+		log.Info(" wayland.gamma.setGamma                - Set gamma and contrast (params: gamma, contrast)")
 		log.Info(" wayland.gamma.setEnabled              - Enable/disable gamma control (params: enabled)")
 		log.Info(" wayland.gamma.subscribe               - Subscribe to gamma state changes (streaming)")
 		log.Info("Theme automation:")
@@ -1565,9 +1061,10 @@ func Start(printDocs bool) error {
 		log.Info(" theme.auto.subscribe                  - Subscribe to theme automation state changes (streaming)")
 		log.Info("Bluetooth:")
 		log.Info(" bluetooth.getState                    - Get current bluetooth state")
-		log.Info(" bluetooth.startDiscovery              - Start device discovery")
-		log.Info(" bluetooth.stopDiscovery               - Stop device discovery")
-		log.Info(" bluetooth.setPowered                  - Set adapter power state (params: powered)")
+		log.Info(" bluetooth.startDiscovery              - Start device discovery (params: adapter?)")
+		log.Info(" bluetooth.stopDiscovery               - Stop device discovery (params: adapter?)")
+		log.Info(" bluetooth.setPowered                  - Set adapter power state (params: powered, adapter?)")
+		log.Info(" bluetooth.togglePowered               - Toggle adapter power state from its live value (params: adapter?)")
 		log.Info(" bluetooth.pair                        - Pair with device (params: device)")
 		log.Info(" bluetooth.connect                     - Connect to device (params: device)")
 		log.Info(" bluetooth.disconnect                  - Disconnect from device (params: device)")
@@ -1584,26 +1081,6 @@ func Start(printDocs bool) error {
 		log.Info(" cups.resumePrinter                    - Resume printer (params: printerName)")
 		log.Info(" cups.cancelJob                        - Cancel job (params: printerName, jobID)")
 		log.Info(" cups.purgeJobs                        - Cancel all jobs (params: printerName)")
-		log.Info("DWL:")
-		log.Info(" dwl.getState                          - Get current dwl state (tags, windows, layouts, keyboard)")
-		log.Info(" dwl.setTags                           - Set active tags (params: output, tagmask, toggleTagset)")
-		log.Info(" dwl.setClientTags                     - Set focused client tags (params: output, andTags, xorTags)")
-		log.Info(" dwl.setLayout                         - Set layout (params: output, index)")
-		log.Info(" dwl.subscribe                         - Subscribe to dwl state changes (streaming)")
-		log.Info("   Output state includes:")
-		log.Info("     - tags         : Tag states (active, clients, focused)")
-		log.Info("     - layoutSymbol : Current layout name")
-		log.Info("     - title        : Focused window title")
-		log.Info("     - appId        : Focused window app ID")
-		log.Info("     - kbLayout     : Current keyboard layout")
-		log.Info("     - keymode      : Current keybind mode")
-		log.Info("ExtWorkspace:")
-		log.Info(" extworkspace.getState                 - Get current workspace state (groups, workspaces)")
-		log.Info(" extworkspace.activateWorkspace        - Activate workspace (params: groupID, workspaceID)")
-		log.Info(" extworkspace.deactivateWorkspace      - Deactivate workspace (params: groupID, workspaceID)")
-		log.Info(" extworkspace.removeWorkspace          - Remove workspace (params: groupID, workspaceID)")
-		log.Info(" extworkspace.createWorkspace          - Create workspace (params: groupID, name)")
-		log.Info(" extworkspace.subscribe                - Subscribe to workspace state changes (streaming)")
 		log.Info("Brightness:")
 		log.Info(" brightness.getState                   - Get current brightness state for all devices")
 		log.Info(" brightness.setBrightness              - Set device brightness (params: device, percent)")
@@ -1636,6 +1113,7 @@ func Start(printDocs bool) error {
 		log.Info(" clipboard.getHistory                  - Get clipboard history with previews")
 		log.Info(" clipboard.getEntry                    - Get full entry by ID (params: id)")
 		log.Info(" clipboard.deleteEntry                 - Delete entry by ID (params: id)")
+		log.Info(" clipboard.deleteEntries               - Delete entries by ID, skipping pinned ones (params: ids)")
 		log.Info(" clipboard.clearHistory                - Clear all clipboard history")
 		log.Info(" clipboard.copy                        - Copy text to clipboard (params: text)")
 		log.Info(" clipboard.paste                       - Get current clipboard text")
@@ -1643,35 +1121,53 @@ func Start(printDocs bool) error {
 		log.Info(" clipboard.getConfig                   - Get clipboard configuration")
 		log.Info(" clipboard.setConfig                   - Set configuration (params: maxHistory?, maxEntrySize?, autoClearDays?, clearAtStartup?)")
 		log.Info(" clipboard.subscribe                   - Subscribe to clipboard state changes (streaming)")
+		log.Info("Notify:")
+		log.Info(" notify.watchAction                    - Open a file when a notification action fires (params: id, path)")
 		log.Info("Location:")
 		log.Info(" location.getState                      - Get current location state")
 		log.Info(" location.subscribe                     - Subscribe to location changes (streaming)")
+		log.Info("Wellbeing:")
+		log.Info(" wellbeing.getState                     - Today's screen time per app")
+		log.Info(" wellbeing.setState                     - Report the focused app and whether the session is active (params: appId?, active, seq?)")
+		log.Info(" wellbeing.setLimits                    - Set daily and per-app limits in seconds (params: daily?, apps?)")
+		log.Info(" wellbeing.summary                      - Per-day screen time ending today (params: days?)")
+		log.Info(" wellbeing.clear                        - Delete the screen time history")
 		log.Info("")
 	}
 	log.Info("Initializing managers...")
 	log.Info("")
 
 	go func() {
+		switch err := InitializeNetworkManager(); {
+		case err == nil:
+			notifyCapabilityChange()
+			return
+		case errors.Is(err, network.ErrNoNetworkBackend):
+			log.Warn("No supported network backend present; skipping retries")
+			return
+		default:
+			log.Warnf("Network manager unavailable, will retry: %v", err)
+		}
+
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
-		if err := InitializeNetworkManager(); err != nil {
-			log.Warnf("Network manager unavailable: %v", err)
-		} else {
-			notifyCapabilityChange()
-			return
-		}
-
-		for range ticker.C {
+		for range 10 {
+			<-ticker.C
 			if networkManager != nil {
 				return
 			}
-			if err := InitializeNetworkManager(); err == nil {
+			switch err := InitializeNetworkManager(); {
+			case err == nil:
 				log.Info("Network manager initialized")
 				notifyCapabilityChange()
 				return
+			case errors.Is(err, network.ErrNoNetworkBackend):
+				log.Warn("No supported network backend present; stopping retries")
+				return
 			}
 		}
+		log.Warn("Network manager still unavailable after retries; giving up")
 	}()
 
 	loginctlReady := make(chan struct{})
@@ -1738,6 +1234,23 @@ func Start(printDocs bool) error {
 		}()
 	}
 
+	if err := InitializeWellbeingManager(); err != nil {
+		log.Warnf("Wellbeing manager unavailable: %v", err)
+	}
+
+	if err := InitializeWallpaperManager(); err != nil {
+		log.Warnf("Wallpaper scheduler unavailable: %v", err)
+	} else {
+		notifyCapabilityChange()
+		go func() {
+			<-loginctlReady
+			if loginctlManager == nil {
+				return
+			}
+			wallpaperManager.WatchLoginctl(loginctlManager)
+		}()
+	}
+
 	go func() {
 		<-loginctlReady
 		if loginctlManager == nil {
@@ -1769,10 +1282,21 @@ func Start(printDocs bool) error {
 	}()
 
 	go func() {
-		if err := InitializeBluezManager(); err != nil {
+		for {
+			err := InitializeBluezManager()
+			if err == nil {
+				notifyCapabilityChange()
+				return
+			}
 			log.Warnf("Bluez manager unavailable: %v", err)
-		} else {
-			notifyCapabilityChange()
+			if !errors.Is(err, bluez.ErrNoAdapter) {
+				return
+			}
+			if err := bluez.WaitForAdapter(); err != nil {
+				log.Warnf("Bluetooth adapter watch failed: %v", err)
+				return
+			}
+			log.Info("Bluetooth adapter appeared, initializing bluez manager")
 		}
 	}()
 
@@ -1780,17 +1304,7 @@ func Start(printDocs bool) error {
 		log.Debugf("AppPicker manager unavailable: %v", err)
 	}
 
-	if err := InitializeDwlManager(); err != nil {
-		log.Debugf("DWL manager unavailable: %v", err)
-	}
-
-	if extworkspace.CheckCapability() {
-		extWorkspaceAvailable.Store(true)
-		log.Info("ExtWorkspace capability detected and will be available on subscription")
-	} else {
-		log.Debug("ExtWorkspace capability not available")
-		extWorkspaceAvailable.Store(false)
-	}
+	InitializeFilesService()
 
 	if err := InitializeWlrOutputManager(); err != nil {
 		log.Debugf("WlrOutput manager unavailable: %v", err)
@@ -1844,6 +1358,12 @@ func Start(printDocs bool) error {
 		}
 	}()
 
+	go func() {
+		if err := InitializeNotifyActionsManager(); err != nil {
+			log.Warnf("Notification action manager unavailable: %v", err)
+		}
+	}()
+
 	if err := InitializeSysUpdateManager(); err != nil {
 		log.Warnf("Sysupdate manager unavailable: %v", err)
 	}
@@ -1851,21 +1371,16 @@ func Start(printDocs bool) error {
 	log.Info("")
 	log.Infof("Ready! Capabilities: %v", getCapabilities().Capabilities)
 
-	listenerErrChan := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
+	serveErrChan := make(chan error, 1)
 	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				listenerErrChan <- err
-				return
-			}
-			go handleConnection(conn)
-		}
+		serveErrChan <- s.ipc.Serve(ctx)
 	}()
 
 	select {
-	case err := <-listenerErrChan:
+	case err := <-serveErrChan:
 		return err
 	case err := <-fatalErrChan:
 		return err

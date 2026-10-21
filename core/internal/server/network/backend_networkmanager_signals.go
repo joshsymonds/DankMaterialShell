@@ -1,12 +1,23 @@
 package network
 
 import (
+	"time"
+
 	"github.com/Wifx/gonetworkmanager/v2"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/godbus/dbus/v5"
 )
 
+const (
+	dbusNMSettingsPath                = "/org/freedesktop/NetworkManager/Settings"
+	dbusNMSettingsInterface           = "org.freedesktop.NetworkManager.Settings"
+	dbusNMSettingsConnectionInterface = "org.freedesktop.NetworkManager.Settings.Connection"
+
+	wifiNetworksUpdateDelay = 500 * time.Millisecond
+)
+
 func (b *NetworkManagerBackend) startSignalPump() error {
-	conn, err := dbus.ConnectSystemBus()
+	conn, err := dbus.SystemBus()
 	if err != nil {
 		return err
 	}
@@ -22,13 +33,12 @@ func (b *NetworkManagerBackend) startSignalPump() error {
 		dbus.WithMatchMember("PropertiesChanged"),
 	); err != nil {
 		conn.RemoveSignal(signals)
-		conn.Close()
 		return err
 	}
 
 	if err := conn.AddMatchSignal(
-		dbus.WithMatchObjectPath(dbus.ObjectPath("/org/freedesktop/NetworkManager/Settings")),
-		dbus.WithMatchInterface("org.freedesktop.NetworkManager.Settings"),
+		dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMSettingsPath)),
+		dbus.WithMatchInterface(dbusNMSettingsInterface),
 		dbus.WithMatchMember("NewConnection"),
 	); err != nil {
 		conn.RemoveMatchSignal(
@@ -37,13 +47,12 @@ func (b *NetworkManagerBackend) startSignalPump() error {
 			dbus.WithMatchMember("PropertiesChanged"),
 		)
 		conn.RemoveSignal(signals)
-		conn.Close()
 		return err
 	}
 
 	if err := conn.AddMatchSignal(
-		dbus.WithMatchObjectPath(dbus.ObjectPath("/org/freedesktop/NetworkManager/Settings")),
-		dbus.WithMatchInterface("org.freedesktop.NetworkManager.Settings"),
+		dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMSettingsPath)),
+		dbus.WithMatchInterface(dbusNMSettingsInterface),
 		dbus.WithMatchMember("ConnectionRemoved"),
 	); err != nil {
 		conn.RemoveMatchSignal(
@@ -52,12 +61,35 @@ func (b *NetworkManagerBackend) startSignalPump() error {
 			dbus.WithMatchMember("PropertiesChanged"),
 		)
 		conn.RemoveMatchSignal(
-			dbus.WithMatchObjectPath(dbus.ObjectPath("/org/freedesktop/NetworkManager/Settings")),
-			dbus.WithMatchInterface("org.freedesktop.NetworkManager.Settings"),
+			dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMSettingsPath)),
+			dbus.WithMatchInterface(dbusNMSettingsInterface),
 			dbus.WithMatchMember("NewConnection"),
 		)
 		conn.RemoveSignal(signals)
-		conn.Close()
+		return err
+	}
+
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchPathNamespace(dbus.ObjectPath(dbusNMSettingsPath)),
+		dbus.WithMatchInterface(dbusNMSettingsConnectionInterface),
+		dbus.WithMatchMember("Updated"),
+	); err != nil {
+		conn.RemoveMatchSignal(
+			dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMPath)),
+			dbus.WithMatchInterface(dbusPropsInterface),
+			dbus.WithMatchMember("PropertiesChanged"),
+		)
+		conn.RemoveMatchSignal(
+			dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMSettingsPath)),
+			dbus.WithMatchInterface(dbusNMSettingsInterface),
+			dbus.WithMatchMember("NewConnection"),
+		)
+		conn.RemoveMatchSignal(
+			dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMSettingsPath)),
+			dbus.WithMatchInterface(dbusNMSettingsInterface),
+			dbus.WithMatchMember("ConnectionRemoved"),
+		)
+		conn.RemoveSignal(signals)
 		return err
 	}
 
@@ -67,7 +99,6 @@ func (b *NetworkManagerBackend) startSignalPump() error {
 		dbus.WithMatchMember("DeviceAdded"),
 	); err != nil {
 		conn.RemoveSignal(signals)
-		conn.Close()
 		return err
 	}
 
@@ -77,37 +108,84 @@ func (b *NetworkManagerBackend) startSignalPump() error {
 		dbus.WithMatchMember("DeviceRemoved"),
 	); err != nil {
 		conn.RemoveSignal(signals)
-		conn.Close()
 		return err
 	}
 
-	for _, info := range b.wifiDevices {
+	for _, info := range b.wifiDevicesSnapshot() {
 		if err := conn.AddMatchSignal(
 			dbus.WithMatchObjectPath(dbus.ObjectPath(info.device.GetPath())),
 			dbus.WithMatchInterface(dbusPropsInterface),
 			dbus.WithMatchMember("PropertiesChanged"),
 		); err != nil {
 			conn.RemoveSignal(signals)
-			conn.Close()
 			return err
 		}
 	}
 
-	for _, info := range b.ethernetDevices {
+	for _, info := range b.ethernetDevicesSnapshot() {
 		if err := conn.AddMatchSignal(
 			dbus.WithMatchObjectPath(dbus.ObjectPath(info.device.GetPath())),
 			dbus.WithMatchInterface(dbusPropsInterface),
 			dbus.WithMatchMember("PropertiesChanged"),
 		); err != nil {
 			conn.RemoveSignal(signals)
-			conn.Close()
 			return err
 		}
 	}
 
-	b.sigWG.Add(1)
-	go func() {
-		defer b.sigWG.Done()
+	// activating->activated/failed fires on the active-connection object, not the
+	// manager's ActiveConnections property. VPN.Connection covers plugin VPNs;
+	// Connection.Active covers the rest, including WireGuard.
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchPathNamespace(dbus.ObjectPath(dbusNMActiveConnPath)),
+		dbus.WithMatchInterface(dbusNMVPNConnInterface),
+		dbus.WithMatchMember("VpnStateChanged"),
+	); err != nil {
+		conn.RemoveSignal(signals)
+		return err
+	}
+
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchPathNamespace(dbus.ObjectPath(dbusNMActiveConnPath)),
+		dbus.WithMatchInterface(dbusNMActiveConnInterface),
+		dbus.WithMatchMember("StateChanged"),
+	); err != nil {
+		conn.RemoveSignal(signals)
+		return err
+	}
+
+	for _, info := range b.cellularDevicesSnapshot() {
+		if err := conn.AddMatchSignal(
+			dbus.WithMatchObjectPath(dbus.ObjectPath(info.device.GetPath())),
+			dbus.WithMatchInterface(dbusPropsInterface),
+			dbus.WithMatchMember("PropertiesChanged"),
+		); err != nil {
+			conn.RemoveSignal(signals)
+			return err
+		}
+	}
+
+	// ModemManager is optional: without it cellular still works, just without
+	// radio metrics, so match failures are not fatal.
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchPathNamespace(dbus.ObjectPath(dbusMMPath)),
+		dbus.WithMatchInterface(dbusPropsInterface),
+		dbus.WithMatchMember("PropertiesChanged"),
+	); err != nil {
+		log.Warnf("Failed to watch ModemManager properties: %v", err)
+	}
+
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchObjectPath(dbus.ObjectPath(dbusMMPath)),
+		dbus.WithMatchInterface(dbusObjectManagerInterface),
+	); err != nil {
+		log.Warnf("Failed to watch ModemManager objects: %v", err)
+	}
+
+	b.refreshModems()
+	b.updateAllCellularDevices()
+
+	b.sigWG.Go(func() {
 		for {
 			select {
 			case <-b.stopChan:
@@ -122,7 +200,7 @@ func (b *NetworkManagerBackend) startSignalPump() error {
 				b.handleDBusSignal(sig)
 			}
 		}
-	}()
+	})
 	return nil
 }
 
@@ -137,7 +215,43 @@ func (b *NetworkManagerBackend) stopSignalPump() {
 		dbus.WithMatchMember("PropertiesChanged"),
 	)
 
-	for _, info := range b.wifiDevices {
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMSettingsPath)),
+		dbus.WithMatchInterface(dbusNMSettingsInterface),
+		dbus.WithMatchMember("NewConnection"),
+	)
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMSettingsPath)),
+		dbus.WithMatchInterface(dbusNMSettingsInterface),
+		dbus.WithMatchMember("ConnectionRemoved"),
+	)
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchPathNamespace(dbus.ObjectPath(dbusNMSettingsPath)),
+		dbus.WithMatchInterface(dbusNMSettingsConnectionInterface),
+		dbus.WithMatchMember("Updated"),
+	)
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMPath)),
+		dbus.WithMatchInterface(dbusNMInterface),
+		dbus.WithMatchMember("DeviceAdded"),
+	)
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchObjectPath(dbus.ObjectPath(dbusNMPath)),
+		dbus.WithMatchInterface(dbusNMInterface),
+		dbus.WithMatchMember("DeviceRemoved"),
+	)
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchPathNamespace(dbus.ObjectPath(dbusNMActiveConnPath)),
+		dbus.WithMatchInterface(dbusNMVPNConnInterface),
+		dbus.WithMatchMember("VpnStateChanged"),
+	)
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchPathNamespace(dbus.ObjectPath(dbusNMActiveConnPath)),
+		dbus.WithMatchInterface(dbusNMActiveConnInterface),
+		dbus.WithMatchMember("StateChanged"),
+	)
+
+	for _, info := range b.wifiDevicesSnapshot() {
 		b.dbusConn.RemoveMatchSignal(
 			dbus.WithMatchObjectPath(dbus.ObjectPath(info.device.GetPath())),
 			dbus.WithMatchInterface(dbusPropsInterface),
@@ -145,13 +259,31 @@ func (b *NetworkManagerBackend) stopSignalPump() {
 		)
 	}
 
-	for _, info := range b.ethernetDevices {
+	for _, info := range b.ethernetDevicesSnapshot() {
 		b.dbusConn.RemoveMatchSignal(
 			dbus.WithMatchObjectPath(dbus.ObjectPath(info.device.GetPath())),
 			dbus.WithMatchInterface(dbusPropsInterface),
 			dbus.WithMatchMember("PropertiesChanged"),
 		)
 	}
+
+	for _, info := range b.cellularDevicesSnapshot() {
+		b.dbusConn.RemoveMatchSignal(
+			dbus.WithMatchObjectPath(dbus.ObjectPath(info.device.GetPath())),
+			dbus.WithMatchInterface(dbusPropsInterface),
+			dbus.WithMatchMember("PropertiesChanged"),
+		)
+	}
+
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchPathNamespace(dbus.ObjectPath(dbusMMPath)),
+		dbus.WithMatchInterface(dbusPropsInterface),
+		dbus.WithMatchMember("PropertiesChanged"),
+	)
+	b.dbusConn.RemoveMatchSignal(
+		dbus.WithMatchObjectPath(dbus.ObjectPath(dbusMMPath)),
+		dbus.WithMatchInterface(dbusObjectManagerInterface),
+	)
 
 	if b.signals != nil {
 		b.dbusConn.RemoveSignal(b.signals)
@@ -159,17 +291,37 @@ func (b *NetworkManagerBackend) stopSignalPump() {
 	}
 
 	b.sigWG.Wait()
-
-	b.dbusConn.Close()
+	b.cancelWiFiNetworksUpdate()
+	b.wifiRefreshWG.Wait()
 }
 
 func (b *NetworkManagerBackend) handleDBusSignal(sig *dbus.Signal) {
-	if sig.Name == "org.freedesktop.NetworkManager.Settings.NewConnection" ||
-		sig.Name == "org.freedesktop.NetworkManager.Settings.ConnectionRemoved" {
+	if sig.Name == dbusNMSettingsInterface+".NewConnection" ||
+		sig.Name == dbusNMSettingsInterface+".ConnectionRemoved" ||
+		sig.Name == dbusNMSettingsConnectionInterface+".Updated" {
 		b.ListVPNProfiles()
+		if err := b.updateSavedWiFiNetworks(); err != nil {
+			b.updateWiFiNetworks()
+		}
+		b.updateHotspotState()
+		b.listCellularConnections()
 		if b.onStateChange != nil {
 			b.onStateChange()
 		}
+		return
+	}
+
+	if sig.Name == dbusNMVPNConnInterface+".VpnStateChanged" {
+		if len(sig.Body) >= 2 {
+			state, _ := sig.Body[0].(uint32)
+			reason, _ := sig.Body[1].(uint32)
+			b.handleVPNStateChange(state, reason)
+		}
+		return
+	}
+
+	if sig.Name == dbusNMActiveConnInterface+".StateChanged" {
+		b.handleActiveConnectionStateChange()
 		return
 	}
 
@@ -187,6 +339,16 @@ func (b *NetworkManagerBackend) handleDBusSignal(sig *dbus.Signal) {
 			if devicePath, ok := sig.Body[0].(dbus.ObjectPath); ok {
 				b.handleDeviceRemoved(devicePath)
 			}
+		}
+		return
+	}
+
+	if sig.Name == dbusObjectManagerInterface+".InterfacesAdded" ||
+		sig.Name == dbusObjectManagerInterface+".InterfacesRemoved" {
+		// BlueZ and UDisks watch ObjectManager unscoped on the same shared bus,
+		// so their signals land here too.
+		if sig.Path == dbus.ObjectPath(dbusMMPath) {
+			b.handleModemObjectsChange()
 		}
 		return
 	}
@@ -220,6 +382,9 @@ func (b *NetworkManagerBackend) handleDBusSignal(sig *dbus.Signal) {
 
 	case dbusNMAccessPointInterface:
 		b.handleAccessPointChange(changes)
+
+	case dbusMMModemInterface:
+		b.handleModemChange(sig.Path, changes)
 	}
 }
 
@@ -238,6 +403,11 @@ func (b *NetworkManagerBackend) handleNetworkManagerChange(changes map[string]db
 				b.stateMutex.Unlock()
 				needsUpdate = true
 			}
+		case "WwanEnabled", "WwanHardwareEnabled":
+			b.updateCellularRadioState()
+			b.updateAllCellularDevices()
+			b.updateCellularState()
+			needsUpdate = true
 		default:
 			continue
 		}
@@ -248,15 +418,39 @@ func (b *NetworkManagerBackend) handleNetworkManagerChange(changes map[string]db
 		if _, exists := changes["State"]; exists {
 			b.updateEthernetState()
 			b.updateWiFiState()
+			b.updateCellularState()
 		}
 		if _, exists := changes["ActiveConnections"]; exists {
 			b.updateVPNConnectionState()
 			b.ListActiveVPN()
+			b.updateHotspotState()
 		}
 		if b.onStateChange != nil {
 			b.onStateChange()
 		}
 	}
+}
+
+func (b *NetworkManagerBackend) handleActiveConnectionStateChange() {
+	b.updateVPNConnectionState()
+	b.ListActiveVPN()
+	b.updateHotspotState()
+	if b.onStateChange != nil {
+		b.onStateChange()
+	}
+}
+
+func (b *NetworkManagerBackend) handleVPNStateChange(state, reason uint32) {
+	if state == nmVPNStateFailed {
+		b.stateMutex.Lock()
+		if uuid := b.state.ConnectingVPNUUID; uuid != "" {
+			b.state.VPNError = vpnFailureMessage(reason)
+			b.state.VPNErrorUuid = uuid
+		}
+		b.stateMutex.Unlock()
+	}
+
+	b.handleActiveConnectionStateChange()
 }
 
 func (b *NetworkManagerBackend) handleDeviceChange(devicePath dbus.ObjectPath, changes map[string]dbus.Variant) {
@@ -280,9 +474,15 @@ func (b *NetworkManagerBackend) handleDeviceChange(devicePath dbus.ObjectPath, c
 
 	if managedChanged {
 		if managedVariant, ok := changes["Managed"]; ok {
-			if managed, ok := managedVariant.Value().(bool); ok && managed {
-				b.handleDeviceAdded(devicePath)
-				return
+			if managed, ok := managedVariant.Value().(bool); ok {
+				if managed {
+					b.handleDeviceAdded(devicePath)
+					return
+				}
+				// Newly unmanaged devices stay tracked (matching Initialize),
+				// but capability-dependent state such as hotspotAvailable
+				// must be recomputed and broadcast.
+				needsUpdate = true
 			}
 		}
 	}
@@ -293,10 +493,14 @@ func (b *NetworkManagerBackend) handleDeviceChange(devicePath dbus.ObjectPath, c
 
 	b.updateAllEthernetDevices()
 	b.updateEthernetState()
+	b.updateAllCellularDevices()
+	b.updateCellularState()
 	b.updateAllWiFiDevices()
 	b.updateWiFiState()
+	b.updateHotspotState()
 	if stateChanged {
 		b.listEthernetConnections()
+		b.listCellularConnections()
 		b.updatePrimaryConnection()
 	}
 	if b.onStateChange != nil {
@@ -338,7 +542,7 @@ func (b *NetworkManagerBackend) handleWiFiChange(changes map[string]dbus.Variant
 			needsStateUpdate = true
 			needsNetworkUpdate = true
 		case "AccessPoints":
-			needsNetworkUpdate = true
+			b.scheduleWiFiNetworksUpdate()
 		default:
 			continue
 		}
@@ -348,6 +552,7 @@ func (b *NetworkManagerBackend) handleWiFiChange(changes map[string]dbus.Variant
 		b.updateWiFiState()
 	}
 	if needsNetworkUpdate {
+		b.cancelWiFiNetworksUpdate()
 		b.updateWiFiNetworks()
 	}
 	if needsStateUpdate || needsNetworkUpdate {
@@ -355,6 +560,41 @@ func (b *NetworkManagerBackend) handleWiFiChange(changes map[string]dbus.Variant
 			b.onStateChange()
 		}
 	}
+}
+
+// A scan announces each new access point on its own, so rebuild the list
+// once per burst instead of once per access point.
+func (b *NetworkManagerBackend) scheduleWiFiNetworksUpdate() {
+	b.wifiRefreshMu.Lock()
+	defer b.wifiRefreshMu.Unlock()
+
+	if b.wifiRefreshTimer != nil {
+		return
+	}
+	b.wifiRefreshWG.Add(1)
+	b.wifiRefreshTimer = time.AfterFunc(wifiNetworksUpdateDelay, func() {
+		defer b.wifiRefreshWG.Done()
+
+		b.wifiRefreshMu.Lock()
+		b.wifiRefreshTimer = nil
+		b.wifiRefreshMu.Unlock()
+
+		b.updateWiFiNetworks()
+		if b.onStateChange != nil {
+			b.onStateChange()
+		}
+	})
+}
+
+func (b *NetworkManagerBackend) cancelWiFiNetworksUpdate() {
+	b.wifiRefreshMu.Lock()
+	defer b.wifiRefreshMu.Unlock()
+
+	if b.wifiRefreshTimer == nil || !b.wifiRefreshTimer.Stop() {
+		return
+	}
+	b.wifiRefreshTimer = nil
+	b.wifiRefreshWG.Done()
 }
 
 func (b *NetworkManagerBackend) handleAccessPointChange(changes map[string]dbus.Variant) {
@@ -391,11 +631,11 @@ func (b *NetworkManagerBackend) handleDeviceAdded(devicePath dbus.ObjectPath) {
 		return
 	}
 
-	if devType != gonetworkmanager.NmDeviceTypeEthernet && devType != gonetworkmanager.NmDeviceTypeWifi {
+	if devType != gonetworkmanager.NmDeviceTypeEthernet && devType != gonetworkmanager.NmDeviceTypeWifi && devType != gonetworkmanager.NmDeviceTypeModem {
 		return
 	}
 
-	if b.dbusConn != nil {
+	if b.dbusConn != nil && devType != gonetworkmanager.NmDeviceTypeWifi {
 		b.dbusConn.AddMatchSignal(
 			dbus.WithMatchObjectPath(devicePath),
 			dbus.WithMatchInterface(dbusPropsInterface),
@@ -404,7 +644,7 @@ func (b *NetworkManagerBackend) handleDeviceAdded(devicePath dbus.ObjectPath) {
 	}
 
 	managed, _ := dev.GetPropertyManaged()
-	if !managed {
+	if !managed && devType != gonetworkmanager.NmDeviceTypeWifi {
 		return
 	}
 
@@ -421,12 +661,12 @@ func (b *NetworkManagerBackend) handleDeviceAdded(devicePath dbus.ObjectPath) {
 		}
 		hwAddr, _ := w.GetPropertyHwAddress()
 
-		b.ethernetDevices[iface] = &ethernetDeviceInfo{
+		b.setEthernetDeviceInfo(iface, &ethernetDeviceInfo{
 			device:    dev,
 			wired:     w,
 			name:      iface,
 			hwAddress: hwAddr,
-		}
+		})
 
 		if b.ethernetDevice == nil {
 			b.ethernetDevice = dev
@@ -437,6 +677,32 @@ func (b *NetworkManagerBackend) handleDeviceAdded(devicePath dbus.ObjectPath) {
 		b.listEthernetConnections()
 		b.updatePrimaryConnection()
 
+	case gonetworkmanager.NmDeviceTypeModem:
+		hwAddr := ""
+		description := "Mobile broadband"
+		if g, err := gonetworkmanager.NewDeviceGeneric(devicePath); err == nil {
+			hwAddr, _ = g.GetPropertyHwAddress()
+			if desc, err := g.GetPropertyTypeDescription(); err == nil && desc != "" {
+				description = desc
+			}
+		}
+
+		b.setCellularDeviceInfo(iface, &cellularDeviceInfo{
+			device:      dev,
+			name:        iface,
+			hwAddress:   hwAddr,
+			description: description,
+		})
+
+		if b.cellularDevice == nil {
+			b.cellularDevice = dev
+		}
+
+		b.updateAllCellularDevices()
+		b.updateCellularState()
+		b.listCellularConnections()
+		b.updatePrimaryConnection()
+
 	case gonetworkmanager.NmDeviceTypeWifi:
 		w, err := gonetworkmanager.NewDeviceWireless(devicePath)
 		if err != nil {
@@ -444,20 +710,16 @@ func (b *NetworkManagerBackend) handleDeviceAdded(devicePath dbus.ObjectPath) {
 		}
 		hwAddr, _ := w.GetPropertyHwAddress()
 
-		b.wifiDevices[iface] = &wifiDeviceInfo{
+		b.setWifiDeviceInfo(iface, &wifiDeviceInfo{
 			device:    dev,
 			wireless:  w,
 			name:      iface,
 			hwAddress: hwAddr,
-		}
-
-		if b.wifiDevice == nil {
-			b.wifiDevice = dev
-			b.wifiDev = w
-		}
+		})
 
 		b.updateAllWiFiDevices()
 		b.updateWiFiState()
+		b.updateHotspotState()
 	}
 
 	if b.onStateChange != nil {
@@ -466,6 +728,17 @@ func (b *NetworkManagerBackend) handleDeviceAdded(devicePath dbus.ObjectPath) {
 }
 
 func (b *NetworkManagerBackend) handleDeviceRemoved(devicePath dbus.ObjectPath) {
+	if _, _, found := b.removeWifiDeviceByPath(devicePath); found {
+		b.updateAllWiFiDevices()
+		b.updateWiFiState()
+		b.updateHotspotState()
+
+		if b.onStateChange != nil {
+			b.onStateChange()
+		}
+		return
+	}
+
 	if b.dbusConn != nil {
 		b.dbusConn.RemoveMatchSignal(
 			dbus.WithMatchObjectPath(devicePath),
@@ -474,57 +747,42 @@ func (b *NetworkManagerBackend) handleDeviceRemoved(devicePath dbus.ObjectPath) 
 		)
 	}
 
-	for iface, info := range b.ethernetDevices {
-		if info.device.GetPath() == devicePath {
-			delete(b.ethernetDevices, iface)
-
-			if b.ethernetDevice != nil {
-				dev := b.ethernetDevice.(gonetworkmanager.Device)
-				if dev.GetPath() == devicePath {
-					b.ethernetDevice = nil
-					for _, remaining := range b.ethernetDevices {
-						b.ethernetDevice = remaining.device
-						break
-					}
+	if _, remaining, found := b.removeEthernetDeviceByPath(devicePath); found {
+		if b.ethernetDevice != nil {
+			dev := b.ethernetDevice.(gonetworkmanager.Device)
+			if dev.GetPath() == devicePath {
+				b.ethernetDevice = nil
+				for _, r := range remaining {
+					b.ethernetDevice = r.device
+					break
 				}
 			}
-
-			b.updateAllEthernetDevices()
-			b.updateEthernetState()
-			b.listEthernetConnections()
-			b.updatePrimaryConnection()
-
-			if b.onStateChange != nil {
-				b.onStateChange()
-			}
-			return
 		}
+
+		b.updateAllEthernetDevices()
+		b.updateEthernetState()
+		b.listEthernetConnections()
+		b.updatePrimaryConnection()
+
+		if b.onStateChange != nil {
+			b.onStateChange()
+		}
+		return
 	}
 
-	for iface, info := range b.wifiDevices {
-		if info.device.GetPath() == devicePath {
-			delete(b.wifiDevices, iface)
-
-			if b.wifiDevice != nil {
-				dev := b.wifiDevice.(gonetworkmanager.Device)
-				if dev.GetPath() == devicePath {
-					b.wifiDevice = nil
-					b.wifiDev = nil
-					for _, remaining := range b.wifiDevices {
-						b.wifiDevice = remaining.device
-						b.wifiDev = remaining.wireless
-						break
-					}
+	if _, remaining, found := b.removeCellularDeviceByPath(devicePath); found {
+		if b.cellularDevice != nil {
+			dev := b.cellularDevice.(gonetworkmanager.Device)
+			if dev.GetPath() == devicePath {
+				b.cellularDevice = nil
+				for _, r := range remaining {
+					b.cellularDevice = r.device
+					break
 				}
 			}
-
-			b.updateAllWiFiDevices()
-			b.updateWiFiState()
-
-			if b.onStateChange != nil {
-				b.onStateChange()
-			}
-			return
 		}
+
+		b.refreshCellularState()
+		return
 	}
 }

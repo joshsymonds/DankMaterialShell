@@ -1,8 +1,7 @@
 import QtQuick
-import Quickshell
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginComponent {
@@ -17,30 +16,30 @@ PluginComponent {
     ccWidgetIsActive: isEnabled
 
     onCcWidgetToggled: {
-        isEnabled = !isEnabled
-        clickCount += 1
+        isEnabled = !isEnabled;
+        clickCount += 1;
         if (pluginService) {
-            pluginService.savePluginData("controlCenterExample", "isEnabled", isEnabled)
-            pluginService.savePluginData("controlCenterExample", "clickCount", clickCount)
+            pluginService.savePluginData("controlCenterExample", "isEnabled", isEnabled);
+            pluginService.savePluginData("controlCenterExample", "clickCount", clickCount);
         }
-        ToastService.showInfo("Example Toggle", isEnabled ? "Activated!" : "Deactivated!")
+        ToastService.showInfo("Example Toggle", isEnabled ? "Activated!" : "Deactivated!");
     }
 
     horizontalBarPill: Component {
         Row {
             spacing: Theme.spacingXS
 
-            DankIcon {
+            DIcon {
                 name: root.isEnabled ? "toggle_on" : "toggle_off"
                 color: root.isEnabled ? Theme.primary : Theme.surfaceVariantText
-                font.pixelSize: Theme.iconSize - 4
+                size: root.iconSize
                 anchors.verticalCenter: parent.verticalCenter
             }
 
             StyledText {
                 text: `${root.clickCount}`
                 color: root.isEnabled ? Theme.primary : Theme.surfaceVariantText
-                font.pixelSize: Theme.fontSizeMedium
+                font.pixelSize: root.textSize
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
@@ -50,17 +49,17 @@ PluginComponent {
         Column {
             spacing: Theme.spacingXS
 
-            DankIcon {
+            DIcon {
                 name: root.isEnabled ? "toggle_on" : "toggle_off"
                 color: root.isEnabled ? Theme.primary : Theme.surfaceVariantText
-                font.pixelSize: Theme.iconSize - 4
+                size: root.iconSize
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
             StyledText {
                 text: `${root.clickCount}`
                 color: root.isEnabled ? Theme.primary : Theme.surfaceVariantText
-                font.pixelSize: Theme.fontSizeSmall
+                font.pixelSize: root.textSize
                 anchors.horizontalCenter: parent.horizontalCenter
             }
         }

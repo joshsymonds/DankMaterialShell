@@ -3,11 +3,12 @@ package distros
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/deps"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/privesc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/deps"
+	"github.com/duxlabs-dev/dux-shell/core/internal/privesc"
 )
 
 func init() {
@@ -69,8 +70,14 @@ func (d *DebianDistribution) DetectDependenciesWithTerminal(ctx context.Context,
 		dependencies = append(dependencies, d.detectXwaylandSatellite())
 	}
 
+	if wm == deps.WindowManagerHyprland && d.isPika() {
+		dependencies = append(dependencies, d.detectHyprlandTools()...)
+		dependencies = append(dependencies, d.detectHyprlandGuiutils())
+	}
+
 	dependencies = append(dependencies, d.detectMatugen())
-	dependencies = append(dependencies, d.detectDgop())
+	dependencies = append(dependencies, d.detectDanksearch())
+	dependencies = append(dependencies, withGitVariant(d.detectDankCalendar(), d.packageInstalled("dankcalendar-git")))
 
 	return dependencies, nil
 }
@@ -88,11 +95,29 @@ func (d *DebianDistribution) detectAccountsService() deps.Dependency {
 }
 
 func (d *DebianDistribution) detectDMSGreeter() deps.Dependency {
-	return d.detectOptionalPackage("dms-greeter", "DankMaterialShell greetd greeter", d.packageInstalled("dms-greeter"))
+	gitInstalled := d.packageInstalled("dms-greeter-git")
+	dep := d.detectOptionalPackage("dms-greeter", "Dux Shell greetd greeter", gitInstalled || d.packageInstalled("dms-greeter"))
+	return withGitVariant(dep, gitInstalled)
 }
 
 func (d *DebianDistribution) packageInstalled(pkg string) bool {
 	return debianPackageInstalledPrecisely(pkg)
+}
+
+func (d *DebianDistribution) InstalledVariant(stable, git PackageMapping) (deps.PackageVariant, bool) {
+	return installedVariantByName(d.packageInstalled, stable, git)
+}
+
+// SwapVariants installs the new variants directly: their Conflicts/Replaces make apt remove the old ones.
+func (d *DebianDistribution) SwapVariants(ctx context.Context, swaps []VariantSwap, sudoPassword string, progressChan chan<- InstallProgressMsg) error {
+	if err := d.enableOBSRepos(ctx, swapTargets(swaps, RepoTypeOBS), sudoPassword, progressChan); err != nil {
+		return err
+	}
+	_, to := swapNames(swaps)
+	if err := d.ensureQuickshellBackports(ctx, to, sudoPassword, progressChan); err != nil {
+		return err
+	}
+	return d.installAPTPackages(ctx, to, sudoPassword, progressChan)
 }
 
 func debianPackageInstalledPrecisely(pkg string) bool {
@@ -120,6 +145,9 @@ func (d *DebianDistribution) GetPackageMapping(wm deps.WindowManager) map[string
 }
 
 func (d *DebianDistribution) GetPackageMappingWithVariants(wm deps.WindowManager, variants map[string]deps.PackageVariant) map[string]PackageMapping {
+	if d.isPika() {
+		return d.pikaPackageMapping(wm, variants)
+	}
 	packages := map[string]PackageMapping{
 		// Standard APT packages
 		"git":                    {Name: "git", Repository: RepoTypeSystem},
@@ -129,12 +157,13 @@ func (d *DebianDistribution) GetPackageMappingWithVariants(wm deps.WindowManager
 		"accountsservice":        {Name: "accountsservice", Repository: RepoTypeSystem},
 
 		// DMS packages from OBS with variant support
-		"dms (DankMaterialShell)": d.getDmsMapping(variants["dms (DankMaterialShell)"]),
-		"quickshell":              d.getQuickshellMapping(variants["quickshell"]),
-		"dms-greeter":             {Name: "dms-greeter", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"},
-		"matugen":                 {Name: "matugen", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"},
-		"dgop":                    {Name: "dgop", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"},
-		"ghostty":                 {Name: "ghostty", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"},
+		"dms (Dux Shell)": d.getDmsMapping(variants["dms (Dux Shell)"]),
+		"quickshell":      d.getQuickshellMapping(variants["quickshell"]),
+		"dms-greeter":     variantMapping("dms-greeter", variants["dms-greeter"], RepoTypeOBS, "home:AvengeMedia:danklinux"),
+		"matugen":         {Name: "matugen", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"},
+		"ghostty":         {Name: "ghostty", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"},
+		"danksearch":      {Name: "danksearch", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"},
+		"dankcalendar":    variantMapping("dankcalendar", variants["dankcalendar"], RepoTypeOBS, "home:AvengeMedia:danklinux"),
 	}
 
 	if wm == deps.WindowManagerNiri {
@@ -157,7 +186,60 @@ func (d *DebianDistribution) getQuickshellMapping(variant deps.PackageVariant) P
 	if forceQuickshellGit || variant == deps.VariantGit {
 		return PackageMapping{Name: "quickshell-git", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"}
 	}
-	return PackageMapping{Name: "quickshell", Repository: RepoTypeOBS, RepoURL: "home:AvengeMedia:danklinux"}
+	// Debian 13 ships stable quickshell in trixie-backports only.
+	if d.debianNeedsQuickshellBackports() {
+		return PackageMapping{Name: "quickshell/trixie-backports", Repository: RepoTypeSystem}
+	}
+	return PackageMapping{Name: "quickshell", Repository: RepoTypeSystem}
+}
+
+func (d *DebianDistribution) debianNeedsQuickshellBackports() bool {
+	osInfo, err := GetOSInfo()
+	if err != nil {
+		return false
+	}
+	return osInfo.VersionID == "13" || strings.EqualFold(osInfo.VersionCodename, "trixie")
+}
+
+func (d *DebianDistribution) ensureQuickshellBackports(ctx context.Context, systemPkgs []string, sudoPassword string, progressChan chan<- InstallProgressMsg) error {
+	needsBackports := false
+	for _, pkg := range systemPkgs {
+		if strings.Contains(pkg, "trixie-backports") {
+			needsBackports = true
+			break
+		}
+	}
+	if !needsBackports {
+		return nil
+	}
+
+	policyOut, err := exec.CommandContext(ctx, "apt-cache", "policy").Output()
+	if err == nil && strings.Contains(string(policyOut), "trixie-backports") {
+		d.log("trixie-backports already configured")
+		return nil
+	}
+
+	listFile := "/etc/apt/sources.list.d/trixie-backports.list"
+	repoLine := "deb http://deb.debian.org/debian trixie-backports main contrib non-free non-free-firmware"
+
+	progressChan <- InstallProgressMsg{
+		Phase:       PhaseSystemPackages,
+		Progress:    0.30,
+		Step:        "Enabling trixie-backports for quickshell...",
+		IsComplete:  false,
+		NeedsSudo:   true,
+		CommandInfo: fmt.Sprintf("echo '%s' | sudo tee %s", repoLine, listFile),
+		LogOutput:   "Debian 13 ships quickshell in trixie-backports",
+	}
+
+	addCmd := privesc.ExecCommand(ctx, sudoPassword,
+		fmt.Sprintf("bash -c \"echo '%s' | tee %s\"", repoLine, listFile))
+	if err := d.runWithProgress(addCmd, progressChan, PhaseSystemPackages, 0.30, 0.31); err != nil {
+		return err
+	}
+
+	updateCmd := privesc.ExecCommand(ctx, sudoPassword, "apt-get update")
+	return d.runWithProgress(updateCmd, progressChan, PhaseSystemPackages, 0.31, 0.33)
 }
 
 func (d *DebianDistribution) getNiriMapping(variant deps.PackageVariant) PackageMapping {
@@ -212,12 +294,12 @@ func (d *DebianDistribution) InstallPrerequisites(ctx context.Context, sudoPassw
 		Step:        "Installing development dependencies...",
 		IsComplete:  false,
 		NeedsSudo:   true,
-		CommandInfo: "sudo apt-get install -y curl wget git cmake ninja-build pkg-config gnupg libxcb-cursor-dev libglib2.0-dev libpolkit-agent-1-dev",
+		CommandInfo: "sudo apt-get install -y curl wget git cmake ninja-build pkg-config libxcb-cursor-dev libglib2.0-dev libpolkit-agent-1-dev",
 		LogOutput:   "Installing additional development tools",
 	}
 
 	devToolsCmd := privesc.ExecCommand(ctx, sudoPassword,
-		"DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget git cmake ninja-build pkg-config gnupg libxcb-cursor-dev libglib2.0-dev libpolkit-agent-1-dev libjpeg-dev libpugixml-dev")
+		"DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget git cmake ninja-build pkg-config libxcb-cursor-dev libglib2.0-dev libpolkit-agent-1-dev libjpeg-dev libpugixml-dev")
 	if err := d.runWithProgress(devToolsCmd, progressChan, PhasePrerequisites, 0.10, 0.12); err != nil {
 		return fmt.Errorf("failed to install development tools: %w", err)
 	}
@@ -260,6 +342,10 @@ func (d *DebianDistribution) InstallPackages(ctx context.Context, dependencies [
 		if err := d.enableOBSRepos(ctx, obsPkgs, sudoPassword, progressChan); err != nil {
 			return fmt.Errorf("failed to enable OBS repositories: %w", err)
 		}
+	}
+
+	if err := d.ensureQuickshellBackports(ctx, systemPkgs, sudoPassword, progressChan); err != nil {
+		return fmt.Errorf("failed to enable trixie-backports for quickshell: %w", err)
 	}
 
 	// System Packages
@@ -413,13 +499,8 @@ func (d *DebianDistribution) enableOBSRepos(ctx context.Context, obsPkgs []Packa
 		return fmt.Errorf("failed to get OS info: %w", err)
 	}
 
-	// Determine Debian version for OBS repository URL
-	debianVersion := "Debian_13"
-	if osInfo.VersionID == "testing" {
-		debianVersion = "Debian_Testing"
-	} else if osInfo.VersionCodename == "sid" || osInfo.VersionID == "sid" || strings.Contains(strings.ToLower(osInfo.PrettyName), "sid") || strings.Contains(strings.ToLower(osInfo.PrettyName), "unstable") {
-		debianVersion = "Debian_Unstable"
-	}
+	obsRepo := debianOBSRepoVersion(osInfo, readDebianAPTSuites())
+	d.log(fmt.Sprintf("Using OBS Debian repository: %s", obsRepo))
 
 	for _, pkg := range obsPkgs {
 		if pkg.RepoURL != "" && !enabledRepos[pkg.RepoURL] {
@@ -428,12 +509,11 @@ func (d *DebianDistribution) enableOBSRepos(ctx context.Context, obsPkgs []Packa
 			// RepoURL format: "home:AvengeMedia:danklinux"
 			repoPath := strings.ReplaceAll(pkg.RepoURL, ":", ":/")
 			repoName := strings.ReplaceAll(pkg.RepoURL, ":", "-")
-			baseURL := fmt.Sprintf("https://download.opensuse.org/repositories/%s/%s", repoPath, debianVersion)
+			baseURL := fmt.Sprintf("https://download.opensuse.org/repositories/%s/%s", repoPath, obsRepo)
 
 			// Check if repository already exists
 			listFile := fmt.Sprintf("/etc/apt/sources.list.d/%s.list", repoName)
-			checkCmd := exec.CommandContext(ctx, "test", "-f", listFile)
-			if checkCmd.Run() == nil {
+			if debianOBSListFileMatches(listFile, obsRepo) {
 				d.log(fmt.Sprintf("OBS repo %s already exists, skipping", pkg.RepoURL))
 				enabledRepos[pkg.RepoURL] = true
 				continue
@@ -452,12 +532,22 @@ func (d *DebianDistribution) enableOBSRepos(ctx context.Context, obsPkgs []Packa
 				Progress:    0.18,
 				Step:        fmt.Sprintf("Adding OBS GPG key for %s...", pkg.RepoURL),
 				NeedsSudo:   true,
-				CommandInfo: fmt.Sprintf("curl & gpg to add key for %s", pkg.RepoURL),
+				CommandInfo: fmt.Sprintf("install keyring for %s", pkg.RepoURL),
 			}
 
-			keyCmd := fmt.Sprintf("bash -c 'rm -f %s && curl -fsSL %s/Release.key | gpg --batch --dearmor -o %s'", keyringPath, baseURL, keyringPath)
-			cmd := privesc.ExecCommand(ctx, sudoPassword, keyCmd)
-			if err := d.runWithProgress(cmd, progressChan, PhaseSystemPackages, 0.18, 0.20); err != nil {
+			keyring, err := fetchDearmoredKey(ctx, baseURL+"/Release.key")
+			if err != nil {
+				return fmt.Errorf("failed to add OBS GPG key for %s: %w", pkg.RepoURL, err)
+			}
+			tmpKeyring, err := writeTempKeyring(keyring)
+			if err != nil {
+				return fmt.Errorf("failed to add OBS GPG key for %s: %w", pkg.RepoURL, err)
+			}
+
+			cmd := privesc.ExecCommand(ctx, sudoPassword, fmt.Sprintf("install -m 0644 %s %s", tmpKeyring, keyringPath))
+			err = d.runWithProgress(cmd, progressChan, PhaseSystemPackages, 0.18, 0.20)
+			os.Remove(tmpKeyring)
+			if err != nil {
 				return fmt.Errorf("failed to add OBS GPG key for %s: %w", pkg.RepoURL, err)
 			}
 
@@ -607,10 +697,6 @@ func (d *DebianDistribution) installBuildDependencies(ctx context.Context, manua
 			if err := d.installRust(ctx, sudoPassword, progressChan); err != nil {
 				return fmt.Errorf("failed to install Rust: %w", err)
 			}
-		case "dgop":
-			if err := d.installGo(ctx, sudoPassword, progressChan); err != nil {
-				return fmt.Errorf("failed to install Go: %w", err)
-			}
 		}
 	}
 
@@ -667,24 +753,6 @@ func (d *DebianDistribution) installRust(ctx context.Context, sudoPassword strin
 	}
 
 	return nil
-}
-
-func (d *DebianDistribution) installGo(ctx context.Context, sudoPassword string, progressChan chan<- InstallProgressMsg) error {
-	if d.commandExists("go") {
-		return nil
-	}
-
-	progressChan <- InstallProgressMsg{
-		Phase:       PhaseSystemPackages,
-		Progress:    0.87,
-		Step:        "Installing Go...",
-		IsComplete:  false,
-		NeedsSudo:   true,
-		CommandInfo: "sudo apt-get install golang-go",
-	}
-
-	installCmd := privesc.ExecCommand(ctx, sudoPassword, "DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go")
-	return d.runWithProgress(installCmd, progressChan, PhaseSystemPackages, 0.87, 0.90)
 }
 
 func (d *DebianDistribution) InstallManualPackages(ctx context.Context, packages []string, variantMap map[string]deps.PackageVariant, sudoPassword string, progressChan chan<- InstallProgressMsg) error {

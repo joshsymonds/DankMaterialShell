@@ -1,14 +1,15 @@
 package version
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/netfetch"
 )
 
 type VersionInfo struct {
@@ -26,7 +27,7 @@ type VersionFetcher interface {
 	GetLatestVersion(dmsPath string) (string, error)
 }
 
-// DefaultVersionFetcher is the default implementation that uses git/curl
+// DefaultVersionFetcher is the default implementation that uses git and the GitHub API
 type DefaultVersionFetcher struct{}
 
 func (d *DefaultVersionFetcher) GetCurrentVersion(dmsPath string) (string, error) {
@@ -135,29 +136,7 @@ func (d *DefaultVersionFetcher) GetLatestVersion(dmsPath string) (string, error)
 		}
 	}
 
-	// Add timeout to prevent hanging when GitHub is down
-	cmd := exec.Command("curl", "-s", "--max-time", "5", "https://api.github.com/repos/AvengeMedia/DankMaterialShell/releases/latest")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch latest release: %w", err)
-	}
-
-	var result struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		for _, line := range strings.Split(string(output), "\n") {
-			if strings.Contains(line, "\"tag_name\"") {
-				parts := strings.Split(line, "\"")
-				if len(parts) >= 4 {
-					return parts[3], nil
-				}
-			}
-		}
-		return "", fmt.Errorf("failed to parse latest version: %w", err)
-	}
-
-	return result.TagName, nil
+	return netfetch.LatestReleaseTag(context.Background())
 }
 
 // defaultFetcher is used by the public functions
@@ -242,12 +221,9 @@ func CompareVersions(v1, v2 string) int {
 	parts1 := strings.Split(v1, ".")
 	parts2 := strings.Split(v2, ".")
 
-	maxLen := len(parts1)
-	if len(parts2) > maxLen {
-		maxLen = len(parts2)
-	}
+	maxLen := max(len(parts2), len(parts1))
 
-	for i := 0; i < maxLen; i++ {
+	for i := range maxLen {
 		var p1, p2 int
 		if i < len(parts1) {
 			fmt.Sscanf(parts1[i], "%d", &p1) //nolint:errcheck

@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/dbusutil"
+	"github.com/duxlabs-dev/dux-go/dbusutil"
 	"github.com/godbus/dbus/v5"
 )
 
 func NewManager() (*Manager, error) {
-	conn, err := dbus.ConnectSystemBus()
+	conn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to system bus: %w", err)
 	}
@@ -29,7 +29,6 @@ func NewManager() (*Manager, error) {
 	m.sleepInhibitorEnabled.Store(true)
 
 	if err := m.initialize(); err != nil {
-		conn.Close()
 		return nil, err
 	}
 
@@ -381,7 +380,7 @@ func (m *Manager) acquireSleepInhibitor() error {
 		return fmt.Errorf("manager object not available")
 	}
 
-	file, err := m.inhibit("sleep", "DankMaterialShell", "Lock before suspend", "delay")
+	file, err := m.inhibit("sleep", "Dux Shell", "Lock before suspend", "delay")
 	if err != nil {
 		return err
 	}
@@ -646,9 +645,7 @@ func (m *Manager) startSignalPump() error {
 		return err
 	}
 
-	m.sigWG.Add(1)
-	go func() {
-		defer m.sigWG.Done()
+	m.sigWG.Go(func() {
 		for {
 			select {
 			case <-m.stopChan:
@@ -663,7 +660,7 @@ func (m *Manager) startSignalPump() error {
 				m.handleDBusSignal(sig)
 			}
 		}
-	}()
+	})
 	return nil
 }
 
@@ -716,8 +713,4 @@ func (m *Manager) Close() {
 		m.subscribers.Delete(key)
 		return true
 	})
-
-	if m.conn != nil {
-		m.conn.Close()
-	}
 }
