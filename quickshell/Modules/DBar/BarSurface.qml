@@ -256,7 +256,7 @@ Item {
     Item {
         id: barShapeMask
         anchors.fill: parent
-        layer.enabled: true
+        layer.enabled: chromeShader.hasShader
         layer.smooth: true
         visible: false
 
@@ -312,7 +312,7 @@ Item {
         intensity: (barConfig?.shaderMode === "hexrain") ? 1.0 : 0.6
         speed: 1.0
         visible: false
-        layer.enabled: true
+        layer.enabled: hasShader
 
         primaryColor:          barConfig?.shaderPrimaryColor          ? Qt.color(barConfig.shaderPrimaryColor)          : Theme.primary
         secondaryColor:        barConfig?.shaderSecondaryColor        ? Qt.color(barConfig.shaderSecondaryColor)        : Theme.secondary
@@ -327,7 +327,7 @@ Item {
         maskSource: barShapeMask
         maskThresholdMin: 0.5
         maskSpreadAtMin: 1
-        visible: root.width > 0 && root.height > 0
+        visible: chromeShader.hasShader && root.width > 0 && root.height > 0
     }
 
     Loader {

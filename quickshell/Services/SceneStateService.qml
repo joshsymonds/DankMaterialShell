@@ -5,6 +5,7 @@ import QtCore
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.Services
 
 // In-memory store for chrome-shader scenes. Loads scene JSON files
 // on startup, exposes their contents as reactive properties, and
@@ -31,6 +32,8 @@ import Quickshell.Io
 
 Singleton {
     id: root
+
+    readonly property var log: Log.scoped("SceneStateService")
 
     // The scene store. Each entry has shape { data: {...}, harness: {...} }.
     // Reassigned (not mutated in place) so QML bindings on
@@ -155,7 +158,7 @@ Singleton {
                              j.harness || {},
                              path);
             } catch (e) {
-                console.warn("SceneStateService: parse error for wallpaper shadow:", e.message);
+                log.warn("Parse error for wallpaper shadow:", e.message);
             }
         }
         onLoadFailed: error => {
@@ -179,7 +182,7 @@ Singleton {
                              j.harness || {},
                              wallpaperShadowFileView.path);
             } catch (e) {
-                console.warn("SceneStateService: parse error for wallpaper canonical:", e.message);
+                log.warn("Parse error for wallpaper canonical:", e.message);
             }
         }
     }
