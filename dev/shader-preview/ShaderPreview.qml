@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import Qt.labs.folderlistmodel
 import Quickshell
 import Quickshell.Io
+import "../../quickshell/Widgets"
 
 // Standalone Quickshell scene for iterating on a chrome-family shader (currently
 // chrome_hexrain — chrome_aurora shares the same uniforms and would slot in by
@@ -1079,7 +1080,7 @@ FloatingWindow {
 
     // ===== Shader region (left) =====
 
-    ShaderEffect {
+    HexrainEffect {
         id: shaderEffect
         anchors.left: parent.left
         anchors.right: panel.left
@@ -1088,87 +1089,89 @@ FloatingWindow {
 
         // Drives ChromeShader's hexrain motion. Multiplied by harness.speed
         // each frame.
-        property real iTime: 0
+        iTime: 0
 
         // Chrome-family uniforms. Keys match the std140 names in
         // chrome_hexrain.frag — applyState() writes by name lookup. To support
         // a shader with different uniforms, declare them here as additional
         // properties.
-        property real intensity: 1.0
-        property real cellSize: 14
-        property real modeAmount: 1.0
-        property real domeStrength: 0.8
-        property real seamGlow: 1.5
-        property real sunDriftSpeed: 1.0
-        property real heightAmount: 1.0
-        property real matteness: 0.70
-        property real bleedBack: 0.03
-        property real hexBevel: 0.6
-        property real heightDriftSpeed: 0.6
-        property real frontSunStrength: 1.5
-        property real frontSunSize: 0.3
-        property real frontSunLifetime: 40.0
-        property real frontSunGap: 10.0
-        property real frontSunSpeed: 0.02
-        property real frontSunShadowLength: 1.8
-        property real frontSunShadowDarkness: 0.95
-        property real backSunSize: 0.4
-        property real backSunStrength: 1.0
-        property real backSunLifetime: 45.0
-        property real backSunGap: 12.0
-        property real backSunSpeed: 0.02
-        property real backNegSunSize: 0.3
-        property real backNegSunStrength: 0.7
-        property real backNegSunLifetime: 35.0
-        property real backNegSunGap: 18.0
-        property real backNegSunSpeed: 0.02
-        property real backSunPaletteSpeed: 0.5
-        property real frontSunPaletteSpeed: 0.5
-        property real backSunCount: 3
-        property real backNegSunCount: 1
-        property real frontSunCount: 1
-        property real frontNegSunCount: 0
-        property real frontNegSunStrength: 0.7
-        property real frontNegSunSize: 0.3
-        property real frontNegSunLifetime: 30.0
-        property real frontNegSunGap: 15.0
-        property real frontNegSunSpeed: 0.02
-        property real fastBackSunStrength: 0.0
-        property real fastBackSunSize: 0.25
-        property real fastBackSunLifetime: 6.0
-        property real fastBackSunGap: 12.0
-        property real fastBackSunSpeed: 0.18
-        property real barZoneEnabled: 0.0
-        property real barZoneAnchor: 0.0
-        property real barZoneThickness: 60.0
-        property real barZoneElevation: 0.5
-        property real flipOriginX: 0.0
-        property real flipOriginY: 0.0
+        intensity: 1.0
+        cellSize: 14
+        modeAmount: 1.0
+        domeStrength: 0.8
+        seamGlow: 1.5
+        sunDriftSpeed: 1.0
+        heightAmount: 1.0
+        matteness: 0.70
+        bleedBack: 0.03
+        hexBevel: 0.6
+        heightDriftSpeed: 0.6
+        frontSunStrength: 1.5
+        frontSunSize: 0.3
+        frontSunLifetime: 40.0
+        frontSunGap: 10.0
+        frontSunSpeed: 0.02
+        frontSunShadowLength: 1.8
+        frontSunShadowDarkness: 0.95
+        backSunSize: 0.4
+        backSunStrength: 1.0
+        backSunLifetime: 45.0
+        backSunGap: 12.0
+        backSunSpeed: 0.02
+        backNegSunSize: 0.3
+        backNegSunStrength: 0.7
+        backNegSunLifetime: 35.0
+        backNegSunGap: 18.0
+        backNegSunSpeed: 0.02
+        backSunPaletteSpeed: 0.5
+        frontSunPaletteSpeed: 0.5
+        backSunCount: 3
+        backNegSunCount: 1
+        frontSunCount: 1
+        frontNegSunCount: 0
+        frontNegSunStrength: 0.7
+        frontNegSunSize: 0.3
+        frontNegSunLifetime: 30.0
+        frontNegSunGap: 15.0
+        frontNegSunSpeed: 0.02
+        fastBackSunStrength: 0.0
+        fastBackSunSize: 0.25
+        fastBackSunLifetime: 6.0
+        fastBackSunGap: 12.0
+        fastBackSunSpeed: 0.18
+        barZoneEnabled: 0.0
+        barZoneAnchor: 0.0
+        barZoneThickness: 60.0
+        barZoneElevation: 0.5
+        flipOriginX: 0.0
+        flipOriginY: 0.0
         // Sentinel = far-future iTime. Per-hex flip phase math gives
         // a negative numerator → clamped to 0 → renders the Current
         // palette. triggerFlip() sets this to the actual current
         // iTime to kick off the wave; flipCommitTimer resets back to
         // sentinel after the wave finishes.
-        property real flipStartTime: 1.0e9
-        property real flipPropDelay: 0.05
-        property real flipDuration: 0.5
+        flipStartTime: 1.0e9
+        flipPropDelay: 0.05
+        flipDuration: 0.5
         property real depthShading: 0.35
         property real flipSpecular: 0.8
         property real hexDepth: 0.7
-        property vector3d iResolution: Qt.vector3d(width, height, 1)
+        iResolution: Qt.vector3d(width, height, 1)
         // Single-window preview: xy offset = 0, zw = full window size,
         // so the new frag formula reduces to qt_TexCoord0 * iResolution.
-        property vector4d windowGeom: Qt.vector4d(0, 0, width, height)
-        property vector4d colorPrimary:           Qt.vector4d(0.345, 0.588, 0.882, 1.0)
-        property vector4d colorSecondary:         Qt.vector4d(0.718, 0.067, 0.859, 1.0)
-        property vector4d colorPrimaryContainer:  Qt.vector4d(0.090, 0.043, 0.333, 1.0)
-        property vector4d colorTertiary:          Qt.vector4d(0.224, 1.000, 0.600, 1.0)
-        property vector4d colorPrimaryNext:           colorPrimary
-        property vector4d colorSecondaryNext:         colorSecondary
-        property vector4d colorPrimaryContainerNext:  colorPrimaryContainer
-        property vector4d colorTertiaryNext:          colorTertiary
+        windowGeom: Qt.vector4d(0, 0, width, height)
+        colorPrimary:           Qt.vector4d(0.345, 0.588, 0.882, 1.0)
+        colorSecondary:         Qt.vector4d(0.718, 0.067, 0.859, 1.0)
+        colorPrimaryContainer:  Qt.vector4d(0.090, 0.043, 0.333, 1.0)
+        colorTertiary:          Qt.vector4d(0.224, 1.000, 0.600, 1.0)
+        colorPrimaryNext:           colorPrimary
+        colorSecondaryNext:         colorSecondary
+        colorPrimaryContainerNext:  colorPrimaryContainer
+        colorTertiaryNext:          colorTertiary
 
         fragmentShader: "file://" + root.qsbPath + "?v=" + root.qsbRev
+        cellShader: "file://" + root.harnessDir + "../../quickshell/Shaders/qsb/chrome_hexrain_cells.frag.qsb?v=" + root.qsbRev
+        lightShader: "file://" + root.harnessDir + "../../quickshell/Shaders/qsb/chrome_hexrain_light.frag.qsb?v=" + root.qsbRev
     }
 
     FrameAnimation {

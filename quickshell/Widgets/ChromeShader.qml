@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import qs.Common
 
@@ -172,61 +174,62 @@ Item {
     Loader {
         anchors.fill: parent
         active: root.hasShader
-        sourceComponent: ShaderEffect {
-            property real iTime: root.iTime
-            property real intensity: root.intensity
-            property real cellSize: root.cellSize
-            property real modeAmount: root.modeAmount
-            property real domeStrength: root.domeStrength
-            property real seamGlow: root.seamGlow
-            property real sunDriftSpeed: root.sunDriftSpeed
-            property real heightAmount: root.heightAmount
-            property real matteness: root.matteness
-            property real bleedBack: root.bleedBack
-            property real hexBevel: root.hexBevel
-            property real heightDriftSpeed: root.heightDriftSpeed
-            property real frontSunStrength: root.frontSunStrength
-            property real frontSunSize: root.frontSunSize
-            property real frontSunLifetime: root.frontSunLifetime
-            property real frontSunGap: root.frontSunGap
-            property real frontSunSpeed: root.frontSunSpeed
-            property real frontSunShadowLength: root.frontSunShadowLength
-            property real frontSunShadowDarkness: root.frontSunShadowDarkness
-            property real backSunSize: root.backSunSize
-            property real backSunStrength: root.backSunStrength
-            property real backSunLifetime: root.backSunLifetime
-            property real backSunGap: root.backSunGap
-            property real backSunSpeed: root.backSunSpeed
-            property real backNegSunSize: root.backNegSunSize
-            property real backNegSunStrength: root.backNegSunStrength
-            property real backNegSunLifetime: root.backNegSunLifetime
-            property real backNegSunGap: root.backNegSunGap
-            property real backNegSunSpeed: root.backNegSunSpeed
-            property real backSunPaletteSpeed: root.backSunPaletteSpeed
-            property real frontSunPaletteSpeed: root.frontSunPaletteSpeed
-            property real backSunCount: root.backSunCount
-            property real backNegSunCount: root.backNegSunCount
-            property real frontSunCount: root.frontSunCount
-            property real frontNegSunCount: root.frontNegSunCount
-            property real frontNegSunStrength: root.frontNegSunStrength
-            property real frontNegSunSize: root.frontNegSunSize
-            property real frontNegSunLifetime: root.frontNegSunLifetime
-            property real frontNegSunGap: root.frontNegSunGap
-            property real frontNegSunSpeed: root.frontNegSunSpeed
-            property real fastBackSunStrength: root.fastBackSunStrength
-            property real fastBackSunSize: root.fastBackSunSize
-            property real fastBackSunLifetime: root.fastBackSunLifetime
-            property real fastBackSunGap: root.fastBackSunGap
-            property real fastBackSunSpeed: root.fastBackSunSpeed
-            property real barZoneEnabled: root.barZoneEnabled
-            property real barZoneAnchor: root.barZoneAnchor
-            property real barZoneThickness: root.barZoneThickness
-            property real barZoneElevation: root.barZoneElevation
-            property real flipOriginX: root.flipOriginX
-            property real flipOriginY: root.flipOriginY
-            property real flipStartTime: root.flipStartTime
-            property real flipPropDelay: root.flipPropDelay
-            property real flipDuration: root.flipDuration
+        sourceComponent: HexrainEffect {
+            passesEnabled: root.mode === "hexrain"
+            iTime: root.iTime
+            intensity: root.intensity
+            cellSize: root.cellSize
+            modeAmount: root.modeAmount
+            domeStrength: root.domeStrength
+            seamGlow: root.seamGlow
+            sunDriftSpeed: root.sunDriftSpeed
+            heightAmount: root.heightAmount
+            matteness: root.matteness
+            bleedBack: root.bleedBack
+            hexBevel: root.hexBevel
+            heightDriftSpeed: root.heightDriftSpeed
+            frontSunStrength: root.frontSunStrength
+            frontSunSize: root.frontSunSize
+            frontSunLifetime: root.frontSunLifetime
+            frontSunGap: root.frontSunGap
+            frontSunSpeed: root.frontSunSpeed
+            frontSunShadowLength: root.frontSunShadowLength
+            frontSunShadowDarkness: root.frontSunShadowDarkness
+            backSunSize: root.backSunSize
+            backSunStrength: root.backSunStrength
+            backSunLifetime: root.backSunLifetime
+            backSunGap: root.backSunGap
+            backSunSpeed: root.backSunSpeed
+            backNegSunSize: root.backNegSunSize
+            backNegSunStrength: root.backNegSunStrength
+            backNegSunLifetime: root.backNegSunLifetime
+            backNegSunGap: root.backNegSunGap
+            backNegSunSpeed: root.backNegSunSpeed
+            backSunPaletteSpeed: root.backSunPaletteSpeed
+            frontSunPaletteSpeed: root.frontSunPaletteSpeed
+            backSunCount: root.backSunCount
+            backNegSunCount: root.backNegSunCount
+            frontSunCount: root.frontSunCount
+            frontNegSunCount: root.frontNegSunCount
+            frontNegSunStrength: root.frontNegSunStrength
+            frontNegSunSize: root.frontNegSunSize
+            frontNegSunLifetime: root.frontNegSunLifetime
+            frontNegSunGap: root.frontNegSunGap
+            frontNegSunSpeed: root.frontNegSunSpeed
+            fastBackSunStrength: root.fastBackSunStrength
+            fastBackSunSize: root.fastBackSunSize
+            fastBackSunLifetime: root.fastBackSunLifetime
+            fastBackSunGap: root.fastBackSunGap
+            fastBackSunSpeed: root.fastBackSunSpeed
+            barZoneEnabled: root.barZoneEnabled
+            barZoneAnchor: root.barZoneAnchor
+            barZoneThickness: root.barZoneThickness
+            barZoneElevation: root.barZoneElevation
+            flipOriginX: root.flipOriginX
+            flipOriginY: root.flipOriginY
+            flipStartTime: root.flipStartTime
+            flipPropDelay: root.flipPropDelay
+            flipDuration: root.flipDuration
             property real depthShading: root.depthShading
             property real flipSpecular: root.flipSpecular
             property real hexDepth: root.hexDepth
@@ -235,7 +238,7 @@ Item {
             // the multi-monitor wallpaper it's the combined bounding box of
             // all outputs (so sun centres, drift radii, hex tiling, and the
             // flip wave all live in one continuous space).
-            property vector3d iResolution: Qt.vector3d(
+            iResolution: Qt.vector3d(
                 root.virtualWidth  > 0 ? root.virtualWidth  : width,
                 root.virtualHeight > 0 ? root.virtualHeight : height,
                 1)
@@ -243,17 +246,17 @@ Item {
             // window's actual pixel size. The frag computes
             //   px = qt_TexCoord0 * windowGeom.zw + windowGeom.xy
             // so each output renders the correct slice of one shared field.
-            property vector4d windowGeom: Qt.vector4d(
+            windowGeom: Qt.vector4d(
                 root.windowOffsetX, root.windowOffsetY,
                 width, height)
-            property vector4d colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
-            property vector4d colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)
-            property vector4d colorPrimaryContainer: Qt.vector4d(root.primaryContainerColor.r, root.primaryContainerColor.g, root.primaryContainerColor.b, root.primaryContainerColor.a)
-            property vector4d colorTertiary: Qt.vector4d(root.tertiaryColor.r, root.tertiaryColor.g, root.tertiaryColor.b, root.tertiaryColor.a)
-            property vector4d colorPrimaryNext: Qt.vector4d(root.primaryNextColor.r, root.primaryNextColor.g, root.primaryNextColor.b, root.primaryNextColor.a)
-            property vector4d colorSecondaryNext: Qt.vector4d(root.secondaryNextColor.r, root.secondaryNextColor.g, root.secondaryNextColor.b, root.secondaryNextColor.a)
-            property vector4d colorPrimaryContainerNext: Qt.vector4d(root.primaryContainerNextColor.r, root.primaryContainerNextColor.g, root.primaryContainerNextColor.b, root.primaryContainerNextColor.a)
-            property vector4d colorTertiaryNext: Qt.vector4d(root.tertiaryNextColor.r, root.tertiaryNextColor.g, root.tertiaryNextColor.b, root.tertiaryNextColor.a)
+            colorPrimary: Qt.vector4d(root.primaryColor.r, root.primaryColor.g, root.primaryColor.b, root.primaryColor.a)
+            colorSecondary: Qt.vector4d(root.secondaryColor.r, root.secondaryColor.g, root.secondaryColor.b, root.secondaryColor.a)
+            colorPrimaryContainer: Qt.vector4d(root.primaryContainerColor.r, root.primaryContainerColor.g, root.primaryContainerColor.b, root.primaryContainerColor.a)
+            colorTertiary: Qt.vector4d(root.tertiaryColor.r, root.tertiaryColor.g, root.tertiaryColor.b, root.tertiaryColor.a)
+            colorPrimaryNext: Qt.vector4d(root.primaryNextColor.r, root.primaryNextColor.g, root.primaryNextColor.b, root.primaryNextColor.a)
+            colorSecondaryNext: Qt.vector4d(root.secondaryNextColor.r, root.secondaryNextColor.g, root.secondaryNextColor.b, root.secondaryNextColor.a)
+            colorPrimaryContainerNext: Qt.vector4d(root.primaryContainerNextColor.r, root.primaryContainerNextColor.g, root.primaryContainerNextColor.b, root.primaryContainerNextColor.a)
+            colorTertiaryNext: Qt.vector4d(root.tertiaryNextColor.r, root.tertiaryNextColor.g, root.tertiaryNextColor.b, root.tertiaryNextColor.a)
 
             fragmentShader: root.shaderSource
         }
