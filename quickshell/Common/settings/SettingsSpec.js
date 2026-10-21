@@ -750,6 +750,9 @@ var LOCAL_SPEC = {
     greeterFollowLockScreen: {
         def: true
     },
+    greeterTransparentBackground: {
+        def: false
+    },
     greeterPamExternallyManaged: {
         def: false,
         onChange: "markGreeterSyncPending"

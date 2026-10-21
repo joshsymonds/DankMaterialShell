@@ -1166,6 +1166,7 @@ Singleton {
     property var lockScreenWidgetInstances: Spec.SPEC.lockScreenWidgetInstances.def
     property var greeterWidgetInstances: Spec.SPEC.greeterWidgetInstances.def
     property bool greeterFollowLockScreen: Spec.SPEC.greeterFollowLockScreen.def
+    property bool greeterTransparentBackground: Spec.SPEC.greeterTransparentBackground.def
     readonly property var widgetInstanceListKeys: ["desktopWidgetInstances", "lockScreenWidgetInstances", "greeterWidgetInstances"]
 
     // Released greeters still read these three shared keys, so they follow the lock widgets.
