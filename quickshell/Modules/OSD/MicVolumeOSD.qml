@@ -11,6 +11,7 @@ LevelOSD {
     readonly property var audio: AudioService.source?.audio ?? null
     readonly property bool muted: audio?.muted ?? false
 
+    title: AudioService.displayName(AudioService.source)
     iconName: muted ? "mic_off" : "mic"
     insetIconName: "mic"
     endIconName: "graphic_eq"

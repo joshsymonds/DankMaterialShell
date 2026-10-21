@@ -22,11 +22,18 @@ DOSD {
     property string unit: "%"
     property string displayText: ""
     property bool available: true
+    // Device/app name shown in a label band by OSDLabeledContent, so the
+    // OSD says WHICH sink, source, MPRIS player, or display is being
+    // adjusted. Empty hides the band and keeps the stock layout.
+    property string title: ""
 
     signal levelRequested(int level)
     signal iconClicked
 
     readonly property real osdValueReserve: endIconName.length > 0 || SettingsData.osdAlwaysShowValue ? Theme.buttonHeightM : 0
+    // Horizontal layouts grow by the label band; vertical ones fit the
+    // label below the slider inside their existing height.
+    readonly property real osdTitleReserve: title.length > 0 ? Theme.fontSizeSmall + Theme.spacingS : 0
 
     function showEndIconTooltip(item) {
         endIconTooltip.active = true;
@@ -70,7 +77,7 @@ DOSD {
     }
 
     osdWidth: isVerticalLayout ? Theme.osdHeight : Math.min(Theme.osdLevelWidth + osdValueReserve, screenWidth - Theme.spacingM * 2)
-    osdHeight: isVerticalLayout ? Math.min(Theme.osdLevelVerticalHeight, screenHeight - Theme.spacingM * 2) : Theme.buttonHeightS + Theme.spacingS * 2
+    osdHeight: isVerticalLayout ? Math.min(Theme.osdLevelVerticalHeight, screenHeight - Theme.spacingM * 2) : Theme.buttonHeightS + Theme.spacingS * 2 + osdTitleReserve
     autoHideInterval: 3000
     sheetWidth: CcMetrics.sheetWidthFor(CcMetrics.minimumColumns)
     enableMouseInteraction: true
@@ -81,37 +88,45 @@ DOSD {
         sourceComponent: DTooltip {}
     }
 
-    content: OsdLevelRow {
-        vertical: root.isVerticalLayout
-        sliderSize: root.isVerticalLayout ? "m" : "s"
-        iconName: root.iconName
-        insetIconName: root.insetIconName
-        endIconName: root.endIconName
-        endIconInteractive: root.sheet !== null
-        endIconLabel: root.endIconLabel
-        iconInteractive: root.iconInteractive
-        iconLabel: root.iconLabel
-        iconColor: root.iconColor
-        iconBackgroundColor: root.fillColor === Theme.error ? Theme.errorContainer : root.fillColor
-        fillColor: root.fillColor
-        value: root.value
-        minimum: root.minimum
-        maximum: root.maximum
-        unit: root.unit
-        displayText: root.displayText
-        sliderEnabled: root.available
-        onIconClicked: root.iconClicked()
-        onEndIconClicked: {
-            root.hideEndIconTooltip();
-            root.expand();
-        }
-        onEndIconHoveredChanged: {
-            if (endIconHovered && root.sheet)
-                root.showEndIconTooltip(endIconItem);
-            else
+    content: OSDLabeledContent {
+        title: root.title
+        useVertical: root.isVerticalLayout
+
+        OsdLevelRow {
+            anchors.fill: parent
+            // OSDLabeledContent supplies the Theme.spacingS inset on every side.
+            horizontalPadding: 0
+            vertical: root.isVerticalLayout
+            sliderSize: root.isVerticalLayout ? "m" : "s"
+            iconName: root.iconName
+            insetIconName: root.insetIconName
+            endIconName: root.endIconName
+            endIconInteractive: root.sheet !== null
+            endIconLabel: root.endIconLabel
+            iconInteractive: root.iconInteractive
+            iconLabel: root.iconLabel
+            iconColor: root.iconColor
+            iconBackgroundColor: root.fillColor === Theme.error ? Theme.errorContainer : root.fillColor
+            fillColor: root.fillColor
+            value: root.value
+            minimum: root.minimum
+            maximum: root.maximum
+            unit: root.unit
+            displayText: root.displayText
+            sliderEnabled: root.available
+            onIconClicked: root.iconClicked()
+            onEndIconClicked: {
                 root.hideEndIconTooltip();
+                root.expand();
+            }
+            onEndIconHoveredChanged: {
+                if (endIconHovered && root.sheet)
+                    root.showEndIconTooltip(endIconItem);
+                else
+                    root.hideEndIconTooltip();
+            }
+            onHoverChanged: hovered => root.setChildHovered(hovered)
+            onSliderValueChanged: newValue => root.requestLevel(newValue)
         }
-        onHoverChanged: hovered => root.setChildHovered(hovered)
-        onSliderValueChanged: newValue => root.requestLevel(newValue)
     }
 }

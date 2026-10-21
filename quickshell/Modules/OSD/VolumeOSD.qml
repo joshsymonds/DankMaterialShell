@@ -10,6 +10,7 @@ LevelOSD {
 
     readonly property var audio: AudioService.sink?.audio ?? null
 
+    title: AudioService.displayName(AudioService.sink)
     iconName: AudioService.sinkVolumeIconName
     insetIconName: "music_note"
     endIconName: AudioService.sinkIcon(AudioService.sink)

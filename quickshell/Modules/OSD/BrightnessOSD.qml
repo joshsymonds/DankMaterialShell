@@ -11,6 +11,7 @@ LevelOSD {
     readonly property var device: BrightnessService.getCurrentDeviceInfo()
     property int displayLevel: BrightnessService.brightnessLevel
 
+    title: device?.name ?? ""
     iconName: BrightnessService.brightnessIconName(device, displayLevel)
     insetIconName: BrightnessService.brightnessIconName(device)
     endIconName: {

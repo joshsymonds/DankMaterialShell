@@ -12,6 +12,7 @@ LevelOSD {
     readonly property real playerVolume: player?.volume ?? 0
     property bool _suppressNewPlayer: false
 
+    title: player?.identity ?? ""
     iconName: playerVolume === 0 && player ? "music_off" : "music_note"
     insetIconName: "music_note"
     endIconName: "equalizer"
