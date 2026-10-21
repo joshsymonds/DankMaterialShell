@@ -11,7 +11,10 @@ fork carries a stack of local patches plus an integration branch that
 combines them for desktop deployment.
 
 - `origin` → `joshsymonds/DankMaterialShell`
-- `upstream` → `AvengeMedia/DankMaterialShell`
+- `upstream` → `AvengeMedia/DankMaterialShell` (GitHub redirects it to
+  `duxlabs-dev/dux-shell` since the 2.0 "Dux Shell" rebrand; the binary,
+  flake outputs and HM option names are still `dms` /
+  `dank-material-shell`)
 
 ## Branch model
 
@@ -150,9 +153,26 @@ upstream PR unit.
   must NOT land in upstream PRs. Patch branches branch off `master`
   precisely so they never inherit them; `scripts/integration-check`
   excludes them from the oracle diff.
-- When updating from upstream: ff `master` from `upstream/master`,
+- When updating from upstream: ff `master` from `upstream/master` and
+  push it first (the oracle diffs against `origin/master`), then
   `git merge --no-ff master` into `josh/integration`, resolve once
   (durable), re-run the oracle, push.
+- When upstream moves or rewrites code a patch touches, the integration
+  resolution alone fails the oracle: the ported content lives in files
+  the stale patch branch never touched. Port the patch branch itself —
+  `git merge master` into `josh/<topic>`, resolve there, push (plain) —
+  then `git merge --no-ff josh/<topic>` into integration. The patch
+  branch stays the PR-ready unit against current upstream.
+- Never commit feature work directly on `josh/integration`. The oracle
+  only covers files some merged `josh/<topic>` branch touches, so a
+  direct commit fails it (and has no upstream PR unit).
+- `dux-qml-common/` is a git submodule (`quickshell/DCommon` symlinks
+  into it). Run `git submodule update --init` in every clone/worktree;
+  the QML tests fail without it. The Nix build pulls it from the
+  `dank-qml-common` flake input instead.
+- `nix develop` installs a prek pre-commit hook (`.git/hooks/pre-commit`)
+  that runs the QML tests; commit from inside `nix develop` or it fails
+  for want of `qmltestrunner`.
 - The Nix consumption lives downstream in `nix-config`
   (`home-manager/dms/`), not here. Do not add deploy plumbing to this
   repo — bump the `dank-material-shell` flake input and `update`

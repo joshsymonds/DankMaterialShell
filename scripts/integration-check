@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Oracle gate for josh/integration (long-lived, maintained — see CLAUDE.md).
 #
-# Asserts the delta this integration adds over origin/josh/integration is
-# EXACTLY the union of the merged josh/<topic> branches' own deltas, with
-# tooling files excluded. If integration touches a file no merged patch
-# branch touches, a merge resolution silently dropped or mangled patch
-# content — fail, do NOT push.
+# Asserts the delta integration adds over origin/master (every file where
+# HEAD differs from master) is covered by the union of the merged
+# josh/<topic> branches' own deltas, with tooling files excluded. Upstream
+# content integration merely carries is identical to master and drops
+# out, so an upstream sync is checked exactly like a patch merge. If
+# integration differs from master in a file no merged patch branch
+# touches, a merge resolution silently dropped or mangled content — fail,
+# do NOT push. Push master before syncing it in, or every upstream file
+# that origin/master lacks is flagged (fail-closed).
 #
 # Fail-closed by construction: a merge whose subject omits the branch
 # name only SHRINKS the patch-union and makes the gate flag more
@@ -17,10 +21,9 @@ trap 'rm -f "$int_delta" "$pat_delta"' EXIT
 
 git fetch origin --quiet
 base=origin/master
-prev=origin/josh/integration
 
-# Tooling files legitimately diverge from prev; exclude them.
-git diff --name-only "$prev" HEAD -- \
+# Tooling files legitimately diverge from master; exclude them.
+git diff --name-only "$base" HEAD -- \
     ':!CLAUDE.md' ':!INTEGRATION.md' ':!.gitignore' ':!scripts/integration-check' \
     | sort -u > "$int_delta"
 

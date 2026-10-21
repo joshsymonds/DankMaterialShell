@@ -14,12 +14,18 @@ what's deployed by reading this file, not by spelunking the merge graph.
 
 ## Patch branches in the current integration
 
+Upstream base: `master` = upstream `3284acab` (Dux Shell v2.0.0,
+2026-10-20). Every live patch branch below has `master` merged in and
+is ported to the post-2.0 layout.
+
 | Branch | Origin | Upstream status | What it does |
 |---|---|---|---|
-| `josh/chrome-shader` | local | Not yet PRed upstream | The big chrome+wallpaper overhaul. Live-rendered wallpaper as a multi-monitor canvas with the "hexrain" scene (continuous-direction cast shadows, palette-flip wave, dynamic sun counts, bar-zone elevation/anchor, per-output activation). Includes ShaderSceneEditor for live iteration (toggleable). Adds `Theme.widgetBackgroundColor = "scl"` (surfaceContainerLowest) and a `barConfig.widgetPill` toggle for capsule-shaped chrome. SceneStateService writes to an XDG state shadow so saves persist without polluting the source. |
-| `josh/wider-pills` | local | Not yet PRed upstream | Single-line change to `Modules/DankBar/DankBarWindow.qml`: bumps `widgetThickness` base from `26` to `36`. Combined with `innerPadding=0` in the user's `barConfigs`, pills go from ~28px to ~36px wide while the bar stays at 40px — eliminates the "pills floating in a wide channel" look. |
-| `josh/icon-cleanup` | local | Not yet PRed upstream | `RamMonitor.qml`: icon `developer_board` → `memory_alt`. `developer_board` (PCB with chips) reads as a graphics card, not a RAM stick; `memory_alt` (DIMM-shaped) is correct. Frees `developer_board` for downstream GPU plugins (dms-gpu-pill) without clashing with the CPU's `memory` icon. |
-| `josh/notif-suppress-sound` | local | Not yet PRed upstream (PR-ready off `master`) | `Services/NotificationService.qml`: honor the freedesktop `org.freedesktop.Notifications` `suppress-sound` boolean hint. Senders that play their own audio for a notification can set the hint to ask DMS not to double up. Previously DMS skipped its own sound only as a side effect of the dedup early-return (when an identically-keyed popup was still visible), so transient notifications double-sounded while lingering ones didn't — nondeterministic. Motivated by nix-config's `ntfy-notify` handler, which plays its own classified chime and sets `suppress-sound`. |
+| `josh/chrome-shader` | local | Not yet PRed upstream | The big chrome+wallpaper overhaul. Live-rendered wallpaper (`ShaderWallpaperBackground`, swapped in for `WallpaperBackground` in `shell.qml`'s wallpaper scope) as a multi-monitor canvas with the "hexrain" scene (continuous-direction cast shadows, palette-flip wave, dynamic sun counts, bar-zone elevation/anchor, per-output activation). Includes ShaderSceneEditor for live iteration (toggleable). Bar shader overlay in `Modules/DBar/BarSurface.qml` (`barConfig.shader*` keys, masked to the bar body + goth wings; unknown modes like `"none"` create no ShaderEffect and no frame clock). Adds `Theme.widgetBackgroundColor = "scl"` (surfaceContainerLowest — note upstream's generic color keys now use `scl` = Low, `scll` = Lowest) and a `barConfig.widgetPill` toggle for capsule-shaped chrome in `Modules/SurfaceWidgets/BarPill.qml`. Notification click focuses the originating niri window (`NiriService.focusSourceForNotification`). SceneStateService writes to an XDG state shadow (`$XDG_STATE_HOME/dms/scenes`) so saves persist without polluting the source. `Theme.tertiary` and the cross-monitor fullscreen-detection fix it used to carry are upstream now. |
+| `josh/wider-pills` | local | Not yet PRed upstream | `Theme.barWidgetThickness`: widget thickness base `26` → `36` (upstream centralized the formula there; `Theme.barThickness` derives from it, so the bar is 40px at `innerPadding=0`). Combined with `innerPadding=0` in the user's `barConfigs`, pills go from ~28px to ~36px wide — eliminates the "pills floating in a wide channel" look. |
+| `josh/icon-cleanup` | local | Not yet PRed upstream | `Modules/DBar/Widgets/RamMonitor.qml`: icon `developer_board` → `memory_alt`. `developer_board` (PCB with chips) reads as a graphics card, not a RAM stick; `memory_alt` (DIMM-shaped) is correct. Frees `developer_board` for downstream GPU plugins (dms-gpu-pill) without clashing with the CPU's `memory` icon. |
+| `josh/osd-labels` | local | Not yet PRed upstream | `Widgets/OSDLabeledContent.qml` + `LevelOSD.title`: Volume/MicVolume/MediaVolume/Brightness OSDs show which sink, source, MPRIS player or display they adjust. Ported from five commits that were made directly on integration before upstream's LevelOSD rewrite. |
+| `josh/greeter-transparent-bg` | local | Not yet PRed upstream | `greeterTransparentBackground` setting (SettingsSpec/SettingsData, re-exposed by `GreetdSettings`): the greeter paints no wallpaper Image and no dim layer, so a host compositor that paints its own wallpaper (halmasuit) shows through. Ported from a commit made directly on integration. |
+| `josh/notif-suppress-sound` | local | **Upstreamed** as #2440 (merged 2026-05-18) | Honored the freedesktop `suppress-sound` hint in `NotificationService.qml`. Upstream's version (which also honors `sound-name`) is now in `master`, so this merge contributes nothing; retire it with `git revert -m 1` on its integration merge when convenient (the branch was left un-ported). |
 
 ## Tooling commits
 
@@ -37,13 +43,18 @@ excludes them from the oracle diff:
 
 ## The oracle gate (`scripts/integration-check`)
 
-Run before every push. It diffs what *this* integration adds versus
-`origin/josh/integration` and asserts every changed file is accounted
-for by one of the merged `josh/<topic>` branches' own deltas (tooling
-files excluded). If integration touches a file no merged patch branch
-touches, a merge resolution silently dropped or mangled patch content —
-the script fails and you must not push. This is the durable replacement
-for the old "eyeball the regenerated tree" step.
+Run before every push. It diffs integration against `origin/master`
+(every file where integration differs from upstream) and asserts each
+one is accounted for by one of the merged `josh/<topic>` branches' own
+deltas (tooling files excluded). Upstream content that integration
+merely carries is identical to master and drops out, so an upstream
+sync is checked the same way as a patch merge — push `master` first.
+If integration differs from master in a file no merged patch branch
+touches, a merge resolution silently dropped or mangled content — the
+script fails and you must not push. This is the durable replacement
+for the old "eyeball the regenerated tree" step. (Until 2026-10-20 it
+diffed against `origin/josh/integration`, which flagged every upstream
+file on a sync and could never pass one.)
 
 ## Coordinating across worktrees / machines
 
