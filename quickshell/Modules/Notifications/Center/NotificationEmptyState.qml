@@ -1,33 +1,32 @@
 import QtQuick
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Item {
     id: root
 
-    width: parent.width
-    height: 200
+    anchors.fill: parent
     visible: NotificationService.notifications.length === 0
 
     Column {
         anchors.centerIn: parent
-        spacing: Theme.spacingXS
-        width: parent.width * 0.8
+        width: parent.width
+        spacing: Theme.spacingM
 
-        DankIcon {
+        DIcon {
             anchors.horizontalCenter: parent.horizontalCenter
-            name: "notifications_none"
-            size: Theme.iconSizeLarge + 16
-            color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.3)
+            name: "emoji_events"
+            size: Theme.iconSizeLarge + Theme.spacingL
+            color: Theme.onSurfaceVariant
         }
 
         StyledText {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: I18n.tr("Nothing to see here")
+            text: I18n.tr("You're all caught up", "notification center empty state, no notifications left to read")
             font.pixelSize: Theme.fontSizeLarge
-            color: Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.3)
-            font.weight: Font.Medium
+            color: Theme.onSurfaceVariant
+            font.weight: Theme.fontWeightMedium
             horizontalAlignment: Text.AlignHCenter
         }
     }

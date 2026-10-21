@@ -15,7 +15,7 @@ Item {
     property bool inputEnabled: false
     property point lastMousePos: Qt.point(-1, -1)
     property bool mouseInitialized: false
-    property var videoPlayer: null
+    readonly property var videoPlayer: playerLoader.item
 
     signal dismissed
 
@@ -25,8 +25,26 @@ Item {
     Rectangle {
         id: background
         anchors.fill: parent
-        color: "black"
+        color: Theme.screenOffColor
         visible: root.active
+
+        Loader {
+            id: playerLoader
+            anchors.fill: parent
+            active: false
+            source: "VideoScreensaverPlayer.qml"
+            onLoaded: {
+                item.errorOccurred.connect((error, errorString) => {
+                    log.warn("playback error:", errorString);
+                    ToastService.showError(I18n.tr("Video screensaver"), I18n.tr("Playback error: ") + errorString);
+                    root.dismiss();
+                });
+                if (root.videoSource) {
+                    item.source = root.videoSource;
+                    item.play();
+                }
+            }
+        }
     }
 
     Timer {
@@ -55,7 +73,7 @@ Item {
         onExited: exitCode => {
             if (exitCode !== 0 || !videoPicker.result) {
                 log.warn("no video found in folder");
-                ToastService.showError(I18n.tr("Video Screensaver"), I18n.tr("No video found in folder"));
+                ToastService.showError(I18n.tr("Video screensaver"), I18n.tr("No video found in folder"));
                 root.dismiss();
             }
         }
@@ -82,54 +100,22 @@ Item {
         }
     }
 
-    function createVideoPlayer() {
-        if (videoPlayer)
-            return true;
-
-        try {
-            videoPlayer = Qt.createQmlObject(`
-                import QtQuick
-                import QtMultimedia
-                Video {
-                    anchors.fill: parent
-                    fillMode: VideoOutput.PreserveAspectCrop
-                    loops: MediaPlayer.Infinite
-                    volume: 0
-                }
-            `, background, "VideoScreensaver.VideoPlayer");
-
-            videoPlayer.errorOccurred.connect((error, errorString) => {
-                log.warn("playback error:", errorString);
-                ToastService.showError(I18n.tr("Video Screensaver"), I18n.tr("Playback error: ") + errorString);
-                root.dismiss();
-            });
-
-            return true;
-        } catch (e) {
-            log.warn("Failed to create video player:", e);
-            return false;
-        }
-    }
-
-    function destroyVideoPlayer() {
-        if (videoPlayer) {
-            videoPlayer.stop();
-            videoPlayer.destroy();
-            videoPlayer = null;
-        }
-    }
-
     function start() {
         if (!SettingsData.lockScreenVideoEnabled || !SettingsData.lockScreenVideoPath)
             return;
 
+        MultimediaService.ensureProbed();
         if (!MultimediaService.available) {
-            ToastService.showError(I18n.tr("Video Screensaver"), I18n.tr("QtMultimedia is not available"));
+            ToastService.showError(I18n.tr("Video screensaver"), I18n.tr("QtMultimedia is not available"));
             return;
         }
 
-        if (!createVideoPlayer())
+        playerLoader.active = true;
+        if (playerLoader.status === Loader.Error) {
+            log.warn("Failed to load video player");
+            playerLoader.active = false;
             return;
+        }
 
         videoPicker.result = "";
         videoPicker.folder = "";
@@ -144,7 +130,9 @@ Item {
     function dismiss() {
         if (!active)
             return;
-        destroyVideoPlayer();
+        if (videoPlayer)
+            videoPlayer.stop();
+        playerLoader.active = false;
         inputEnabled = false;
         active = false;
         videoSource = "";

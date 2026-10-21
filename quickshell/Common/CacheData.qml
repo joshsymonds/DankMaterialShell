@@ -11,7 +11,7 @@ Singleton {
     id: root
     readonly property var log: Log.scoped("CacheData")
 
-    readonly property int cacheConfigVersion: 1
+    readonly property int cacheConfigVersion: 3
 
     readonly property bool isGreeterMode: Quickshell.env("DMS_RUN_GREETER") === "1" || Quickshell.env("DMS_RUN_GREETER") === "true"
 
@@ -19,71 +19,109 @@ Singleton {
     readonly property string _stateDir: Paths.strip(_stateUrl)
 
     property bool _loading: false
+    property bool _hasLoaded: false
+    property int _loadedCacheVersion: 0
 
-    property string wallpaperLastPath: ""
-    property string profileLastPath: ""
+    readonly property var _pinKeys: ["brightnessDevicePins", "wifiNetworkPins", "bluetoothDevicePins", "audioInputDevicePins", "audioOutputDevicePins"]
+    readonly property var _historyKeys: ["browserUsageHistory", "filePickerUsageHistory"]
+    readonly property var _dataKeys: ["fileBrowserSettings", "processFilterTypes", "pluginViewSort", "pluginViewFilter", "dashFocusCardId", "controlCenterCollapsedCategories", "mediaLyricsOpen", "matugenPreviews", "matugenSeedPreviews", "matugenAppliedKey", "lockScreenPlacementSamples"].concat(_pinKeys, _historyKeys)
 
-    property var fileBrowserSettings: ({
-            "wallpaper": {
-                "lastPath": "",
-                "viewMode": "grid",
-                "sortBy": "name",
-                "sortAscending": true,
-                "iconSizeIndex": 1,
-                "showSidebar": true
-            },
-            "profile": {
-                "lastPath": "",
-                "viewMode": "grid",
-                "sortBy": "name",
-                "sortAscending": true,
-                "iconSizeIndex": 1,
-                "showSidebar": true
-            },
-            "notepad_save": {
-                "lastPath": "",
-                "viewMode": "list",
-                "sortBy": "name",
-                "sortAscending": true,
-                "iconSizeIndex": 1,
-                "showSidebar": true
-            },
-            "notepad_load": {
-                "lastPath": "",
-                "viewMode": "list",
-                "sortBy": "name",
-                "sortAscending": true,
-                "iconSizeIndex": 1,
-                "showSidebar": true
-            },
-            "generic": {
-                "lastPath": "",
-                "viewMode": "list",
-                "sortBy": "name",
-                "sortAscending": true,
-                "iconSizeIndex": 1,
-                "showSidebar": true
-            },
-            "default": {
-                "lastPath": "",
-                "viewMode": "list",
-                "sortBy": "name",
-                "sortAscending": true,
-                "iconSizeIndex": 1,
-                "showSidebar": true
-            }
+    property string pluginViewFilter: "enabled"
+    property string dashFocusCardId: ""
+    property var controlCenterCollapsedCategories: []
+    property bool mediaLyricsOpen: false
+    property var matugenPreviews: ({})
+    property var matugenSeedPreviews: ({})
+    property string matugenAppliedKey: ""
+    property var lockScreenPlacementSamples: ({})
+    property var pluginViewSort: ({
+            by: "modified",
+            descending: true
         })
+    property var processFilterTypes: ["user", "system"]
+
+    property var browserUsageHistory: ({})
+    property var filePickerUsageHistory: ({})
+
+    property var brightnessDevicePins: ({})
+    property var wifiNetworkPins: ({})
+    property var bluetoothDevicePins: ({})
+    property var audioInputDevicePins: ({})
+    property var audioOutputDevicePins: ({})
+
+    property var fileBrowserSettings: ({})
 
     Component.onCompleted: {
-        if (!isGreeterMode) {
-            loadCache();
-        }
+        if (isGreeterMode)
+            return;
+        loadCache();
     }
 
     function loadCache() {
         _loading = true;
-        parseCache(cacheFile.text());
-        _loading = false;
+        try {
+            parseCache(cacheFile.text());
+        } finally {
+            _loading = false;
+            _hasLoaded = true;
+        }
+    }
+
+    function set(key, value) {
+        if (_dataKeys.indexOf(key) < 0) {
+            log.warn("Unknown cache key:", key);
+            return;
+        }
+        root[key] = value;
+        saveCache();
+    }
+
+    function migratePins(pins) {
+        if (!pins)
+            return;
+        if (!_hasLoaded)
+            loadCache();
+        if (_loadedCacheVersion >= cacheConfigVersion)
+            return;
+
+        let migrated = false;
+        for (const key of _pinKeys) {
+            const legacy = pins[key];
+            if (!legacy || Object.keys(legacy).length === 0)
+                continue;
+            if (Object.keys(root[key] || {}).length > 0)
+                continue;
+            root[key] = legacy;
+            migrated = true;
+        }
+
+        if (!migrated)
+            return;
+        log.info("Migrated device pins from settings.json");
+        saveCache();
+    }
+
+    function migrateUsageHistories(histories) {
+        if (!histories)
+            return;
+        if (!_hasLoaded)
+            loadCache();
+
+        let migrated = false;
+        for (const key of _historyKeys) {
+            const legacy = histories[key];
+            if (!legacy || Object.keys(legacy).length === 0)
+                continue;
+            if (Object.keys(root[key] || {}).length > 0)
+                continue;
+            root[key] = legacy;
+            migrated = true;
+        }
+
+        if (!migrated)
+            return;
+        log.info("Migrated usage histories from settings.json");
+        saveCache();
     }
 
     function parseCache(content) {
@@ -91,9 +129,22 @@ Singleton {
         try {
             if (content && content.trim()) {
                 const cache = JSON.parse(content);
+                _loadedCacheVersion = cache.configVersion || 0;
 
-                wallpaperLastPath = cache.wallpaperLastPath !== undefined ? cache.wallpaperLastPath : "";
-                profileLastPath = cache.profileLastPath !== undefined ? cache.profileLastPath : "";
+                pluginViewFilter = ["all", "enabled", "disabled", "updates"].includes(cache.pluginViewFilter) ? cache.pluginViewFilter : "enabled";
+                dashFocusCardId = typeof cache.dashFocusCardId === "string" ? cache.dashFocusCardId : "";
+                controlCenterCollapsedCategories = Array.isArray(cache.controlCenterCollapsedCategories) ? cache.controlCenterCollapsedCategories.filter(id => typeof id === "string") : [];
+                mediaLyricsOpen = cache.mediaLyricsOpen === true;
+                matugenPreviews = typeof cache.matugenPreviews?.key === "string" ? cache.matugenPreviews : {};
+                matugenSeedPreviews = cache.matugenSeedPreviews && typeof cache.matugenSeedPreviews === "object" && !Array.isArray(cache.matugenSeedPreviews) ? cache.matugenSeedPreviews : {};
+                matugenAppliedKey = typeof cache.matugenAppliedKey === "string" ? cache.matugenAppliedKey : "";
+                lockScreenPlacementSamples = cache.lockScreenPlacementSamples && typeof cache.lockScreenPlacementSamples === "object" && !Array.isArray(cache.lockScreenPlacementSamples) ? cache.lockScreenPlacementSamples : {};
+                const pluginSort = cache.pluginViewSort;
+                pluginViewSort = {
+                    by: ["name", "author", "modified"].includes(pluginSort?.by) ? pluginSort.by : "modified",
+                    descending: typeof pluginSort?.descending === "boolean" ? pluginSort.descending : true
+                };
+                processFilterTypes = Array.isArray(cache.processFilterTypes) ? cache.processFilterTypes.filter(value => value === "user" || value === "system") : ["user", "system"];
 
                 if (cache.fileBrowserSettings !== undefined) {
                     fileBrowserSettings = cache.fileBrowserSettings;
@@ -125,6 +176,11 @@ Singleton {
                         }
                     };
                 }
+                fileBrowserSettings = withLegacyLastPaths(fileBrowserSettings, cache);
+
+                for (const key of _pinKeys.concat(_historyKeys)) {
+                    root[key] = cache[key] !== undefined ? cache[key] : {};
+                }
 
                 if (cache.configVersion === undefined) {
                     migrateFromUndefinedToV1(cache);
@@ -139,15 +195,39 @@ Singleton {
         }
     }
 
+    function withLegacyLastPaths(settings, legacy) {
+        const merged = Object.assign({}, settings);
+        for (const [bucket, lastPath] of [["wallpaper", legacy.wallpaperLastPath], ["profile", legacy.profileLastPath]]) {
+            if (!lastPath || merged[bucket]?.lastPath)
+                continue;
+            merged[bucket] = Object.assign({}, merged[bucket], {
+                "lastPath": lastPath
+            });
+        }
+        return merged;
+    }
+
     function saveCache() {
         if (_loading)
             return;
-        cacheFile.setText(JSON.stringify({
-            "wallpaperLastPath": wallpaperLastPath,
-            "profileLastPath": profileLastPath,
+        const data = {
+            "processFilterTypes": processFilterTypes,
+            "pluginViewSort": pluginViewSort,
+            "pluginViewFilter": pluginViewFilter,
+            "dashFocusCardId": dashFocusCardId,
+            "controlCenterCollapsedCategories": controlCenterCollapsedCategories,
+            "mediaLyricsOpen": mediaLyricsOpen,
+            "matugenPreviews": matugenPreviews,
+            "matugenSeedPreviews": matugenSeedPreviews,
+            "matugenAppliedKey": matugenAppliedKey,
+            "lockScreenPlacementSamples": lockScreenPlacementSamples,
             "fileBrowserSettings": fileBrowserSettings,
             "configVersion": cacheConfigVersion
-        }, null, 2));
+        };
+        for (const key of _pinKeys.concat(_historyKeys)) {
+            data[key] = root[key];
+        }
+        cacheFile.setText(JSON.stringify(data, null, 2));
     }
 
     function migrateFromUndefinedToV1(cache) {
@@ -155,7 +235,7 @@ Singleton {
     }
 
     function cleanupUnusedKeys() {
-        const validKeys = ["wallpaperLastPath", "profileLastPath", "fileBrowserSettings", "configVersion"];
+        const validKeys = _dataKeys.concat(["configVersion"]);
 
         try {
             const content = cacheFile.text();
@@ -200,7 +280,7 @@ Singleton {
     FileView {
         id: launcherCacheFile
 
-        path: isGreeterMode ? "" : _stateDir + "/DankMaterialShell/launcher_cache.json"
+        path: isGreeterMode ? "" : _stateDir + "/dms/launcher_cache.json"
         blockLoading: true
         blockWrites: true
         atomicWrites: true
@@ -210,20 +290,20 @@ Singleton {
     FileView {
         id: cacheFile
 
-        path: isGreeterMode ? "" : _stateDir + "/DankMaterialShell/cache.json"
+        path: isGreeterMode ? "" : _stateDir + "/dms/cache.json"
         blockLoading: true
         blockWrites: true
         atomicWrites: true
         watchChanges: !isGreeterMode
         onLoaded: {
-            if (!isGreeterMode) {
-                parseCache(cacheFile.text());
-            }
+            if (isGreeterMode)
+                return;
+            parseCache(cacheFile.text());
         }
         onLoadFailed: error => {
-            if (!isGreeterMode) {
-                log.info("No cache file found, starting fresh");
-            }
+            if (isGreeterMode)
+                return;
+            log.info("No cache file found, starting fresh");
         }
     }
 }

@@ -1,12 +1,21 @@
 import QtQuick
 import Quickshell.Io
 import qs.Common
+import qs.Services
 
 Item {
     id: root
 
     property string layerNamespacePlugin: "plugin"
 
+    property var surfaceContext: null
+    property var hostContext: null
+    property string widgetInstanceId: ""
+    property Component attachedContent: null
+    readonly property bool usesAttachedExpansion: !!attachedContent && ((surfaceContext?.inlineExpansion ?? false) || !hasPopout)
+    readonly property bool surfaceLive: (surfaceContext?.live ?? true) && effectiveVisible
+    readonly property bool attachedActive: surfaceContext?.host?.expansionOwner === root
+    readonly property bool interactionActive: attachedActive || pluginPopout.shouldBeVisible
     property var axis: null
     property string section: "center"
     property var parentScreen: null
@@ -17,12 +26,22 @@ Item {
     property var blurBarWindow: null
     property string pluginId: ""
     property var pluginService: null
+    property bool isFirst: false
+    property bool isLast: false
+    property bool isLeftBarEdge: false
+    property bool isRightBarEdge: false
+    property bool isTopBarEdge: false
+    property bool isBottomBarEdge: false
+    property real sectionSpacing: 0
+    property string segmentRole: "solo"
+    property real crossEdgeExtension: 0
 
     property string visibilityCommand: ""
     property int visibilityInterval: 0
     property bool conditionVisible: true
     property bool _visibilityOverride: false
     property bool _visibilityOverrideValue: true
+    readonly property bool _barRevealed: surfaceContext?.live ?? blurBarWindow?.barRevealed ?? true
 
     readonly property bool effectiveVisible: {
         if (_visibilityOverride)
@@ -46,6 +65,10 @@ Item {
     property string ccWidgetSecondaryText: ""
     property bool ccWidgetIsActive: false
     property bool ccWidgetIsToggle: true
+    property Component ccExpandedContent: null
+    // Unused; kept so older plugins still load.
+    property Component ccFooterContent: null
+    property real ccExpandedMinimumHeight: Theme.listItemHeight
     property Component ccDetailContent: null
     property real ccDetailHeight: 250
 
@@ -62,6 +85,7 @@ Item {
 
     readonly property int iconSize: Theme.barIconSize(barThickness, -4, root.barConfig?.maximizeWidgetIcons, root.barConfig?.iconScale)
     readonly property int iconSizeLarge: Theme.barIconSize(barThickness, undefined, root.barConfig?.maximizeWidgetIcons, root.barConfig?.iconScale)
+    readonly property int textSize: Theme.barTextSize(barThickness, root.barConfig?.fontScale, root.barConfig?.maximizeWidgetText)
 
     Component.onCompleted: {
         loadPluginData();
@@ -122,6 +146,11 @@ Item {
             conditionVisible = true;
     }
 
+    on_BarRevealedChanged: {
+        if (_barRevealed && visibilityCommand && !_visibilityOverride)
+            checkVisibility();
+    }
+
     onVisibilityIntervalChanged: {
         if (visibilityInterval > 0 && visibilityCommand) {
             visibilityTimer.restart();
@@ -134,7 +163,7 @@ Item {
         id: visibilityTimer
         interval: root.visibilityInterval * 1000
         repeat: true
-        running: root.visibilityInterval > 0 && root.visibilityCommand !== ""
+        running: root.visibilityInterval > 0 && root.visibilityCommand !== "" && root._barRevealed && !root._visibilityOverride
         onTriggered: root.checkVisibility()
     }
 
@@ -185,6 +214,15 @@ Item {
         barConfig: root.barConfig
         blurBarWindow: root.blurBarWindow
         content: root.horizontalBarPill
+        isFirst: root.isFirst
+        isLast: root.isLast
+        segmentRole: root.segmentRole
+        isLeftBarEdge: root.isLeftBarEdge
+        isRightBarEdge: root.isRightBarEdge
+        isTopBarEdge: root.isTopBarEdge
+        isBottomBarEdge: root.isBottomBarEdge
+        sectionSpacing: root.sectionSpacing
+        crossEdgeExtension: root.crossEdgeExtension
 
         states: State {
             name: "hidden"
@@ -196,6 +234,7 @@ Item {
         }
 
         transitions: Transition {
+            enabled: !SettingsData.reduceMotion
             NumberAnimation {
                 properties: "width,opacity"
                 duration: Theme.shortDuration
@@ -203,32 +242,8 @@ Item {
             }
         }
 
-        onClicked: {
-            if (pillClickAction) {
-                if (pillClickAction.length === 0) {
-                    pillClickAction();
-                } else {
-                    const globalPos = mapToItem(null, 0, 0);
-                    const currentScreen = parentScreen || Screen;
-                    const pos = SettingsData.getPopupTriggerPosition(globalPos, currentScreen, barThickness, width);
-                    pillClickAction(pos.x, pos.y, pos.width, section, currentScreen);
-                }
-            } else if (hasPopout) {
-                pluginPopout.toggle();
-            }
-        }
-        onRightClicked: {
-            if (pillRightClickAction) {
-                if (pillRightClickAction.length === 0) {
-                    pillRightClickAction();
-                } else {
-                    const globalPos = mapToItem(null, 0, 0);
-                    const currentScreen = parentScreen || Screen;
-                    const pos = SettingsData.getPopupTriggerPosition(globalPos, currentScreen, barThickness, width);
-                    pillRightClickAction(pos.x, pos.y, pos.width, section, currentScreen);
-                }
-            }
-        }
+        onClicked: root.triggerPopout()
+        onRightClicked: root.runPillAction(root.pillRightClickAction)
     }
 
     BasePill {
@@ -246,6 +261,15 @@ Item {
         blurBarWindow: root.blurBarWindow
         content: root.verticalBarPill
         isVerticalOrientation: true
+        isFirst: root.isFirst
+        isLast: root.isLast
+        segmentRole: root.segmentRole
+        isLeftBarEdge: root.isLeftBarEdge
+        isRightBarEdge: root.isRightBarEdge
+        isTopBarEdge: root.isTopBarEdge
+        isBottomBarEdge: root.isBottomBarEdge
+        sectionSpacing: root.sectionSpacing
+        crossEdgeExtension: root.crossEdgeExtension
 
         states: State {
             name: "hidden"
@@ -257,6 +281,7 @@ Item {
         }
 
         transitions: Transition {
+            enabled: !SettingsData.reduceMotion
             NumberAnimation {
                 properties: "height,opacity"
                 duration: Theme.shortDuration
@@ -264,68 +289,85 @@ Item {
             }
         }
 
-        onClicked: {
-            if (pillClickAction) {
-                if (pillClickAction.length === 0) {
-                    pillClickAction();
-                } else {
-                    const globalPos = mapToItem(null, 0, 0);
-                    const currentScreen = parentScreen || Screen;
-                    const pos = SettingsData.getPopupTriggerPosition(globalPos, currentScreen, barThickness, width);
-                    pillClickAction(pos.x, pos.y, pos.width, section, currentScreen);
-                }
-            } else if (hasPopout) {
-                pluginPopout.toggle();
-            }
-        }
-        onRightClicked: {
-            if (pillRightClickAction) {
-                if (pillRightClickAction.length === 0) {
-                    pillRightClickAction();
-                } else {
-                    const globalPos = mapToItem(null, 0, 0);
-                    const currentScreen = parentScreen || Screen;
-                    const pos = SettingsData.getPopupTriggerPosition(globalPos, currentScreen, barThickness, width);
-                    pillRightClickAction(pos.x, pos.y, pos.width, section, currentScreen);
-                }
-            }
-        }
+        onClicked: root.triggerPopout()
+        onRightClicked: root.runPillAction(root.pillRightClickAction)
+    }
+
+    Component.onDestruction: {
+        if (attachedActive)
+            surfaceContext.dismissExpansion();
     }
 
     function closePopout() {
+        if (attachedActive)
+            surfaceContext.dismissExpansion();
         if (pluginPopout) {
             pluginPopout.close();
         }
     }
 
-    function triggerPopout() {
-        if (pillClickAction) {
-            if (pillClickAction.length === 0) {
-                pillClickAction();
-                return;
-            }
-            const pill = isVertical ? verticalPill : horizontalPill;
-            const globalPos = pill.mapToItem(null, 0, 0);
-            const currentScreen = parentScreen || Screen;
-            const pos = SettingsData.getPopupTriggerPosition(globalPos, currentScreen, barThickness, pill.width);
-            pillClickAction(pos.x, pos.y, pos.width, section, currentScreen);
+    function pillAnchor() {
+        const pill = isVertical ? verticalPill : horizontalPill;
+        if (surfaceContext?.popupAnchor)
+            return surfaceContext.popupAnchor(pill, section);
+        const screen = parentScreen || Screen;
+        const position = barConfig?.position ?? (isVertical ? 2 : 0);
+        return {
+            trigger: SettingsData.getPopupTriggerPosition(pill.visualContent.mapToItem(null, 0, 0), screen, barThickness, pill.visualWidth, barSpacing, position, barConfig),
+            screen,
+            section,
+            position,
+            thickness: barThickness,
+            spacing: barSpacing,
+            config: barConfig
+        };
+    }
+
+    function runPillAction(action) {
+        if (!action)
+            return;
+        if (action.length === 0) {
+            action();
             return;
         }
-        if (!hasPopout)
+        const anchor = pillAnchor();
+        if (anchor)
+            action(anchor.trigger.x, anchor.trigger.y, anchor.trigger.width, section, anchor.screen);
+    }
+
+    function positionPopout() {
+        const anchor = pillAnchor();
+        if (!anchor)
+            return false;
+        pluginPopout.setTriggerPosition(anchor.trigger.x, anchor.trigger.y, anchor.trigger.width, section, anchor.screen, anchor.position, anchor.thickness, anchor.spacing, anchor.config, root);
+        return true;
+    }
+
+    function triggerPopout() {
+        surfaceContext?.ensureVisible(root);
+        if (pillClickAction) {
+            runPillAction(pillClickAction);
             return;
+        }
+        if (usesAttachedExpansion && surfaceContext?.requestExpansion(root))
+            return;
+        if (hasPopout && positionPopout())
+            pluginPopout.toggle();
+    }
 
-        const pill = isVertical ? verticalPill : horizontalPill;
-        const globalPos = pill.visualContent.mapToItem(null, 0, 0);
-        const currentScreen = parentScreen || Screen;
-        const barPosition = axis?.edge === "left" ? 2 : (axis?.edge === "right" ? 3 : (axis?.edge === "top" ? 0 : 1));
-        const pos = SettingsData.getPopupTriggerPosition(globalPos, currentScreen, barThickness, pill.visualWidth, barSpacing, barPosition, barConfig);
-
-        pluginPopout.setTriggerPosition(pos.x, pos.y, pos.width, section, currentScreen, barPosition, barThickness, barSpacing, barConfig);
-        pluginPopout.toggle();
+    function triggerHoverPopout(widgetHostId) {
+        if (pillClickAction) {
+            triggerPopout();
+            return;
+        }
+        if (!hasPopout || !positionPopout())
+            return;
+        PopoutManager.requestHoverPopout(pluginPopout, undefined, widgetHostId || pluginId);
     }
 
     PluginPopout {
         id: pluginPopout
+        pluginId: root.pluginId
         contentWidth: root.popoutWidth
         contentHeight: root.popoutHeight
         pluginContent: root.popoutContent

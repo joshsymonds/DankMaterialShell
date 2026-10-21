@@ -12,7 +12,7 @@ DEBUG_MODE=0
 
 show_help() {
     cat << EOF
-dms-greeter - DankMaterialShell greeter launcher
+dms-greeter - Dux Shell greeter launcher
 
 Usage: dms-greeter --command COMPOSITOR [OPTIONS]
 
@@ -38,7 +38,7 @@ Options:
 
 Examples:
     dms-greeter --command niri
-    dms-greeter --command hyprland -C /etc/greetd/custom-hypr.conf
+    dms-greeter --command hyprland -C /etc/greetd/custom-hypr.lua
     dms-greeter --command sway -p /home/user/.config/quickshell/custom-dms
     dms-greeter --command scroll -p /home/user/.config/quickshell/custom-dms
     dms-greeter --command niri --cache-dir /tmp/dmsgreeter
@@ -75,6 +75,32 @@ normalize_bool_flag() {
     esac
 }
 
+is_hyprland_lua_config() {
+    local config_file="$1"
+    case "$config_file" in
+        *.lua)
+            return 0
+            ;;
+    esac
+    if [[ -f "$config_file" ]] && grep -qE '(^|[^[:alnum:]_])hl\.' "$config_file"; then
+        return 0
+    fi
+    return 1
+}
+
+clear_vt() {
+    local clear_sequence=$'\033[2J\033[H\033[3J\033[?25l'
+
+    # Clear retained console text on the controlling VT.
+    if printf '%s' "$clear_sequence" >/dev/tty 2>/dev/null; then
+        return
+    fi
+
+    if [[ -t 1 ]]; then
+        printf '%s' "$clear_sequence"
+    fi
+}
+
 exec_compositor() {
     local log_tag="$1"
     shift
@@ -83,11 +109,14 @@ exec_compositor() {
         exec "$@"
     fi
 
+    clear_vt
+
     if command -v systemd-cat >/dev/null 2>&1; then
-        exec "$@" > >(systemd-cat -t "dms-greeter/$log_tag" -p info) 2>&1
+        exec "$@" > >(systemd-cat -t "dms-greeter/$log_tag" -p info 2>/dev/null) 2>&1
     fi
 
-    exec "$@"
+    # Preserve diagnostics on systems without journald.
+    exec "$@" >>"$CACHE_DIR/$log_tag.log" 2>&1
 }
 
 while [[ $# -gt 0 ]]; do
@@ -214,6 +243,15 @@ export XDG_STATE_HOME="$CACHE_DIR/.local/state"
 export XDG_DATA_HOME="$CACHE_DIR/.local/share"
 export XDG_CACHE_HOME="$CACHE_DIR/.cache"
 
+# Fallback runtime dir for systems without logind/pam_rundir (e.g. Void+seatd),
+# where Wayland compositors abort with "RuntimeDirNotSet". Guarded so logind
+# systems keep their own.
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -d "${XDG_RUNTIME_DIR:-}" ]]; then
+    export XDG_RUNTIME_DIR="$CACHE_DIR/run"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+fi
+
 
 # Keep greeter VT clean by default; callers can override via env or --debug.
 if [[ -z "${RUST_LOG:-}" ]]; then
@@ -222,6 +260,37 @@ fi
 if [[ -z "${NIRI_LOG:-}" ]]; then
     export NIRI_LOG=warn
 fi
+
+# Export the user's configured cursor (from synced settings.json) for the
+# compositor and greeter shell, but only if that theme is installed system-wide.
+apply_user_cursor() {
+    command -v jq >/dev/null 2>&1 || return 0
+    local settings="$DMS_GREET_CFG_DIR/settings.json"
+    [[ -f "$settings" ]] || return 0
+
+    local theme size
+    theme=$(jq -r '.cursorSettings.theme // empty' "$settings" 2>/dev/null)
+    size=$(jq -r '.cursorSettings.size // empty' "$settings" 2>/dev/null)
+    [[ -n "$theme" && "$theme" != "System Default" ]] || return 0
+
+    local dirs=()
+    IFS=':' read -ra data_dirs <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    local d
+    for d in "${data_dirs[@]}"; do
+        [[ -n "$d" ]] && dirs+=("$d/icons")
+    done
+    dirs+=(/run/current-system/sw/share/icons /usr/share/icons /usr/local/share/icons)
+
+    for d in "${dirs[@]}"; do
+        if [[ -d "$d/$theme/cursors" ]]; then
+            export XCURSOR_PATH="$d${XCURSOR_PATH:+:$XCURSOR_PATH}"
+            export XCURSOR_THEME="$theme"
+            [[ -n "$size" ]] && export XCURSOR_SIZE="$size"
+            return 0
+        fi
+    done
+}
+apply_user_cursor
 
 if command -v qs >/dev/null 2>&1; then
     QS_BIN="qs"
@@ -261,10 +330,6 @@ hotkey-overlay {
 
 environment {
     DMS_RUN_GREETER "1"
-}
-
-debug {
-  keep-max-bpc-unchanged
 }
 
 gestures {
@@ -310,19 +375,34 @@ NIRI_EOF
             echo "Error: neither 'start-hyprland' nor 'Hyprland' was found in PATH" >&2
             exit 1
         fi
-        if [[ -z "$COMPOSITOR_CONFIG" ]]; then
-            TEMP_CONFIG=$(mktemp)
-            cat > "$TEMP_CONFIG" << HYPRLAND_EOF
-env = DMS_RUN_GREETER,1
+        if [[ -n "$COMPOSITOR_CONFIG" ]] && is_hyprland_lua_config "$COMPOSITOR_CONFIG"; then
+            TEMP_CONFIG=$(mktemp --suffix=.lua)
+            cat "$COMPOSITOR_CONFIG" > "$TEMP_CONFIG"
+            cat >> "$TEMP_CONFIG" << HYPRLAND_LUA_EOF
 
-misc {
-    disable_hyprland_logo = true
-}
+hl.on("hyprland.start", function()
+    hl.exec_cmd("sh -c \"$QS_CMD; hyprctl dispatch 'hl.dsp.exit()'\"")
+end)
+HYPRLAND_LUA_EOF
+            COMPOSITOR_CONFIG="$TEMP_CONFIG"
+        elif [[ -z "$COMPOSITOR_CONFIG" ]]; then
+            TEMP_CONFIG=$(mktemp --suffix=.lua)
+            cat > "$TEMP_CONFIG" << HYPRLAND_LUA_EOF
+hl.env("DMS_RUN_GREETER", "1")
 
-exec-once = sh -c "$QS_CMD; hyprctl dispatch exit"
-HYPRLAND_EOF
+hl.config({
+    misc = {
+        disable_hyprland_logo = true,
+    },
+})
+
+hl.on("hyprland.start", function()
+    hl.exec_cmd("sh -c \"$QS_CMD; hyprctl dispatch 'hl.dsp.exit()'\"")
+end)
+HYPRLAND_LUA_EOF
             COMPOSITOR_CONFIG="$TEMP_CONFIG"
         else
+            # hyprlang stays usable until 0.57 ships; legacy dispatch is the only form a .conf session accepts
             TEMP_CONFIG=$(mktemp)
             cat "$COMPOSITOR_CONFIG" > "$TEMP_CONFIG"
             cat >> "$TEMP_CONFIG" << HYPRLAND_EOF
@@ -410,9 +490,11 @@ MIRACLE_EOF
     mango|mangowc)
         require_command "mango"
         if [[ -n "$COMPOSITOR_CONFIG" ]]; then
-            exec_compositor "mango" mango -c "$COMPOSITOR_CONFIG" -s "$QS_CMD && mmsg -d quit"
+            exec_compositor "mango" mango -c "$COMPOSITOR_CONFIG" -s "$QS_CMD && mmsg dispatch quit"
         else
-            exec_compositor "mango" mango -s "$QS_CMD && mmsg -d quit"
+            # Without -c mango falls back to /etc/mango/config.conf, whose spawn/quit binds work at the login screen.
+            TEMP_CONFIG=$(mktemp)
+            exec_compositor "mango" mango -c "$TEMP_CONFIG" -s "$QS_CMD && mmsg dispatch quit"
         fi
         ;;
 

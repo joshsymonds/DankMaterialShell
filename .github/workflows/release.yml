@@ -7,21 +7,50 @@ on:
         description: "Tag to release (e.g., v1.0.1)"
         required: true
         type: string
+      notify_issues:
+        description: "Comment on open related/fixes issues asking reporters to retest"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   actions: write
+  issues: write
 
 concurrency:
   group: release-${{ inputs.tag }}
   cancel-in-progress: true
 
 jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Verify quickshell/VERSION matches the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version=$(cat quickshell/VERSION)
+          if [ "${version#v}" != "${TAG#v}" ]; then
+            echo "::error::quickshell/VERSION is '${version}' but the tag is '${TAG}'"; exit 1
+          fi
+
   build-core:
+    needs: [verify-version]
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - { goos: linux, arch: amd64 }
+          - { goos: linux, arch: arm64 }
+          - { goos: freebsd, arch: amd64 }
+          - { goos: freebsd, arch: arm64 }
 
     defaults:
       run:
@@ -29,6 +58,8 @@ jobs:
 
     env:
       TAG: ${{ inputs.tag }}
+      # linux assets keep their historical arch-only names
+      ASSET: ${{ matrix.goos == 'linux' && matrix.arch || format('{0}-{1}', matrix.goos, matrix.arch) }}
 
     steps:
       - name: Checkout
@@ -36,13 +67,16 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
+          submodules: recursive
 
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: ./core/go.mod
+          cache-dependency-path: core/go.sum
 
       - name: Format check
+        if: matrix.goos == 'linux'
         run: |
           if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
             echo "The following files are not formatted:"
@@ -51,38 +85,43 @@ jobs:
           fi
 
       - name: Run tests
+        if: matrix.goos == 'linux'
         run: go test -v ./...
 
-      - name: Build dankinstall (${{ matrix.arch }})
+      - name: Build dankinstall (${{ env.ASSET }})
+        if: matrix.goos == 'linux'
         env:
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           CGO_ENABLED: 0
           GOARCH: ${{ matrix.arch }}
         run: |
           set -eux
           cd cmd/dankinstall
           go build -trimpath -ldflags "-s -w -X main.Version=${TAG}" \
-            -o ../../dankinstall-${{ matrix.arch }}
+            -o ../../dankinstall-${{ env.ASSET }}
           cd ../..
-          gzip -9 -k dankinstall-${{ matrix.arch }}
-          sha256sum dankinstall-${{ matrix.arch }}.gz > dankinstall-${{ matrix.arch }}.gz.sha256
+          gzip -9 -k dankinstall-${{ env.ASSET }}
+          sha256sum dankinstall-${{ env.ASSET }}.gz > dankinstall-${{ env.ASSET }}.gz.sha256
 
-      - name: Build dms (${{ matrix.arch }})
+      - name: Sync embedded shell
+        run: make sync-shell
+
+      - name: Build dms (${{ env.ASSET }})
         env:
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           CGO_ENABLED: 0
           GOARCH: ${{ matrix.arch }}
         run: |
           set -eux
           cd cmd/dms
-          go build -trimpath -ldflags "-s -w -X main.Version=${TAG}" \
-            -o ../../dms-${{ matrix.arch }}
+          go build -trimpath -tags withshell -ldflags "-s -w -X main.Version=${TAG}" \
+            -o ../../dms-${{ env.ASSET }}
           cd ../..
-          gzip -9 -k dms-${{ matrix.arch }}
-          sha256sum dms-${{ matrix.arch }}.gz > dms-${{ matrix.arch }}.gz.sha256
+          gzip -9 -k dms-${{ env.ASSET }}
+          sha256sum dms-${{ env.ASSET }}.gz > dms-${{ env.ASSET }}.gz.sha256
 
       - name: Generate shell completions
-        if: matrix.arch == 'amd64'
+        if: matrix.goos == 'linux' && matrix.arch == 'amd64'
         run: |
           set -eux
           chmod +x dms-amd64
@@ -90,46 +129,58 @@ jobs:
           ./dms-amd64 completion fish > completion.fish
           ./dms-amd64 completion zsh > completion.zsh
 
-      - name: Build dms-distropkg (${{ matrix.arch }})
+      - name: Build dms-distropkg (${{ env.ASSET }})
         env:
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           CGO_ENABLED: 0
           GOARCH: ${{ matrix.arch }}
         run: |
           set -eux
           cd cmd/dms
-          go build -trimpath -tags distro_binary -ldflags "-s -w -X main.Version=${TAG}" \
-            -o ../../dms-distropkg-${{ matrix.arch }}
+          go build -trimpath -tags 'distro_binary withshell' -ldflags "-s -w -X main.Version=${TAG}" \
+            -o ../../dms-distropkg-${{ env.ASSET }}
           cd ../..
-          gzip -9 -k dms-distropkg-${{ matrix.arch }}
-          sha256sum dms-distropkg-${{ matrix.arch }}.gz > dms-distropkg-${{ matrix.arch }}.gz.sha256
+          gzip -9 -k dms-distropkg-${{ env.ASSET }}
+          sha256sum dms-distropkg-${{ env.ASSET }}.gz > dms-distropkg-${{ env.ASSET }}.gz.sha256
 
-      - name: Upload artifacts (${{ matrix.arch }})
-        if: matrix.arch == 'arm64'
+      - name: Upload artifacts (${{ env.ASSET }})
+        if: matrix.goos == 'linux' && matrix.arch == 'arm64'
         uses: actions/upload-artifact@v5
         with:
-          name: core-assets-${{ matrix.arch }}
+          name: core-assets-${{ env.ASSET }}
           path: |
-            core/dankinstall-${{ matrix.arch }}.gz
-            core/dankinstall-${{ matrix.arch }}.gz.sha256
-            core/dms-${{ matrix.arch }}.gz
-            core/dms-${{ matrix.arch }}.gz.sha256
-            core/dms-distropkg-${{ matrix.arch }}.gz
-            core/dms-distropkg-${{ matrix.arch }}.gz.sha256
+            core/dankinstall-${{ env.ASSET }}.gz
+            core/dankinstall-${{ env.ASSET }}.gz.sha256
+            core/dms-${{ env.ASSET }}.gz
+            core/dms-${{ env.ASSET }}.gz.sha256
+            core/dms-distropkg-${{ env.ASSET }}.gz
+            core/dms-distropkg-${{ env.ASSET }}.gz.sha256
+          if-no-files-found: error
+
+      - name: Upload artifacts (${{ env.ASSET }}, no installer)
+        if: matrix.goos != 'linux'
+        uses: actions/upload-artifact@v5
+        with:
+          name: core-assets-${{ env.ASSET }}
+          path: |
+            core/dms-${{ env.ASSET }}.gz
+            core/dms-${{ env.ASSET }}.gz.sha256
+            core/dms-distropkg-${{ env.ASSET }}.gz
+            core/dms-distropkg-${{ env.ASSET }}.gz.sha256
           if-no-files-found: error
 
       - name: Upload artifacts with completions
-        if: matrix.arch == 'amd64'
+        if: matrix.goos == 'linux' && matrix.arch == 'amd64'
         uses: actions/upload-artifact@v5
         with:
-          name: core-assets-${{ matrix.arch }}
+          name: core-assets-${{ env.ASSET }}
           path: |
-            core/dankinstall-${{ matrix.arch }}.gz
-            core/dankinstall-${{ matrix.arch }}.gz.sha256
-            core/dms-${{ matrix.arch }}.gz
-            core/dms-${{ matrix.arch }}.gz.sha256
-            core/dms-distropkg-${{ matrix.arch }}.gz
-            core/dms-distropkg-${{ matrix.arch }}.gz.sha256
+            core/dankinstall-${{ env.ASSET }}.gz
+            core/dankinstall-${{ env.ASSET }}.gz.sha256
+            core/dms-${{ env.ASSET }}.gz
+            core/dms-${{ env.ASSET }}.gz.sha256
+            core/dms-distropkg-${{ env.ASSET }}.gz
+            core/dms-distropkg-${{ env.ASSET }}.gz.sha256
             core/completion.bash
             core/completion.fish
             core/completion.zsh
@@ -157,8 +208,8 @@ jobs:
   #         GH_TOKEN: ${{ steps.app_token.outputs.token }}
   #       run: |
   #         set -euo pipefail
-  #         git config user.name "dms-ci[bot]"
-  #         git config user.email "dms-ci[bot]@users.noreply.github.com"
+  #         git config user.name "dux-ci[bot]"
+  #         git config user.email "344434142+dux-ci[bot]@users.noreply.github.com"
 
   #         version="${GITHUB_REF#refs/tags/}"
   #         echo "Updating to version: $version"
@@ -185,16 +236,19 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
+          submodules: recursive
 
       - name: Fetch updated tag after version bump
         run: |
           git fetch origin --force tag ${TAG}
           git checkout ${TAG}
+          git submodule update --init --recursive
 
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: ./core/go.mod
+          cache-dependency-path: core/go.sum
 
       - name: Download core artifacts
         uses: actions/download-artifact@v5
@@ -205,20 +259,30 @@ jobs:
 
       - name: Generate Changelog
         id: changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           PREVIOUS_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
-          if [ -z "$PREVIOUS_TAG" ]; then
-            CHANGELOG=$(git log --oneline --pretty=format:"%an|%s (%h)" | grep -v "^github-actions\[bot\]|" | sed 's/^[^|]*|/- /' | head -50)
-          else
-            CHANGELOG=$(git log --oneline --pretty=format:"%an|%s (%h)" "${PREVIOUS_TAG}..${TAG}" | grep -v "^github-actions\[bot\]|" | sed 's/^[^|]*|/- /')
+          CHANGELOG=""
+          if [ -n "$PREVIOUS_TAG" ]; then
+            # PR-based notes with author credits; falls back to raw git log below
+            CHANGELOG=$(python3 scripts/release-notes.py "${PREVIOUS_TAG}..${TAG}" --format github --bare 2>/dev/null || true)
+          fi
+          if [ -z "$CHANGELOG" ]; then
+            echo "release-notes.py unavailable or empty, using git log fallback"
+            if [ -z "$PREVIOUS_TAG" ]; then
+              CHANGELOG=$(git log --oneline --pretty=format:"%an|%s (%h)" | grep -v "^github-actions\[bot\]|" | sed 's/^[^|]*|/- /' | head -50)
+            else
+              CHANGELOG=$(git log --oneline --pretty=format:"%an|%s (%h)" "${PREVIOUS_TAG}..${TAG}" | grep -v "^github-actions\[bot\]|" | sed 's/^[^|]*|/- /')
+            fi
           fi
 
           cat > RELEASE_BODY.md << 'EOF'
           ## Installation
 
           ```bash
-          curl -fsSL https://install.danklinux.com | sh
+          curl -fsSL https://install.duxlabs.dev | sh
           ```
 
           ## Assets
@@ -226,16 +290,23 @@ jobs:
           ### Complete Packages
           - **`dms-full-amd64.tar.gz`** - Complete package for x86_64 systems (CLI binaries + QML source + shell completions + installation guide)
           - **`dms-full-arm64.tar.gz`** - Complete package for ARM64 systems (CLI binaries + QML source + shell completions + installation guide)
+          - **`dms-full-freebsd-amd64.tar.gz`** - Complete package for FreeBSD x86_64 systems
+          - **`dms-full-freebsd-arm64.tar.gz`** - Complete package for FreeBSD ARM64 systems
 
           ### Individual Components
           - **`dms-cli-amd64.gz`** - DMS CLI binary for x86_64 systems
           - **`dms-cli-arm64.gz`** - DMS CLI binary for ARM64 systems
+          - **`dms-cli-freebsd-amd64.gz`** - DMS CLI binary for FreeBSD x86_64 systems
+          - **`dms-cli-freebsd-arm64.gz`** - DMS CLI binary for FreeBSD ARM64 systems
           - **`dms-distropkg-amd64.gz`** - DMS CLI binary built with distro_package tag for AMD64 systems
           - **`dms-distropkg-arm64.gz`** - DMS CLI binary built with distro_package tag for ARM64 systems
+          - **`dms-distropkg-freebsd-amd64.gz`** - DMS CLI binary built with distro_package tag for FreeBSD x86_64 systems
+          - **`dms-distropkg-freebsd-arm64.gz`** - DMS CLI binary built with distro_package tag for FreeBSD ARM64 systems
           - **`dankinstall-amd64.gz`** - Installer binary for x86_64 systems
           - **`dankinstall-arm64.gz`** - Installer binary for ARM64 systems
           - **`dms-cli-<version>.tar.gz`** - Go source code with vendored modules (for distro packaging)
           - **`dms-qml.tar.gz`** - QML source code only
+          - **`dms-source.tar.gz`** - Full repository source with bundled DCommon (for distro packaging)
 
           ### Checksums
           - **`*.sha256`** - SHA256 checksums for verifying download integrity
@@ -283,6 +354,22 @@ jobs:
           # Copy completions
           cp _core_assets/completion.* _release_assets/ 2>/dev/null || true
 
+          # Replace the DCommon symlink with real submodule content for packaging
+          rm quickshell/DCommon
+          cp -r dux-qml-common/DCommon quickshell/DCommon
+
+          # Create full source tarball (GitHub tag archives never contain submodule content)
+          VERSION_NUM=${TAG#v}
+          tar --exclude='.git' \
+              --exclude='.github' \
+              --exclude='dux-qml-common' \
+              --exclude='_release_assets' \
+              --exclude='_core_assets' \
+              --exclude='RELEASE_BODY.md' \
+              --transform "s,^\.,DankMaterialShell-${VERSION_NUM},S" \
+              -czf _release_assets/dms-source.tar.gz .
+          (cd _release_assets && sha256sum dms-source.tar.gz > dms-source.tar.gz.sha256)
+
           # Create QML source package (exclude build artifacts and git files)
           # Copy root LICENSE and CONTRIBUTING.md to quickshell/ for packaging
           cp LICENSE CONTRIBUTING.md quickshell/
@@ -293,14 +380,16 @@ jobs:
           # Tar the CONTENTS of quickshell/, not the directory itself
           (cd quickshell && tar --exclude='.git' \
               --exclude='.github' \
+              --exclude='./tests' \
               --exclude='*.tar.gz' \
+              --exclude-from=../scripts/shell-test-excludes.txt \
               -czf ../_release_assets/dms-qml.tar.gz .)
 
           # Generate checksum for QML package
           (cd _release_assets && sha256sum dms-qml.tar.gz > dms-qml.tar.gz.sha256)
 
-          # Create full packages for each architecture
-          for arch in amd64 arm64; do
+          # Create full packages for each os/architecture
+          for arch in amd64 arm64 freebsd-amd64 freebsd-arm64; do
             mkdir -p _temp_full/dms
             mkdir -p _temp_full/bin
             mkdir -p _temp_full/completions
@@ -333,7 +422,7 @@ jobs:
 
             # Create installation guide
             cat > _temp_full/INSTALL.md << 'EOFINSTALL'
-          # DankMaterialShell Installation
+          # Dux Shell Installation
 
           ## Requirements
 
@@ -343,18 +432,16 @@ jobs:
 
           ## Installation Steps
 
-          1. **Install quickshell assets:**
-             ```bash
-             mkdir -p ~/.config/quickshell
-             cp -r dms ~/.config/quickshell/
-             ```
+          The Quickshell UI is embedded in the `dms` binary. The bundled `dms/`
+          tree is optional — pass it with `-c` or `DMS_SHELL_DIR` to run a
+          modified copy instead of the embedded UI.
 
-          2. **Install the DMS CLI binaries:**
+          1. **Install the DMS CLI binaries:**
              ```bash
              sudo install -m 755 bin/dms /usr/local/bin/dms
              ```
 
-          3. **Install shell completions (optional):**
+          2. **Install shell completions (optional):**
              ```bash
              # Bash
              sudo install -m 644 completions/completion.bash /usr/share/bash-completion/completions/dms
@@ -366,15 +453,15 @@ jobs:
              sudo install -m 644 completions/completion.zsh /usr/share/zsh/site-functions/_dms
              ```
 
-          4. **Start the shell:**
+          3. **Start the shell:**
              ```bash
              dms run
              ```
 
           ## Configuration
 
-          - Settings are stored in `~/.config/DankMaterialShell/settings.json`
-          - Plugins go in `~/.config/DankMaterialShell/plugins/`
+          - Settings are stored in `~/.config/dms/settings.json`
+          - Plugins go in `~/.config/dms/plugins/`
           - See the documentation in the `dms/` directory for more details
 
           ## Troubleshooting
@@ -417,3 +504,58 @@ jobs:
           prerelease: ${{ contains(env.TAG, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Ask reporters on still-open "related/fixes #N" issues to retest.
+      # Opt-in via notify_issues (Point release defaults it on). Skipped for
+      # prereleases. Preview: scripts/notify-issues.sh <prev> <tag> --dry-run
+      - name: Notify open issues to retest
+        if: ${{ inputs.notify_issues && !contains(env.TAG, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "no previous tag; skipping issue notify"
+            exit 0
+          fi
+          bash scripts/notify-issues.sh "$PREVIOUS_TAG" "$TAG"
+
+  # Pin the satellite repos to this release's version. Each dispatch target
+  # decides for itself whether to tag: X.Y.0 always tags master and cuts
+  # stable-X.Y, X.Y.Z tags stable-X.Y and skips when it has nothing new.
+  fanout:
+    name: Pin ${{ matrix.repo }}
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: ${{ !contains(inputs.tag, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - dux-gop
+          - dux-go
+          - dux-qml-common
+          - dux-calendar
+          - dux-search
+          - dux-greeter
+          - dux-files
+    steps:
+      - name: Create GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ matrix.repo }}
+
+      - name: Dispatch pin-release
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPO: ${{ github.repository_owner }}/${{ matrix.repo }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run pin-release.yml --repo "$REPO" -f version="$TAG"
+          echo "dispatched pin-release ${TAG} to ${REPO}" >> "$GITHUB_STEP_SUMMARY"

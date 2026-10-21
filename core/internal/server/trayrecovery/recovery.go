@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -238,8 +238,8 @@ func (m *Manager) registerSNI(name string) {
 }
 
 func extractName(item string) string {
-	if idx := strings.IndexByte(item, '/'); idx != -1 {
-		return item[:idx]
+	if before, _, ok := strings.Cut(item, "/"); ok {
+		return before
 	}
 	return item
 }

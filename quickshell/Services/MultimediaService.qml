@@ -8,30 +8,21 @@ Singleton {
     id: root
     readonly property var log: Log.scoped("MultimediaService")
 
-    property bool available: false
+    readonly property bool available: probeLoader.status === Loader.Ready
+    readonly property bool unavailable: probeLoader.status === Loader.Error
+    property bool probeRequested: false
 
-    function detectAvailability() {
-        try {
-            const testObj = Qt.createQmlObject(`
-                import QtQuick
-                import QtMultimedia
-import qs.Services
-                Item {}
-            `, root, "MultimediaService.TestComponent");
-            if (testObj) {
-                testObj.destroy();
-            }
-            available = true;
-            return true;
-        } catch (e) {
-            available = false;
-            return false;
-        }
+    function ensureProbed() {
+        probeRequested = true;
     }
 
-    Component.onCompleted: {
-        if (!detectAvailability()) {
-            log.warn("QtMultimedia not available");
+    Loader {
+        id: probeLoader
+        source: "MultimediaProbe.qml"
+        active: root.probeRequested
+        onStatusChanged: {
+            if (status === Loader.Error)
+                log.warn("QtMultimedia not available");
         }
     }
 }

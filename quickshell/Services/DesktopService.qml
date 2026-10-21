@@ -3,11 +3,57 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
+import qs.Common
+import qs.Services
 
 Singleton {
     id: root
 
+    readonly property var log: Log.scoped("DesktopService")
     property var _cache: ({})
+
+    property bool isSystemd: false
+    property bool systemdAutostartTargetActive: false
+    property bool systemdAutostartTargetChecked: Qt.platform.os === "unix"
+    readonly property bool autostartAvailable: root.systemdAutostartTargetChecked && (!root.isSystemd || root.systemdAutostartTargetActive)
+    property bool _probed: false
+
+    Component.onCompleted: Paths.desktopIconResolver = name => resolveIconPath(name)
+
+    function ensureProbed() {
+        if (_probed || systemdAutostartTargetChecked)
+            return;
+        _probed = true;
+        initSystemCheckProcess.running = true;
+    }
+
+    Process {
+        id: initSystemCheckProcess
+        command: ["sh", "-c", "cat /proc/1/comm 2>/dev/null | tr -d '\\n'"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                root.isSystemd = (text || "").trim() === "systemd";
+                if (!root.isSystemd)
+                    root.systemdAutostartTargetChecked = true;
+                else
+                    systemdAutostartTargetCheck.running = true;
+            }
+        }
+    }
+
+    Process {
+        id: systemdAutostartTargetCheck
+        command: ["systemctl", "--user", "is-active", "xdg-desktop-autostart.target"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                root.systemdAutostartTargetActive = (text || "").trim() === "active";
+                root.systemdAutostartTargetChecked = true;
+            }
+        }
+    }
 
     function resolveIconPath(moddedAppId) {
         if (!moddedAppId)
@@ -17,18 +63,15 @@ Singleton {
             return _cache[moddedAppId];
 
         const result = (function () {
-                // 1. Try heuristic lookup (standard)
                 const entry = DesktopEntries.heuristicLookup(moddedAppId);
                 let icon = Quickshell.iconPath(entry?.icon, true);
                 if (icon && icon !== "")
                     return icon;
 
-                // 2. Try the appId itself as an icon name
                 icon = Quickshell.iconPath(moddedAppId, true);
                 if (icon && icon !== "")
                     return icon;
 
-                // 3. Try variations of the appId (lowercase, last part)
                 const appIds = [moddedAppId.toLowerCase()];
                 const lastPart = moddedAppId.split('.').pop();
                 if (lastPart && lastPart !== moddedAppId) {
@@ -42,8 +85,6 @@ Singleton {
                         return icon;
                 }
 
-                // 4. Deep search in all desktop entries (if the above fail)
-                // This is slow-ish but only happens once for failed icons
                 const strippedId = moddedAppId.replace(/-bin$/, "").toLowerCase();
                 const allEntries = DesktopEntries.applications.values;
                 for (let i = 0; i < allEntries.length; i++) {
@@ -59,7 +100,6 @@ Singleton {
                     }
                 }
 
-                // 5. Nix/Guix specific store check (as a last resort)
                 for (const appId of appIds) {
                     let execPath = entry?.execString?.replace(/\/bin.*/, "");
                     if (!execPath)
@@ -88,5 +128,69 @@ Singleton {
 
         _cache[moddedAppId] = result;
         return result;
+    }
+
+    signal getDefaultAppResult(string mimeType, string desktopFileId, string callbackId)
+    signal getAppsForMimeResult(string mimeType, var appIds, string callbackId)
+    signal getHandlersForMimeResult(string mimeType, var apps, string callbackId)
+
+    function setDefaultApp(mimeType, desktopFileId, callbackId = "") {
+        setDefaultAppForMimes([mimeType], desktopFileId, callbackId);
+    }
+
+    function setDefaultAppForMimes(mimeTypes, desktopFileId, callbackId = "") {
+        if (!desktopFileId.endsWith(".desktop")) {
+            desktopFileId += ".desktop";
+        }
+        const filtered = (mimeTypes || []).filter(m => m && m.length > 0);
+        if (filtered.length === 0)
+            return;
+        DMSService.sendRequest("mime.setDefaults", {
+            "mimeTypes": filtered,
+            "desktopId": desktopFileId
+        }, response => {
+            if (response.error) {
+                log.warn("DesktopService.setDefaultApp failed:", response.error, "mimes:", filtered, "app:", desktopFileId);
+            }
+        });
+    }
+
+    function getDefaultApp(mimeType, callbackId = "") {
+        DMSService.sendRequest("mime.getDefault", {
+            "mimeType": mimeType
+        }, response => {
+            if (response.error) {
+                log.warn("DesktopService.getDefaultApp failed:", response.error, "mime:", mimeType);
+                return;
+            }
+            const result = response.result || {};
+            root.getDefaultAppResult(mimeType, result.desktopId || "", callbackId);
+        });
+    }
+
+    function getHandlersForMimeType(mimeType, callbackId = "") {
+        DMSService.sendRequest("mime.handlersForMime", {
+            "mimeType": mimeType
+        }, response => {
+            if (response.error) {
+                log.warn("DesktopService.getHandlersForMimeType failed:", response.error, "mime:", mimeType);
+                return;
+            }
+            const result = response.result || {};
+            root.getHandlersForMimeResult(mimeType, result.apps || [], callbackId);
+        });
+    }
+
+    function getAppsForMimeType(mimeType, callbackId = "") {
+        DMSService.sendRequest("mime.appsForMime", {
+            "mimeType": mimeType
+        }, response => {
+            if (response.error) {
+                log.warn("DesktopService.getAppsForMimeType failed:", response.error, "mime:", mimeType);
+                return;
+            }
+            const result = response.result || {};
+            root.getAppsForMimeResult(mimeType, result.desktopIds || [], callbackId);
+        });
     }
 }

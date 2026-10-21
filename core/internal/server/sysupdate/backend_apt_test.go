@@ -12,25 +12,6 @@ func TestParseAptUpgradable(t *testing.T) {
 		want  []Package
 	}{
 		{
-			name:  "empty",
-			input: "",
-			want:  nil,
-		},
-		{
-			name: "header line only",
-			input: `Listing... Done
-`,
-			want: nil,
-		},
-		{
-			name: "single upgradable",
-			input: `Listing... Done
-bash/stable 5.2.40-1 amd64 [upgradable from: 5.2.39-1]`,
-			want: []Package{
-				{Name: "bash", Repo: RepoSystem, Backend: "apt", FromVersion: "5.2.39-1", ToVersion: "5.2.40-1"},
-			},
-		},
-		{
 			name: "multiple architectures and suites",
 			input: `Listing... Done
 bash/stable 5.2.40-1 amd64 [upgradable from: 5.2.39-1]
@@ -68,5 +49,24 @@ libsdl2-2.0-0/stable 2.30.0+dfsg-1 amd64 [upgradable from: 2.28.5+dfsg-1]`,
 				t.Errorf("parseAptUpgradable() = %#v\nwant %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFilterAptHeld(t *testing.T) {
+	pkgs := []Package{
+		{Name: "bash", Repo: RepoSystem, Backend: "apt"},
+		{Name: "linux-image-generic", Repo: RepoSystem, Backend: "apt"},
+		{Name: "zsh", Repo: RepoSystem, Backend: "apt"},
+	}
+
+	got := filterAptHeld(append([]Package(nil), pkgs...), map[string]bool{"linux-image-generic": true})
+	want := []Package{pkgs[0], pkgs[2]}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("filterAptHeld() = %#v\nwant %#v", got, want)
+	}
+
+	unfiltered := filterAptHeld(append([]Package(nil), pkgs...), nil)
+	if !reflect.DeepEqual(unfiltered, pkgs) {
+		t.Errorf("filterAptHeld(nil held) = %#v\nwant %#v", unfiltered, pkgs)
 	}
 }

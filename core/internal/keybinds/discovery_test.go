@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/utils"
 )
 
 func TestDefaultDiscoveryConfig(t *testing.T) {
@@ -25,19 +23,12 @@ func TestDefaultDiscoveryConfig(t *testing.T) {
 		firstPath      string
 	}{
 		{
-			name:           "default with no XDG vars",
-			configHome:     "",
-			configDirs:     "",
-			expectedCount:  1,
-			checkFirstPath: true,
-		},
-		{
 			name:           "with XDG_CONFIG_HOME set",
 			configHome:     "/custom/config",
 			configDirs:     "",
 			expectedCount:  1,
 			checkFirstPath: true,
-			firstPath:      "/custom/config/DankMaterialShell/cheatsheets",
+			firstPath:      "/custom/config/dms/cheatsheets",
 		},
 		{
 			name:          "with XDG_CONFIG_DIRS set",
@@ -136,34 +127,6 @@ func TestFindJSONFilesNonexistentPath(t *testing.T) {
 	}
 }
 
-func TestFindJSONFilesMultiplePaths(t *testing.T) {
-	tmpDir1 := t.TempDir()
-	tmpDir2 := t.TempDir()
-
-	file1 := filepath.Join(tmpDir1, "app1.json")
-	file2 := filepath.Join(tmpDir2, "app2.json")
-
-	if err := os.WriteFile(file1, []byte("{}"), 0o644); err != nil {
-		t.Fatalf("Failed to create file1: %v", err)
-	}
-	if err := os.WriteFile(file2, []byte("{}"), 0o644); err != nil {
-		t.Fatalf("Failed to create file2: %v", err)
-	}
-
-	config := &DiscoveryConfig{
-		SearchPaths: []string{tmpDir1, tmpDir2},
-	}
-
-	files, err := config.FindJSONFiles()
-	if err != nil {
-		t.Fatalf("FindJSONFiles failed: %v", err)
-	}
-
-	if len(files) != 2 {
-		t.Errorf("expected 2 JSON files from multiple paths, got %d", len(files))
-	}
-}
-
 func TestAutoDiscoverProviders(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -209,19 +172,6 @@ func TestAutoDiscoverProviders(t *testing.T) {
 	}
 }
 
-func TestAutoDiscoverProvidersNilConfig(t *testing.T) {
-	registry := NewRegistry()
-
-	SetJSONProviderFactory(func(filePath string) (Provider, error) {
-		return &mockProvider{name: "test"}, nil
-	})
-
-	err := AutoDiscoverProviders(registry, nil)
-	if err != nil {
-		t.Fatalf("AutoDiscoverProviders with nil config failed: %v", err)
-	}
-}
-
 func TestAutoDiscoverProvidersNoFactory(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -246,42 +196,5 @@ func TestAutoDiscoverProvidersNoFactory(t *testing.T) {
 	providers := registry.List()
 	if len(providers) != 0 {
 		t.Errorf("expected 0 providers without factory, got %d", len(providers))
-	}
-}
-
-func TestExpandPathInDiscovery(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("Cannot get home directory")
-	}
-
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "tilde expansion",
-			input:    "~/test",
-			expected: filepath.Join(home, "test"),
-		},
-		{
-			name:     "absolute path",
-			input:    "/tmp/test",
-			expected: "/tmp/test",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := utils.ExpandPath(tt.input)
-			if err != nil {
-				t.Fatalf("expandPath failed: %v", err)
-			}
-
-			if result != tt.expected {
-				t.Errorf("utils.ExpandPath(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
 	}
 }

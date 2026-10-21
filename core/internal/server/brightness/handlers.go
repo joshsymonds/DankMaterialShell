@@ -1,15 +1,13 @@
 package brightness
 
 import (
-	"encoding/json"
 	"fmt"
-	"net"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/params"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-go/ipc/params"
 )
 
-func HandleRequest(conn net.Conn, req models.Request, m *Manager) {
+func HandleRequest(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
 	switch req.Method {
 	case "brightness.getState":
 		handleGetState(conn, req, m)
@@ -24,24 +22,24 @@ func HandleRequest(conn net.Conn, req models.Request, m *Manager) {
 	case "brightness.subscribe":
 		handleSubscribe(conn, req, m)
 	default:
-		models.RespondError(conn, req.ID, "unknown method: "+req.Method)
+		conn.RespondError(req.ID, "unknown method: "+req.Method)
 	}
 }
 
-func handleGetState(conn net.Conn, req models.Request, m *Manager) {
-	models.Respond(conn, req.ID, m.GetState())
+func handleGetState(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
+	conn.Respond(req.ID, m.GetState())
 }
 
-func handleSetBrightness(conn net.Conn, req models.Request, m *Manager) {
+func handleSetBrightness(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
 	device, err := params.String(req.Params, "device")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
 	percent, err := params.Int(req.Params, "percent")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
@@ -49,17 +47,17 @@ func handleSetBrightness(conn net.Conn, req models.Request, m *Manager) {
 	exponent := params.FloatOpt(req.Params, "exponent", 1.2)
 
 	if err := m.SetBrightnessWithExponent(device, percent, exponential, exponent); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, m.GetState())
+	conn.Respond(req.ID, m.GetState())
 }
 
-func handleIncrement(conn net.Conn, req models.Request, m *Manager) {
+func handleIncrement(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
 	device, err := params.String(req.Params, "device")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
@@ -68,17 +66,17 @@ func handleIncrement(conn net.Conn, req models.Request, m *Manager) {
 	exponent := params.FloatOpt(req.Params, "exponent", 1.2)
 
 	if err := m.IncrementBrightnessWithExponent(device, step, exponential, exponent); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, m.GetState())
+	conn.Respond(req.ID, m.GetState())
 }
 
-func handleDecrement(conn net.Conn, req models.Request, m *Manager) {
+func handleDecrement(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
 	device, err := params.String(req.Params, "device")
 	if err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
@@ -87,26 +85,26 @@ func handleDecrement(conn net.Conn, req models.Request, m *Manager) {
 	exponent := params.FloatOpt(req.Params, "exponent", 1.2)
 
 	if err := m.IncrementBrightnessWithExponent(device, -step, exponential, exponent); err != nil {
-		models.RespondError(conn, req.ID, err.Error())
+		conn.RespondError(req.ID, err.Error())
 		return
 	}
 
-	models.Respond(conn, req.ID, m.GetState())
+	conn.Respond(req.ID, m.GetState())
 }
 
-func handleRescan(conn net.Conn, req models.Request, m *Manager) {
+func handleRescan(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
 	m.Rescan()
-	models.Respond(conn, req.ID, m.GetState())
+	conn.Respond(req.ID, m.GetState())
 }
 
-func handleSubscribe(conn net.Conn, req models.Request, m *Manager) {
+func handleSubscribe(conn *ipc.ConnWriter, req ipc.Request, m *Manager) {
 	clientID := fmt.Sprintf("brightness-%d", req.ID)
 
 	ch := m.Subscribe(clientID)
 	defer m.Unsubscribe(clientID)
 
 	initialState := m.GetState()
-	if err := json.NewEncoder(conn).Encode(models.Response[State]{
+	if err := conn.WriteResponse(ipc.Response[State]{
 		ID:     req.ID,
 		Result: &initialState,
 	}); err != nil {
@@ -114,7 +112,7 @@ func handleSubscribe(conn net.Conn, req models.Request, m *Manager) {
 	}
 
 	for state := range ch {
-		if err := json.NewEncoder(conn).Encode(models.Response[State]{
+		if err := conn.WriteResponse(ipc.Response[State]{
 			ID:     req.ID,
 			Result: &state,
 		}); err != nil {

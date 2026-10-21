@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/deps"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/privesc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/deps"
+	"github.com/duxlabs-dev/dux-shell/core/internal/privesc"
 )
 
 // ManualPackageInstaller provides methods for installing packages from source
@@ -55,13 +55,9 @@ func (m *ManualPackageInstaller) InstallManualPackages(ctx context.Context, pack
 	for _, pkg := range packages {
 		variant := variantMap[pkg]
 		switch pkg {
-		case "dms (DankMaterialShell)", "dms":
+		case "dms (Dux Shell)", "dms":
 			if err := m.installDankMaterialShell(ctx, variant, sudoPassword, progressChan); err != nil {
-				return fmt.Errorf("failed to install DankMaterialShell: %w", err)
-			}
-		case "dgop":
-			if err := m.installDgop(ctx, sudoPassword, progressChan); err != nil {
-				return fmt.Errorf("failed to install dgop: %w", err)
+				return fmt.Errorf("failed to install Dux Shell: %w", err)
 			}
 		case "niri":
 			if err := m.installNiri(ctx, sudoPassword, progressChan); err != nil {
@@ -92,66 +88,6 @@ func (m *ManualPackageInstaller) InstallManualPackages(ctx context.Context, pack
 		}
 	}
 
-	return nil
-}
-
-func (m *ManualPackageInstaller) installDgop(ctx context.Context, sudoPassword string, progressChan chan<- InstallProgressMsg) error {
-	m.log("Installing dgop from source...")
-
-	homeDir := os.Getenv("HOME")
-	if homeDir == "" {
-		return fmt.Errorf("HOME environment variable not set")
-	}
-
-	cacheDir := filepath.Join(homeDir, ".cache", "dankinstall")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create cache directory: %w", err)
-	}
-
-	tmpDir := filepath.Join(cacheDir, "dgop-build")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	progressChan <- InstallProgressMsg{
-		Phase:       PhaseSystemPackages,
-		Progress:    0.1,
-		Step:        "Cloning dgop repository...",
-		IsComplete:  false,
-		CommandInfo: "git clone https://github.com/AvengeMedia/dgop.git",
-	}
-
-	cloneCmd := exec.CommandContext(ctx, "git", "clone", "https://github.com/AvengeMedia/dgop.git", tmpDir)
-	if err := cloneCmd.Run(); err != nil {
-		m.logError("failed to clone dgop repository", err)
-		return fmt.Errorf("failed to clone dgop repository: %w", err)
-	}
-
-	buildCmd := exec.CommandContext(ctx, "make")
-	buildCmd.Dir = tmpDir
-	buildCmd.Env = append(os.Environ(), "TMPDIR="+cacheDir)
-	if err := m.runWithProgressStep(buildCmd, progressChan, PhaseSystemPackages, 0.4, 0.7, "Building dgop..."); err != nil {
-		return fmt.Errorf("failed to build dgop: %w", err)
-	}
-
-	progressChan <- InstallProgressMsg{
-		Phase:       PhaseSystemPackages,
-		Progress:    0.7,
-		Step:        "Installing dgop...",
-		IsComplete:  false,
-		NeedsSudo:   true,
-		CommandInfo: "sudo make install",
-	}
-
-	installCmd := privesc.ExecCommand(ctx, sudoPassword, "make install")
-	installCmd.Dir = tmpDir
-	if err := installCmd.Run(); err != nil {
-		m.logError("failed to install dgop", err)
-		return fmt.Errorf("failed to install dgop: %w", err)
-	}
-
-	m.log("dgop installed successfully from source")
 	return nil
 }
 
@@ -506,7 +442,7 @@ func (m *ManualPackageInstaller) installMatugen(ctx context.Context, sudoPasswor
 }
 
 func (m *ManualPackageInstaller) installDankMaterialShell(ctx context.Context, variant deps.PackageVariant, sudoPassword string, progressChan chan<- InstallProgressMsg) error {
-	m.log("Installing DankMaterialShell (DMS)...")
+	m.log("Installing Dux Shell (DMS)...")
 
 	if err := m.installDMSBinary(ctx, sudoPassword, progressChan); err != nil {
 		m.logError("Failed to install DMS binary", err)
@@ -518,9 +454,9 @@ func (m *ManualPackageInstaller) installDankMaterialShell(ctx context.Context, v
 		progressChan <- InstallProgressMsg{
 			Phase:       PhaseSystemPackages,
 			Progress:    0.90,
-			Step:        "Cloning DankMaterialShell...",
+			Step:        "Cloning Dux Shell...",
 			IsComplete:  false,
-			CommandInfo: "git clone https://github.com/AvengeMedia/DankMaterialShell.git",
+			CommandInfo: "git clone --recurse-submodules https://github.com/duxlabs-dev/dux-shell.git",
 		}
 
 		configDir := filepath.Dir(dmsPath)
@@ -528,10 +464,10 @@ func (m *ManualPackageInstaller) installDankMaterialShell(ctx context.Context, v
 			return fmt.Errorf("failed to create quickshell config directory: %w", err)
 		}
 
-		cloneCmd := exec.CommandContext(ctx, "git", "clone",
-			"https://github.com/AvengeMedia/DankMaterialShell.git", dmsPath)
+		cloneCmd := exec.CommandContext(ctx, "git", "clone", "--recurse-submodules",
+			"https://github.com/duxlabs-dev/dux-shell.git", dmsPath)
 		if err := cloneCmd.Run(); err != nil {
-			return fmt.Errorf("failed to clone DankMaterialShell: %w", err)
+			return fmt.Errorf("failed to clone Dux Shell: %w", err)
 		}
 
 		if forceDMSGit || variant == deps.VariantGit {
@@ -553,15 +489,17 @@ func (m *ManualPackageInstaller) installDankMaterialShell(ctx context.Context, v
 			return nil
 		}
 
+		m.syncDMSSubmodules(ctx, dmsPath)
+
 		m.log(fmt.Sprintf("Checked out latest tag: %s", latestTag))
-		m.log("DankMaterialShell cloned successfully")
+		m.log("Dux Shell cloned successfully")
 		return nil
 	}
 
 	progressChan <- InstallProgressMsg{
 		Phase:       PhaseSystemPackages,
 		Progress:    0.90,
-		Step:        "Updating DankMaterialShell...",
+		Step:        "Updating Dux Shell...",
 		IsComplete:  false,
 		CommandInfo: "Updating ~/.config/quickshell/dms",
 	}
@@ -591,7 +529,9 @@ func (m *ManualPackageInstaller) installDankMaterialShell(ctx context.Context, v
 			return nil
 		}
 
-		m.log("DankMaterialShell updated successfully (git variant)")
+		m.syncDMSSubmodules(ctx, dmsPath)
+
+		m.log("Dux Shell updated successfully (git variant)")
 		return nil
 	}
 
@@ -609,8 +549,17 @@ func (m *ManualPackageInstaller) installDankMaterialShell(ctx context.Context, v
 		return nil
 	}
 
+	m.syncDMSSubmodules(ctx, dmsPath)
+
 	m.log(fmt.Sprintf("Updated to tag: %s", latestTag))
 	return nil
+}
+
+func (m *ManualPackageInstaller) syncDMSSubmodules(ctx context.Context, dmsPath string) {
+	submoduleCmd := exec.CommandContext(ctx, "git", "-C", dmsPath, "submodule", "update", "--init", "--recursive")
+	if err := submoduleCmd.Run(); err != nil {
+		m.logError("Failed to update submodules", err)
+	}
 }
 
 func (m *ManualPackageInstaller) installXwaylandSatellite(ctx context.Context, sudoPassword string, progressChan chan<- InstallProgressMsg) error {

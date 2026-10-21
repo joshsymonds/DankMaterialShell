@@ -11,12 +11,13 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
 )
 
 func init() {
 	RegisterSystemBackend(func() Backend { return &archHelperBackend{id: "paru"} })
 	RegisterSystemBackend(func() Backend { return &archHelperBackend{id: "yay"} })
+	RegisterSystemBackend(func() Backend { return &shellyBackend{} })
 	RegisterSystemBackend(func() Backend { return &pacmanBackend{} })
 }
 
@@ -50,7 +51,40 @@ func (b pacmanBackend) Upgrade(ctx context.Context, opts UpgradeOptions, onLine 
 }
 
 func pacmanUpgradeArgv(opts UpgradeOptions) []string {
-	return privilegedArgv(opts, "pacman", "-Syu", "--noconfirm", "--needed")
+	return privilegedArgv(opts, withAutoYes(opts, []string{"pacman", "-Syu", "--needed"}, "--noconfirm")...)
+}
+
+// Arch repository packages must upgrade together; AUR packages may be held.
+func dropPacmanRepoIgnores(ignored []string, pending []Package) []string {
+	if len(ignored) == 0 {
+		return ignored
+	}
+	repoPending := make(map[string]bool, len(pending))
+	for _, p := range pending {
+		if p.Repo == RepoSystem {
+			repoPending[p.Name] = true
+		}
+	}
+	out := make([]string, 0, len(ignored))
+	for _, name := range ignored {
+		if repoPending[name] {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+func isPacmanFamily(b Backend) bool {
+	if b == nil {
+		return false
+	}
+	switch b.ID() {
+	case "pacman", "paru", "yay", "shelly":
+		return true
+	default:
+		return false
+	}
 }
 
 type archHelperBackend struct {
@@ -99,22 +133,29 @@ func (b archHelperBackend) Upgrade(ctx context.Context, opts UpgradeOptions, onL
 		return nil
 	}
 	if os.Getenv("DMS_FORCE_PKEXEC") == "1" {
-		argv := append([]string{"pkexec"}, archHelperUpgradeArgv(b.id, opts.IncludeAUR)...)
+		argv := append([]string{"pkexec"}, archHelperUpgradeArgv(b.id, opts)...)
 		return Run(ctx, argv, RunOptions{OnLine: onLine, AttachStdio: opts.AttachStdio})
+	}
+	if opts.AttachStdio {
+		return Run(ctx, archHelperUpgradeArgv(b.id, opts), RunOptions{OnLine: onLine, AttachStdio: true})
 	}
 	term := findTerminal(opts.Terminal)
 	if term == "" {
 		return fmt.Errorf("no terminal found (pick one in DMS settings, set $TERMINAL, or install kitty/ghostty/foot/alacritty)")
 	}
-	cmd := strings.Join(archHelperUpgradeArgv(b.id, opts.IncludeAUR), " ")
+	cmd := strings.Join(archHelperUpgradeArgv(b.id, opts), " ")
 	title := fmt.Sprintf("DMS — System Update (%s)", b.id)
-	return Run(ctx, wrapInTerminal(term, title, cmd), RunOptions{OnLine: onLine})
+	return Run(ctx, wrapInTerminal(term, title, cmd, opts.TerminalArgs), RunOptions{OnLine: onLine})
 }
 
-func archHelperUpgradeArgv(id string, includeAUR bool) []string {
-	argv := []string{id, "-Syu", "--noconfirm", "--needed"}
-	if !includeAUR {
+func archHelperUpgradeArgv(id string, opts UpgradeOptions) []string {
+	argv := withAutoYes(opts, []string{id, "-Syu", "--needed"}, "--noconfirm")
+	if !opts.IncludeAUR {
 		argv = append(argv, "--repo")
+	}
+	ignored := shellSafeNames(opts.Ignored)
+	if len(ignored) > 0 {
+		argv = append(argv, "--ignore", strings.Join(ignored, ","))
 	}
 	return argv
 }
@@ -185,15 +226,30 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
 		return err
 	}
-	return out.Sync()
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	// Preserve mtime so libalpm's If-Modified-Since against --dbpath actually
+	// refetches when the mirror has newer content; otherwise the seeded copy's
+	// fresh mtime always beats the server's Last-Modified and the private DB
+	// stays stuck at whatever /var/lib/pacman/sync contained at seed time.
+	return os.Chtimes(dst, fi.ModTime(), fi.ModTime())
 }
 
 func pacmanPrivateDB() (string, error) {
@@ -231,6 +287,10 @@ func parseArchUpdates(text, backendID string, repo RepoKind) []Package {
 	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		// pacman -Qu / paru -Qua flag IgnorePkg entries with a trailing marker
+		if strings.HasSuffix(line, "[ignored]") {
 			continue
 		}
 		m := archUpdateLine.FindStringSubmatch(line)

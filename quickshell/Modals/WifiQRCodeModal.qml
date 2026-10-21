@@ -2,14 +2,13 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Effects
 import Quickshell
-import Quickshell.Io
 import qs.Modals.Common
 import qs.Modals.FileBrowser
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
-DankModal {
+DModal {
     id: root
     visible: false
     layerNamespace: "dms:wifi-qrcode"
@@ -52,7 +51,7 @@ DankModal {
             ssid: ssid
         }, response => {
             if (response.error) {
-                ToastService.showError("Failed to fetch network QR code: ", JSON.stringify(response.error));
+                ToastService.showError(I18n.tr("Failed to fetch network QR code: %1", "error toast, %1 is the error details").arg(JSON.stringify(response.error)));
             } else if (response.result) {
                 themedQrCodePath = response.result[0];
                 normalQrCodePath = response.result[1];
@@ -66,9 +65,9 @@ DankModal {
             path: path
         }, response => {
             if (response.error) {
-                ToastService.showError(`Failed to remove QR code at ${path}: `, JSON.stringify(response.error));
+                ToastService.showError(I18n.tr("Failed to remove QR code at %1: %2", "error toast, %1 is the file path, %2 is the error").arg(path).arg(JSON.stringify(response.error)));
             }
-        })
+        });
     }
 
     LazyLoader {
@@ -79,28 +78,11 @@ DankModal {
             id: saveBrowser
 
             browserTitle: I18n.tr("Save QR Code")
-            browserIcon: "qr_code"
-            browserType: "default"
-            fileExtensions: ["*.png"]
-            allowStacking: true
-            saveMode: true
-            defaultFileName: `${root.wifiSSID ?? "wifi-qrcode"}.png`
-            onFileSelected: path => {
-                const cleanPath = decodeURI(path.toString().replace(/^file:\/\//, ''));
-                const fileName = cleanPath.split('/').pop();
-                const fileUrl = "file://" + cleanPath;
-
-                copyQrCodeProcess.exec(["cp", root.normalQrCodePath, cleanPath, "-f"])
-            }
-
-            Process {
-                id: copyQrCodeProcess
-                stdout: StdioCollector {
-                    onStreamFinished: {
-                        saveBrowser.close();
-                    }
-                }
-            }
+            bucket: "qrcode"
+            filters: ["*.png"]
+            mode: "save"
+            defaultName: `${root.wifiSSID ?? "wifi-qrcode"}.png`
+            onAccepted: paths => Quickshell.execDetached(["cp", "-f", root.normalQrCodePath, paths[0]])
         }
     }
 
@@ -125,12 +107,13 @@ DankModal {
                         text: I18n.tr("WiFi QR code for ") + theItem.wifiSSID
                         font.pixelSize: Theme.fontSizeLarge
                         color: Theme.surfaceText
-                        font.weight: Font.Bold
+                        font.weight: Theme.fontWeightMedium
                         Layout.alignment: Qt.AlignLeft
                     }
 
-                    DankActionButton {
+                    DActionButton {
                         iconName: "save"
+                        Accessible.name: I18n.tr("Save QR Code")
                         iconSize: Theme.iconSize - 4
                         iconColor: Theme.surfaceText
                         onClicked: {
@@ -142,8 +125,9 @@ DankModal {
                         Layout.alignment: Qt.AlignRight
                     }
 
-                    DankActionButton {
+                    DActionButton {
                         iconName: "close"
+                        Accessible.name: I18n.tr("Close")
                         iconSize: Theme.iconSize - 4
                         iconColor: Theme.surfaceText
                         onClicked: root.hide()

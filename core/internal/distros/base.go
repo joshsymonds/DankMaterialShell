@@ -13,9 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/deps"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/privesc"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/version"
+	"github.com/duxlabs-dev/dux-shell/core/internal/config"
+	"github.com/duxlabs-dev/dux-shell/core/internal/deps"
+	"github.com/duxlabs-dev/dux-shell/core/internal/netfetch"
+	"github.com/duxlabs-dev/dux-shell/core/internal/privesc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/version"
 )
 
 const (
@@ -103,8 +105,28 @@ func (b *BaseDistribution) detectMatugen() deps.Dependency {
 	return b.detectCommand("matugen", "Material Design color generation tool")
 }
 
-func (b *BaseDistribution) detectDgop() deps.Dependency {
-	return b.detectCommand("dgop", "Desktop portal management tool")
+func (b *BaseDistribution) detectDanksearch() deps.Dependency {
+	return b.detectOptionalPackage("danksearch", "File indexing and search service", b.commandExists("dsearch") || b.commandExists("danksearch"))
+}
+
+func (b *BaseDistribution) detectDankCalendar() deps.Dependency {
+	return b.detectOptionalPackage("dankcalendar", "Calendar application", b.commandExists("dcal") || b.commandExists("dankcalendar"))
+}
+
+func withGitVariant(dep deps.Dependency, gitInstalled bool) deps.Dependency {
+	dep.CanToggle = true
+	if gitInstalled {
+		dep.Variant = deps.VariantGit
+	}
+	return dep
+}
+
+// variantMapping is for packages whose git build is published as "<name>-git" in the same repo.
+func variantMapping(name string, variant deps.PackageVariant, repo RepositoryType, repoURL string) PackageMapping {
+	if variant == deps.VariantGit {
+		name += "-git"
+	}
+	return PackageMapping{Name: name, Repository: repo, RepoURL: repoURL}
 }
 
 func (b *BaseDistribution) detectDMS() deps.Dependency {
@@ -124,7 +146,7 @@ func (b *BaseDistribution) detectDMS() deps.Dependency {
 	}
 
 	dep := deps.Dependency{
-		Name:        "dms (DankMaterialShell)",
+		Name:        "dms (Dux Shell)",
 		Status:      status,
 		Description: "Desktop Management System configuration",
 		Required:    true,
@@ -206,6 +228,11 @@ func (b *BaseDistribution) detectHyprlandTools() []deps.Dependency {
 	return dependencies
 }
 
+// Hyprland 0.52+ calls hyprland-dialog and friends from hyprland-guiutils and complains when they are missing.
+func (b *BaseDistribution) detectHyprlandGuiutils() deps.Dependency {
+	return b.detectPackage("hyprland-guiutils", "Hyprland dialogs and helper apps", b.commandExists("hyprland-dialog"))
+}
+
 func (b *BaseDistribution) detectQuickshell() deps.Dependency {
 	if !b.commandExists("qs") {
 		return deps.Dependency{
@@ -232,7 +259,7 @@ func (b *BaseDistribution) detectQuickshell() deps.Dependency {
 	}
 
 	versionStr := string(output)
-	versionRegex := regexp.MustCompile(`quickshell (\d+\.\d+\.\d+)`)
+	versionRegex := regexp.MustCompile(`(?i)quickshell (\d+\.\d+\.\d+)`)
 	matches := versionRegex.FindStringSubmatch(versionStr)
 
 	if len(matches) < 2 {
@@ -246,17 +273,17 @@ func (b *BaseDistribution) detectQuickshell() deps.Dependency {
 		}
 	}
 
-	version := matches[1]
+	installedVersion := matches[1]
 	variant := deps.VariantStable
 	if strings.Contains(versionStr, "git") || strings.Contains(versionStr, "+") {
 		variant = deps.VariantGit
 	}
 
-	if b.versionCompare(version, "0.2.0") >= 0 {
+	if version.CompareVersions(installedVersion, "0.2.0") >= 0 {
 		return deps.Dependency{
 			Name:        "quickshell",
 			Status:      deps.StatusInstalled,
-			Version:     version,
+			Version:     installedVersion,
 			Description: "QtQuick based desktop shell toolkit",
 			Required:    true,
 			Variant:     variant,
@@ -269,10 +296,26 @@ func (b *BaseDistribution) detectQuickshell() deps.Dependency {
 		Status:      deps.StatusNeedsUpdate,
 		Variant:     variant,
 		CanToggle:   true,
-		Version:     version,
+		Version:     installedVersion,
 		Description: "QtQuick based desktop shell toolkit (needs 0.2.0+)",
 		Required:    true,
 	}
+}
+
+var (
+	hyprlandTagRegex     = regexp.MustCompile(`Tag: v?(\d+\.\d+\.\d+)`)
+	hyprlandVersionRegex = regexp.MustCompile(`v?(\d+\.\d+\.\d+)`)
+)
+
+// ParseHyprlandVersion prefers the Tag: line because main-branch builds print a stale version first.
+func ParseHyprlandVersion(out string) string {
+	if m := hyprlandTagRegex.FindStringSubmatch(out); m != nil {
+		return m[1]
+	}
+	if m := hyprlandVersionRegex.FindStringSubmatch(out); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 func (b *BaseDistribution) detectWindowManager(wm deps.WindowManager) deps.Dependency {
@@ -290,12 +333,7 @@ func (b *BaseDistribution) detectWindowManager(wm deps.WindowManager) deps.Depen
 				if strings.Contains(outStr, "git") || strings.Contains(outStr, "dirty") {
 					variant = deps.VariantGit
 				}
-				if versionRegex := regexp.MustCompile(`v(\d+\.\d+\.\d+)`); versionRegex.MatchString(outStr) {
-					matches := versionRegex.FindStringSubmatch(outStr)
-					if len(matches) > 1 {
-						version = matches[1]
-					}
-				}
+				version = ParseHyprlandVersion(outStr)
 			}
 		}
 		return deps.Dependency{
@@ -337,6 +375,36 @@ func (b *BaseDistribution) detectWindowManager(wm deps.WindowManager) deps.Depen
 			Variant:     variant,
 			CanToggle:   true,
 		}
+	case deps.WindowManagerMango:
+		status := deps.StatusMissing
+		variant := deps.VariantStable
+		version := ""
+
+		if b.commandExists("mango") {
+			status = deps.StatusInstalled
+			cmd := exec.Command("mango", "-v")
+			if output, err := cmd.Output(); err == nil {
+				outStr := string(output)
+				if strings.Contains(outStr, "git") || strings.Contains(outStr, "dirty") {
+					variant = deps.VariantGit
+				}
+				if versionRegex := regexp.MustCompile(`(\d+\.\d+\.\d+)`); versionRegex.MatchString(outStr) {
+					matches := versionRegex.FindStringSubmatch(outStr)
+					if len(matches) > 1 {
+						version = matches[1]
+					}
+				}
+			}
+		}
+		return deps.Dependency{
+			Name:        "mango",
+			Status:      status,
+			Version:     version,
+			Description: "dwl-based dynamic tiling Wayland compositor",
+			Required:    true,
+			Variant:     variant,
+			CanToggle:   true,
+		}
 	default:
 		return deps.Dependency{
 			Name:        "unknown-wm",
@@ -345,30 +413,6 @@ func (b *BaseDistribution) detectWindowManager(wm deps.WindowManager) deps.Depen
 			Required:    true,
 		}
 	}
-}
-
-// Version comparison helper
-func (b *BaseDistribution) versionCompare(v1, v2 string) int {
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
-
-	for i := 0; i < len(parts1) && i < len(parts2); i++ {
-		if parts1[i] < parts2[i] {
-			return -1
-		}
-		if parts1[i] > parts2[i] {
-			return 1
-		}
-	}
-
-	if len(parts1) < len(parts2) {
-		return -1
-	}
-	if len(parts1) > len(parts2) {
-		return 1
-	}
-
-	return 0
 }
 
 // Common installation helper
@@ -556,18 +600,13 @@ TERMINAL=%s
 	return nil
 }
 
-func (b *BaseDistribution) EnableDMSService(ctx context.Context, wm deps.WindowManager) error {
-	switch wm {
-	case deps.WindowManagerNiri:
-		if err := exec.CommandContext(ctx, "systemctl", "--user", "add-wants", "niri.service", "dms").Run(); err != nil {
-			b.log("Warning: failed to add dms as a want for niri.service")
-		}
-	case deps.WindowManagerHyprland:
-		if err := exec.CommandContext(ctx, "systemctl", "--user", "add-wants", "hyprland-session.target", "dms").Run(); err != nil {
-			b.log("Warning: failed to add dms as a want for hyprland-session.target")
-		}
+func (b *BaseDistribution) EnableDMSService(_ context.Context, wm deps.WindowManager) error {
+	unit, err := config.EnableSession(wm)
+	if err != nil {
+		b.log(fmt.Sprintf("Warning: %v", err))
+		return nil
 	}
-
+	b.log("dms.service starts with " + unit)
 	return nil
 }
 
@@ -581,28 +620,12 @@ func (b *BaseDistribution) WriteWindowManagerConfig(wm deps.WindowManager) error
 }
 
 func (b *BaseDistribution) WriteHyprlandSessionTarget() error {
-	homeDir, err := os.UserHomeDir()
+	targetPath, err := config.EnsureHyprlandSessionTarget()
 	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	targetDir := filepath.Join(homeDir, ".config", "systemd", "user")
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create systemd user directory: %w", err)
-	}
-
-	targetPath := filepath.Join(targetDir, "hyprland-session.target")
-	content := `[Unit]
-Description=Hyprland Session Target
-Requires=graphical-session.target
-After=graphical-session.target
-`
-
-	if err := os.WriteFile(targetPath, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write hyprland-session.target: %w", err)
 	}
 
-	b.log(fmt.Sprintf("Wrote hyprland-session.target to %s", targetPath))
+	b.log(fmt.Sprintf("Using hyprland-session.target at %s", targetPath))
 	return nil
 }
 
@@ -627,16 +650,9 @@ func (b *BaseDistribution) installDMSBinary(ctx context.Context, sudoPassword st
 		CommandInfo: fmt.Sprintf("Downloading dms-%s.gz", arch),
 	}
 
-	// Get latest release version
-	latestVersionCmd := exec.CommandContext(ctx, "bash", "-c",
-		`curl -s https://api.github.com/repos/AvengeMedia/DankMaterialShell/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'`)
-	versionOutput, err := latestVersionCmd.Output()
+	version, err := netfetch.LatestReleaseTag(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get latest DMS version: %w", err)
-	}
-	version := strings.TrimSpace(string(versionOutput))
-	if version == "" {
-		return fmt.Errorf("could not determine latest DMS version")
 	}
 
 	homeDir, err := os.UserHomeDir()
@@ -650,11 +666,10 @@ func (b *BaseDistribution) installDMSBinary(ctx context.Context, sudoPassword st
 	defer os.RemoveAll(tmpDir)
 
 	// Download the gzipped binary
-	downloadURL := fmt.Sprintf("https://github.com/AvengeMedia/DankMaterialShell/releases/download/%s/dms-cli-%s.gz", version, arch)
+	downloadURL := fmt.Sprintf("https://github.com/duxlabs-dev/dux-shell/releases/download/%s/dms-cli-%s.gz", version, arch)
 	gzPath := filepath.Join(tmpDir, "dms.gz")
 
-	downloadCmd := exec.CommandContext(ctx, "curl", "-L", downloadURL, "-o", gzPath)
-	if err := downloadCmd.Run(); err != nil {
+	if err := netfetch.ToFile(ctx, downloadURL, netfetch.Options{Timeout: 5 * time.Minute}, gzPath); err != nil {
 		return fmt.Errorf("failed to download DMS binary: %w", err)
 	}
 

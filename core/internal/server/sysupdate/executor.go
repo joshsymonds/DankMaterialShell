@@ -3,6 +3,7 @@ package sysupdate
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +11,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/privesc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/privesc"
 )
 
 type RunOptions struct {
@@ -35,6 +36,7 @@ func Run(ctx context.Context, argv []string, opts RunOptions) error {
 			}
 			return cmd.Process.Kill()
 		}
+		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
@@ -45,7 +47,12 @@ func Run(ctx context.Context, argv []string, opts RunOptions) error {
 		if cmd.Process == nil {
 			return nil
 		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// Once pkexec authenticates, the group is root-owned and cannot be signalled.
+		if errors.Is(err, syscall.EPERM) && opts.OnLine != nil {
+			opts.OnLine("Cannot stop a privileged upgrade; waiting for it to finish.")
+		}
+		return err
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -67,7 +74,18 @@ func Run(ctx context.Context, argv []string, opts RunOptions) error {
 	go pump(stderr, opts.OnLine, &wg)
 	wg.Wait()
 
-	return cmd.Wait()
+	err = cmd.Wait()
+	// The kill was refused and the process then exited cleanly, so the run succeeded.
+	if errors.Is(err, syscall.EPERM) {
+		return nil
+	}
+	return err
+}
+
+// pkexec exits 126 when the authentication dialog is dismissed.
+func isAuthDismissed(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 126
 }
 
 func pump(r io.Reader, onLine func(string), wg *sync.WaitGroup) {
@@ -119,34 +137,46 @@ func findTerminal(override string) string {
 	return ""
 }
 
-func wrapInTerminal(term, title, shellCmd string) []string {
-	const appID = "dms-sysupdate"
+func wrapInTerminal(term, title, shellCmd string, extraArgs []string) []string {
+	const appID = "dev.duxlabs.shell"
 	banner := fmt.Sprintf(
 		`printf '\033[1;36m=== %s ===\033[0m\n'; printf '\033[2m$ %s\033[0m\n'; printf '\033[33mYou may be prompted for your sudo password to apply system updates.\033[0m\n\n'`,
 		title, shellCmd,
 	)
-	closer := `printf '\n\033[1;32m=== Done. Press Enter to close. ===\033[0m\n'; read`
+	closer := `dms_update_status=$?
+if [ "$dms_update_status" -eq 0 ]; then
+    printf '\n\033[1;32m=== Done. Press Enter to close. ===\033[0m\n'
+else
+    printf '\n\033[1;31m=== Update failed (exit %s). Press Enter to close. ===\033[0m\n' "$dms_update_status"
+fi
+read -r dms_update_reply
+exit "$dms_update_status"`
 	export := `export SUDO_PROMPT="[DMS] sudo password for %u: "; `
 	full := export + banner + "; " + shellCmd + "; " + closer
 
+	var argv []string
+	execFlag := "-e"
 	switch term {
-	case "kitty":
-		return []string{term, "--class", appID, "-T", title, "-e", "sh", "-c", full}
-	case "alacritty":
-		return []string{term, "--class", appID, "-T", title, "-e", "sh", "-c", full}
-	case "foot":
-		return []string{term, "--app-id=" + appID, "--title=" + title, "-e", "sh", "-c", full}
-	case "ghostty":
-		return []string{term, "--class=" + appID, "--title=" + title, "-e", "sh", "-c", full}
+	case "kitty", "alacritty":
+		argv = []string{term, "--class", appID, "-T", title}
 	case "wezterm":
-		return []string{term, "--class", appID, "-T", title, "-e", "sh", "-c", full}
+		argv = []string{term, "start", "--always-new-process", "--class", appID}
+		execFlag = "--"
+	case "foot":
+		argv = []string{term, "--app-id=" + appID, "--title=" + title}
+	case "ghostty":
+		argv = []string{term, "--class=" + appID, "--title=" + title}
 	case "xterm":
-		return []string{term, "-class", appID, "-T", title, "-e", "sh", "-c", full}
+		argv = []string{term, "-class", appID, "-T", title}
 	case "konsole":
-		return []string{term, "-p", "tabtitle=" + title, "-e", "sh", "-c", full}
+		argv = []string{term, "-p", "tabtitle=" + title}
 	case "gnome-terminal":
-		return []string{term, "--title=" + title, "--", "sh", "-c", full}
+		// --wait: the factory process otherwise returns immediately
+		argv = []string{term, "--wait", "--title=" + title}
+		execFlag = "--"
 	default:
-		return []string{term, "-e", "sh", "-c", full}
+		argv = []string{term}
 	}
+	argv = append(argv, extraArgs...)
+	return append(argv, execFlag, "sh", "-c", full)
 }

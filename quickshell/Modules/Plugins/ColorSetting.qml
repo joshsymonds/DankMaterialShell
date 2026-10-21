@@ -1,7 +1,8 @@
 import QtQuick
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
+import "../../Common/QmlUtils.js" as QmlUtils
 
 Column {
     id: root
@@ -18,12 +19,13 @@ Column {
     property bool isInitialized: false
 
     function loadValue() {
-        const settings = findSettings();
-        if (settings && settings.pluginService) {
-            const loadedValue = settings.loadValue(settingKey, defaultValue);
-            value = loadedValue;
-            isInitialized = true;
-        }
+        const settings = QmlUtils.findSettings(root.parent);
+        if (!settings || !settings.pluginService)
+            return;
+        const loadedValue = settings.loadValue(settingKey, defaultValue);
+        // pre-fix saves persisted the QColor as {}, which throws when assigned to a color property
+        value = typeof loadedValue === "string" ? loadedValue : defaultValue;
+        isInitialized = true;
     }
 
     Component.onCompleted: {
@@ -33,27 +35,16 @@ Column {
     onValueChanged: {
         if (!isInitialized)
             return;
-        const settings = findSettings();
+        const settings = QmlUtils.findSettings(root.parent);
         if (settings) {
-            settings.saveValue(settingKey, value);
+            settings.saveValue(settingKey, value.toString());
         }
-    }
-
-    function findSettings() {
-        let item = parent;
-        while (item) {
-            if (item.saveValue !== undefined && item.loadValue !== undefined) {
-                return item;
-            }
-            item = item.parent;
-        }
-        return null;
     }
 
     StyledText {
         text: root.label
         font.pixelSize: Theme.fontSizeMedium
-        font.weight: Font.Medium
+        font.weight: Theme.fontWeightMedium
         color: Theme.surfaceText
     }
 

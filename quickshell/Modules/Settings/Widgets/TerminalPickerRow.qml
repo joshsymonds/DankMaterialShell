@@ -8,6 +8,8 @@ SettingsDropdownRow {
 
     text: I18n.tr("Terminal")
     settingKey: "terminalOverride"
+    resetStore: SessionData
+    resetKeys: ["terminalOverride"]
 
     options: {
         const opts = [autoLabel];
@@ -23,6 +25,8 @@ SettingsDropdownRow {
     }
 
     currentValue: SessionData.terminalOverride.length > 0 ? SessionData.terminalOverride : autoLabel
+
+    Component.onCompleted: SessionData.probeTerminals()
 
     onValueChanged: label => {
         const next = label === autoLabel ? "" : label;

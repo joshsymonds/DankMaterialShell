@@ -1,15 +1,13 @@
 import QtQuick
 import QtQuick.Effects
-import Quickshell
-import Quickshell.Hyprland
-import Quickshell.Wayland
 import Quickshell.Widgets
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Item {
     id: root
+    required property var options
 
     clip: false
     property var appData
@@ -23,14 +21,19 @@ Item {
     property real dragAxisOffset: 0
     property int targetIndex: -1
     property int originalIndex: -1
-    property bool isVertical: SettingsData.dockPosition === SettingsData.Position.Left || SettingsData.dockPosition === SettingsData.Position.Right
+    property bool isVertical: root.options.position === SettingsData.Position.Left || root.options.position === SettingsData.Position.Right
     property bool showWindowTitle: false
     property string windowTitle: ""
     property bool isHovered: mouseArea.containsMouse && !dragging
     property bool showTooltip: mouseArea.containsMouse && !dragging
-    property var cachedDesktopEntry: null
+    property var cachedDesktopEntry: dockApps?.desktopEntries[appData?.appId] ?? null
     property real actualIconSize: 40
+    readonly property bool indicatorAtFarEdge: root.options.position === SettingsData.Position.Bottom || root.options.position === SettingsData.Position.Right
+    readonly property bool indicatorInPadding: !(root.dockApps?.barHosted ?? false)
+    readonly property real indicatorThickness: indicatorInPadding ? root.options.spacing : Math.max(0, ((isVertical ? width : height) - actualIconSize) / 2)
     property bool shouldShowIndicator: {
+        if (root.options.hideIndicators)
+            return false;
         if (!appData)
             return false;
         if (appData.type === "window")
@@ -39,7 +42,7 @@ Item {
             return appData.windowCount > 0;
         return appData.isRunning;
     }
-    readonly property string coreIconColorOverride: SettingsData.dockLauncherLogoColorOverride
+    readonly property string coreIconColorOverride: root.options.launcherLogoColorOverride
     readonly property bool coreIconHasCustomColor: coreIconColorOverride !== "" && coreIconColorOverride !== "primary" && coreIconColorOverride !== "surface"
     readonly property color effectiveCoreIconColor: {
         if (coreIconColorOverride === "primary")
@@ -50,39 +53,13 @@ Item {
             return coreIconColorOverride;
         return Theme.surfaceText;
     }
-    readonly property real effectiveCoreIconBrightness: coreIconHasCustomColor ? SettingsData.dockLauncherLogoBrightness : 0.0
-    readonly property real effectiveCoreIconContrast: coreIconHasCustomColor ? SettingsData.dockLauncherLogoContrast : 0.0
+    readonly property real effectiveCoreIconBrightness: coreIconHasCustomColor ? root.options.launcherLogoBrightness : 0.0
+    readonly property real effectiveCoreIconContrast: coreIconHasCustomColor ? root.options.launcherLogoContrast : 0.0
 
     function updateDesktopEntry() {
-        if (!appData || appData.appId === "__SEPARATOR__") {
-            cachedDesktopEntry = null;
-            return;
-        }
-        if (appData.isCoreApp) {
-            cachedDesktopEntry = null;
-            return;
-        }
-        const moddedId = Paths.moddedAppId(appData.appId);
-        cachedDesktopEntry = DesktopEntries.heuristicLookup(moddedId);
+        dockApps?.refreshDesktopEntries();
     }
 
-    Component.onCompleted: updateDesktopEntry()
-
-    onAppDataChanged: updateDesktopEntry()
-
-    Connections {
-        target: DesktopEntries
-        function onApplicationsChanged() {
-            updateDesktopEntry();
-        }
-    }
-
-    Connections {
-        target: SettingsData
-        function onAppIdSubstitutionsChanged() {
-            updateDesktopEntry();
-        }
-    }
     property bool isWindowFocused: {
         if (!appData) {
             return false;
@@ -90,22 +67,29 @@ Item {
 
         if (appData.type === "window") {
             const toplevel = getToplevelObject();
-            if (!toplevel) {
-                return false;
-            }
-            return toplevel.activated;
-        } else if (appData.type === "grouped") {
-            // For grouped apps, check if any window is focused
-            const allToplevels = ToplevelManager.toplevels.values;
-            for (let i = 0; i < allToplevels.length; i++) {
-                const toplevel = allToplevels[i];
-                if (toplevel.appId === appData.appId && toplevel.activated) {
-                    return true;
-                }
-            }
+            return isToplevelFocused(toplevel);
         }
+        if (appData.type === "grouped")
+            return getGroupedToplevels().some(toplevel => isToplevelFocused(toplevel));
 
         return false;
+    }
+    readonly property bool isMinimized: {
+        if (!CompositorService.supportsMinimize || !appData) {
+            return false;
+        }
+
+        switch (appData.type) {
+        case "window":
+            return getToplevelObject()?.minimized === true;
+        case "grouped":
+            {
+                const toplevels = getGroupedToplevels();
+                return toplevels.length > 0 && toplevels.every(t => t.minimized);
+            }
+        default:
+            return false;
+        }
     }
     property string tooltipText: {
         if (!appData || !appData.appId) {
@@ -135,101 +119,88 @@ Item {
         return appData?.allWindows?.map(w => w.toplevel).filter(t => t !== null) || [];
     }
 
-    function getHyprToplevelForWayland(waylandToplevel) {
-        if (!waylandToplevel || !CompositorService.isHyprland || !Hyprland.toplevels)
-            return null;
-        const hyprToplevels = Array.from(Hyprland.toplevels.values);
-        for (let i = 0; i < hyprToplevels.length; i++) {
-            if (hyprToplevels[i].wayland === waylandToplevel)
-                return hyprToplevels[i];
-        }
-        return null;
-    }
-
-    function getSpecialWorkspaceName(waylandToplevel) {
-        const hyprToplevel = getHyprToplevelForWayland(waylandToplevel);
-        if (!hyprToplevel)
-            return "";
-        const wsName = String(hyprToplevel.lastIpcObject?.workspace?.name || hyprToplevel.workspace?.name || "");
-        if (!wsName.startsWith("special:"))
-            return "";
-        return wsName.slice("special:".length);
+    function isToplevelFocused(toplevel) {
+        if (!toplevel)
+            return false;
+        if (toplevel.activated)
+            return true;
+        return CompositorService.overviewFocusedToplevel([toplevel]) !== null;
     }
 
     function restoreSpecialWorkspaceWindow(waylandToplevel) {
-        if (!SettingsData.dockRestoreSpecialWorkspaceOnClick || !CompositorService.isHyprland || !waylandToplevel)
+        if (!root.options.restoreSpecialWorkspaceOnClick || !waylandToplevel)
             return false;
 
-        const specialName = getSpecialWorkspaceName(waylandToplevel);
+        const specialName = CompositorService.specialWorkspaceName(waylandToplevel);
         if (!specialName)
             return false;
 
-        Hyprland.dispatch("togglespecialworkspace " + specialName);
-        Qt.callLater(() => waylandToplevel.activate());
+        HyprlandService.toggleSpecial(specialName);
+        Qt.callLater(() => CompositorService.activateToplevel(waylandToplevel));
         return true;
     }
-    onIsHoveredChanged: {
-        if (mouseArea.pressed || dragging)
-            return;
-        if (isHovered) {
-            exitAnimation.stop();
-            if (!bounceAnimation.running) {
-                bounceAnimation.restart();
-            }
-        } else {
-            bounceAnimation.stop();
-            exitAnimation.restart();
-        }
-    }
 
-    readonly property bool animateX: SettingsData.dockPosition === SettingsData.Position.Left || SettingsData.dockPosition === SettingsData.Position.Right
-    readonly property real animationDistance: actualIconSize
-    readonly property real animationDirection: {
-        if (SettingsData.dockPosition === SettingsData.Position.Bottom)
-            return -1;
-        if (SettingsData.dockPosition === SettingsData.Position.Top)
-            return 1;
-        if (SettingsData.dockPosition === SettingsData.Position.Right)
-            return -1;
-        if (SettingsData.dockPosition === SettingsData.Position.Left)
-            return 1;
+    function getActiveGroupedToplevelIndex(toplevels) {
+        for (let i = 0; i < toplevels.length; i++) {
+            if (isToplevelFocused(toplevels[i]))
+                return i;
+        }
+
         return -1;
     }
 
-    SequentialAnimation {
-        id: bounceAnimation
+    function cycleGroupedToplevels() {
+        const toplevels = getGroupedToplevels();
+        if (toplevels.length === 0)
+            return;
 
-        running: false
-
-        NumberAnimation {
-            target: root
-            property: "hoverAnimOffset"
-            to: animationDirection * animationDistance * 0.25
-            duration: Anims.durShort
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: Anims.emphasizedAccel
-        }
-
-        NumberAnimation {
-            target: root
-            property: "hoverAnimOffset"
-            to: animationDirection * animationDistance * 0.2
-            duration: Anims.durShort
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: Anims.emphasizedDecel
-        }
+        const currentIndex = getActiveGroupedToplevelIndex(toplevels);
+        const nextToplevel = toplevels[(currentIndex + 1) % toplevels.length];
+        if (restoreSpecialWorkspaceWindow(nextToplevel))
+            return;
+        CompositorService.activateToplevel(nextToplevel);
     }
 
-    NumberAnimation {
-        id: exitAnimation
+    function showContextMenu() {
+        if (!contextMenu)
+            return;
+        const shouldHidePin = Paths.isDmsAppId(appData.appId);
+        contextMenu.showForButton(root, appData, root.height, shouldHidePin, cachedDesktopEntry, parentDockScreen, dockApps);
+    }
+    function activate() {
+        mouseArea.handleLeftClick();
+    }
 
-        running: false
-        target: root
-        property: "hoverAnimOffset"
-        to: 0
-        duration: Anims.durShort
-        easing.type: Easing.BezierSpline
-        easing.bezierCurve: Anims.emphasizedDecel
+    Rectangle {
+        anchors.fill: parent
+        radius: Theme.cornerRadiusS
+        color: Theme.withAlpha(root.activeColor, Theme.stateLayerPressed)
+        visible: root.options.colorizeActive && root.isWindowFocused
+        z: -1
+    }
+    readonly property color activeColor: {
+        switch (root.options.activeColorMode) {
+        case "secondary":
+            return Theme.secondary;
+        case "primaryContainer":
+            return Theme.primaryContainer;
+        case "error":
+            return Theme.error;
+        case "success":
+            return Theme.success;
+        default:
+            return Theme.primary;
+        }
+    }
+    StyledText {
+        visible: root.options.compact === false && !root.isVertical
+        x: root.actualIconSize + Theme.spacingM
+        width: Math.max(0, parent.width - x - Theme.spacingS)
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.windowTitle || root.tooltipText
+        elide: Text.ElideRight
+        color: Theme.surfaceText
+        font.pixelSize: Theme.fontSizeSmall
     }
 
     Timer {
@@ -242,6 +213,19 @@ Item {
                 longPressing = true;
             }
         }
+    }
+
+    function cancelDrag() {
+        longPressTimer.stop();
+        longPressing = false;
+        dragging = false;
+        dragAxisOffset = 0;
+        targetIndex = -1;
+        originalIndex = -1;
+        if (!dockApps)
+            return;
+        dockApps.draggedIndex = -1;
+        dockApps.dropTargetIndex = -1;
     }
 
     MouseArea {
@@ -259,25 +243,21 @@ Item {
                 longPressTimer.start();
             }
         }
+        onCanceled: root.cancelDrag()
+
         onReleased: mouse => {
             longPressTimer.stop();
 
             const wasDragging = dragging;
-            const didReorder = wasDragging && targetIndex >= 0 && targetIndex !== originalIndex && dockApps;
+            const didReorder = wasDragging && targetIndex >= 0 && dockApps && (targetIndex !== originalIndex || dockApps.mixedDropIndex >= 0);
 
-            if (didReorder)
-                dockApps.movePinnedApp(originalIndex, targetIndex);
-
-            longPressing = false;
-            dragging = false;
-            dragAxisOffset = 0;
-            targetIndex = -1;
-            originalIndex = -1;
-
-            if (dockApps) {
-                dockApps.draggedIndex = -1;
-                dockApps.dropTargetIndex = -1;
+            if (didReorder) {
+                const from = originalIndex;
+                const to = dockApps.dropTarget(targetIndex);
+                dockApps.settleDrag(() => dockApps.movePinnedApp(from, to));
             }
+
+            root.cancelDrag();
 
             if (wasDragging || mouse.button !== Qt.LeftButton)
                 return;
@@ -314,7 +294,7 @@ Item {
                 if (windowToplevel) {
                     if (restoreSpecialWorkspaceWindow(windowToplevel))
                         return;
-                    windowToplevel.activate();
+                    CompositorService.toggleToplevel(windowToplevel);
                 }
                 break;
             case "grouped":
@@ -341,11 +321,10 @@ Item {
                     if (groupedToplevel) {
                         if (restoreSpecialWorkspaceWindow(groupedToplevel))
                             return;
-                        groupedToplevel.activate();
+                        CompositorService.toggleToplevel(groupedToplevel);
                     }
-                } else if (contextMenu) {
-                    const shouldHidePin = appData.appId === "org.quickshell" || appData.appId === "com.danklinux.dms";
-                    contextMenu.showForButton(root, appData, root.height + 25, shouldHidePin, cachedDesktopEntry, parentDockScreen, dockApps);
+                } else {
+                    root.cycleGroupedToplevels();
                 }
                 break;
             }
@@ -369,10 +348,9 @@ Item {
 
             const axisOffset = isVertical ? (mouse.y - dragStartPos.y) : (mouse.x - dragStartPos.x);
             dragAxisOffset = axisOffset;
+            dockApps.updateMixedDrag(mouseArea, mouse.x, mouse.y);
 
-            const spacing = Math.min(8, Math.max(4, actualIconSize * 0.08));
-            const itemSize = actualIconSize * 1.2 + spacing;
-            const slotOffset = Math.round(axisOffset / itemSize);
+            const slotOffset = Math.round(axisOffset / (dockApps.targetSize + dockApps.itemSpacing));
             const newTargetIndex = Math.max(0, Math.min(dockApps.pinnedAppCount - 1, originalIndex + slotOffset));
 
             if (newTargetIndex !== targetIndex) {
@@ -390,10 +368,12 @@ Item {
                     appData.toplevel?.close();
                     break;
                 case "grouped":
-                    if (contextMenu) {
-                        const shouldHidePin = appData.appId === "org.quickshell" || appData.appId === "com.danklinux.dms";
-                        contextMenu.showForButton(root, appData, root.height, shouldHidePin, cachedDesktopEntry, parentDockScreen, dockApps);
-                    }
+                    const groupedToplevels = getGroupedToplevels();
+                    if (groupedToplevels.length === 0)
+                        return;
+                    const activeIndex = getActiveGroupedToplevelIndex(groupedToplevels);
+                    const groupedToplevelToClose = groupedToplevels[activeIndex >= 0 ? activeIndex : 0];
+                    groupedToplevelToClose?.close();
                     break;
                 default:
                     if (!appData.appId)
@@ -412,19 +392,28 @@ Item {
                     break;
                 }
             } else if (mouse.button === Qt.RightButton) {
-                if (!contextMenu)
-                    return;
-                const shouldHidePin = appData.appId === "org.quickshell" || appData.appId === "com.danklinux.dms";
-                contextMenu.showForButton(root, appData, root.height, shouldHidePin, cachedDesktopEntry, parentDockScreen, dockApps);
+                root.showContextMenu();
             }
         }
     }
 
-    property real hoverAnimOffset: 0
+    readonly property real hoverAnimOffset: hoverBounce.offset
+
+    DockHoverBounce {
+        id: hoverBounce
+        hovered: root.isHovered
+        suppressed: mouseArea.pressed || root.dragging
+        barHosted: root.dockApps?.barHosted ?? false
+        position: root.options.position
+        distance: root.actualIconSize
+    }
 
     Item {
         id: visualContent
-        anchors.fill: parent
+        x: root.options.compact === false && !root.isVertical ? 0 : (parent.width - width) / 2
+        y: (parent.height - height) / 2
+        width: root.options.compact === false && !root.isVertical ? root.actualIconSize + Theme.spacingS : parent.width
+        height: parent.height
 
         transform: Translate {
             id: iconTransform
@@ -447,108 +436,125 @@ Item {
         Rectangle {
             anchors.fill: parent
             radius: Theme.cornerRadius
-            color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.3)
+            color: Theme.primarySelected
             border.width: 2
             border.color: Theme.primary
             visible: dragging
             z: -1
         }
 
-        AppIconRenderer {
-            id: coreIcon
+        Item {
+            id: iconSlot
 
-            anchors.centerIn: parent
-            iconSize: actualIconSize
-            iconValue: appData && appData.isCoreApp && appData.coreAppData ? (appData.coreAppData.icon || "") : ""
-            colorOverride: effectiveCoreIconColor
-            brightnessOverride: effectiveCoreIconBrightness
-            contrastOverride: effectiveCoreIconContrast
-            fallbackText: "?"
-            visible: iconValue !== ""
-        }
+            anchors.fill: parent
+            scale: root.options?.enlargeOnHover && root.isHovered ? (root.options?.enlargePercentage ?? 125) / 100 : 1
 
-        IconImage {
-            id: iconImg
+            AppIconRenderer {
+                id: coreIcon
 
-            anchors.centerIn: parent
-            implicitSize: appData && (appData.appId === "org.quickshell" || appData.appId === "com.danklinux.dms") ? actualIconSize * 0.85 : actualIconSize
-            source: {
-                if (!appData || appData.appId === "__SEPARATOR__") {
-                    return "";
-                }
-                if (appData.isCoreApp && appData.coreAppData) {
-                    return "";
-                }
-                return Paths.getAppIcon(appData.appId, cachedDesktopEntry);
-            }
-            mipmap: true
-            smooth: true
-            asynchronous: true
-            visible: status === Image.Ready && !coreIcon.visible
-            layer.enabled: appData && (appData.appId === "org.quickshell" || appData.appId === "com.danklinux.dms")
-            layer.smooth: true
-            layer.mipmap: true
-            layer.effect: MultiEffect {
-                saturation: 0
-                colorization: 1
-                colorizationColor: Theme.primary
-            }
-        }
-
-        Rectangle {
-            width: actualIconSize
-            height: actualIconSize
-            anchors.centerIn: parent
-            visible: !coreIcon.visible && iconImg.status !== Image.Ready && appData && appData.appId && !Paths.isSteamApp(appData.appId)
-            color: Theme.surfaceLight
-            radius: Theme.cornerRadius
-            border.width: 1
-            border.color: Theme.primarySelected
-
-            Text {
                 anchors.centerIn: parent
-                text: {
-                    if (!appData || !appData.appId) {
-                        return "?";
-                    }
+                iconSize: actualIconSize
+                iconValue: appData && appData.isCoreApp && appData.coreAppData ? (appData.coreAppData.icon || "") : ""
+                colorOverride: effectiveCoreIconColor
+                brightnessOverride: effectiveCoreIconBrightness
+                contrastOverride: effectiveCoreIconContrast
+                fallbackText: "?"
+                visible: iconValue !== ""
+            }
 
-                    let appName;
-                    if (appData.isCoreApp && appData.coreAppData) {
-                        appName = appData.coreAppData.name || appData.appId;
-                    } else {
-                        appName = Paths.getAppName(appData.appId, cachedDesktopEntry);
+            IconImage {
+                id: iconImg
+
+                anchors.centerIn: parent
+                implicitSize: appData && Paths.isDmsAppId(appData.appId) ? actualIconSize * 0.85 : actualIconSize
+                source: {
+                    if (!appData || appData.appId === "__SEPARATOR__") {
+                        return "";
                     }
-                    return appName.charAt(0).toUpperCase();
+                    if (appData.isCoreApp && appData.coreAppData) {
+                        return "";
+                    }
+                    return Paths.getAppIcon(appData.appId, cachedDesktopEntry);
                 }
-                font.pixelSize: Math.max(8, parent.width * 0.35)
-                color: Theme.primary
-                font.weight: Font.Bold
+                mipmap: true
+                smooth: true
+                asynchronous: true
+                visible: status === Image.Ready && !coreIcon.visible
+                opacity: root.isMinimized ? 0.4 : 1
+                layer.enabled: appData && Paths.isDmsAppId(appData.appId)
+                layer.smooth: true
+                layer.mipmap: true
+                layer.effect: MultiEffect {
+                    saturation: 0
+                    colorization: 1
+                    colorizationColor: Theme.primary
+                }
+            }
+
+            Rectangle {
+                width: actualIconSize
+                height: actualIconSize
+                anchors.centerIn: parent
+                visible: !coreIcon.visible && iconImg.status !== Image.Ready && appData && appData.appId && !Paths.isSteamApp(appData.appId)
+                opacity: root.isMinimized ? 0.4 : 1
+                color: Theme.surfaceLight
+                radius: Theme.cornerRadius
+                border.width: 1
+                border.color: Theme.primarySelected
+
+                StyledText {
+                    anchors.centerIn: parent
+                    text: {
+                        if (!appData || !appData.appId) {
+                            return "?";
+                        }
+
+                        let appName;
+                        if (appData.isCoreApp && appData.coreAppData) {
+                            appName = appData.coreAppData.name || appData.appId;
+                        } else {
+                            appName = Paths.getAppName(appData.appId, cachedDesktopEntry);
+                        }
+                        return appName.charAt(0).toUpperCase();
+                    }
+                    font.pixelSize: Math.max(8, parent.width * 0.35)
+                    color: Theme.primary
+                    font.weight: Theme.fontWeightMedium
+                }
+            }
+
+            DIcon {
+                anchors.centerIn: parent
+                size: actualIconSize
+                name: "sports_esports"
+                color: Theme.surfaceText
+                visible: !coreIcon.visible && iconImg.status !== Image.Ready && appData && appData.appId && Paths.isSteamApp(appData.appId)
+                opacity: root.isMinimized ? 0.4 : 1
             }
         }
 
-        DankIcon {
-            anchors.centerIn: parent
-            size: actualIconSize
-            name: "sports_esports"
-            color: Theme.surfaceText
-            visible: !coreIcon.visible && iconImg.status !== Image.Ready && appData && appData.appId && Paths.isSteamApp(appData.appId)
-        }
+        Item {
+            id: indicatorSlot
 
-        Loader {
-            anchors.horizontalCenter: SettingsData.dockPosition === SettingsData.Position.Left || SettingsData.dockPosition === SettingsData.Position.Right ? undefined : parent.horizontalCenter
-            anchors.verticalCenter: SettingsData.dockPosition === SettingsData.Position.Left || SettingsData.dockPosition === SettingsData.Position.Right ? parent.verticalCenter : undefined
-            anchors.bottom: SettingsData.dockPosition === SettingsData.Position.Bottom ? parent.bottom : undefined
-            anchors.top: SettingsData.dockPosition === SettingsData.Position.Top ? parent.top : undefined
-            anchors.left: SettingsData.dockPosition === SettingsData.Position.Left ? parent.left : undefined
-            anchors.right: SettingsData.dockPosition === SettingsData.Position.Right ? parent.right : undefined
-            anchors.bottomMargin: SettingsData.dockPosition === SettingsData.Position.Bottom ? -(SettingsData.dockSpacing / 2 + 1.4) : 0
-            anchors.topMargin: SettingsData.dockPosition === SettingsData.Position.Top ? -(SettingsData.dockSpacing / 2 + 1.4) : 0
-            anchors.leftMargin: SettingsData.dockPosition === SettingsData.Position.Left ? -(SettingsData.dockSpacing / 2 + 1.4) : 0
-            anchors.rightMargin: SettingsData.dockPosition === SettingsData.Position.Right ? -(SettingsData.dockSpacing / 2 + 1.4) : 0
+            readonly property real cellSize: root.isVertical ? parent.width : parent.height
+            readonly property real crossStart: {
+                if (root.indicatorAtFarEdge)
+                    return root.indicatorInPadding ? cellSize : cellSize - root.indicatorThickness;
+                return root.indicatorInPadding ? -root.indicatorThickness : 0;
+            }
 
-            sourceComponent: SettingsData.dockPosition === SettingsData.Position.Left || SettingsData.dockPosition === SettingsData.Position.Right ? columnIndicator : rowIndicator
+            x: root.isVertical ? crossStart : 0
+            y: root.isVertical ? 0 : crossStart
+            width: root.isVertical ? root.indicatorThickness : parent.width
+            height: root.isVertical ? parent.height : root.indicatorThickness
 
-            visible: root.shouldShowIndicator
+            Loader {
+                anchors.centerIn: parent
+                width: item ? item.implicitWidth : 0
+                height: item ? item.implicitHeight : 0
+                sourceComponent: root.isVertical ? columnIndicator : rowIndicator
+                visible: root.shouldShowIndicator
+            }
         }
     }
 
@@ -556,7 +562,9 @@ Item {
         id: rowIndicator
 
         Row {
-            spacing: 2
+            spacing: Theme.spacingXXS
+            width: implicitWidth
+            height: implicitHeight
 
             Repeater {
                 model: {
@@ -571,39 +579,39 @@ Item {
                 }
 
                 Rectangle {
-                    width: {
-                        if (SettingsData.dockIndicatorStyle === "circle") {
+                    readonly property bool dotFocused: {
+                        if (!appData)
+                            return false;
+                        if (appData.type !== "grouped" || appData.windowCount === 1)
+                            return isWindowFocused;
+                        const groupToplevels = getGroupedToplevels();
+                        return index < groupToplevels.length && isToplevelFocused(groupToplevels[index]);
+                    }
+                    readonly property real baseWidth: {
+                        if (root.options.indicatorStyle === "circle")
                             return Math.max(4, actualIconSize * 0.1);
-                        }
                         return appData && appData.type === "grouped" && appData.windowCount > 1 ? Math.max(3, actualIconSize * 0.1) : Math.max(6, actualIconSize * 0.2);
                     }
+                    width: dotFocused ? baseWidth * 3 : baseWidth
                     height: {
-                        if (SettingsData.dockIndicatorStyle === "circle") {
+                        if (root.options.indicatorStyle === "circle") {
                             return Math.max(4, actualIconSize * 0.1);
                         }
                         return Math.max(2, actualIconSize * 0.05);
                     }
-                    radius: SettingsData.dockIndicatorStyle === "circle" ? width / 2 : Theme.cornerRadius
-                    color: {
-                        if (!appData) {
-                            return "transparent";
-                        }
+                    radius: height / 2
+                    color: !appData ? "transparent" : (dotFocused ? Theme.primary : Theme.surfaceTextSecondary)
 
-                        if (appData.type !== "grouped" || appData.windowCount === 1) {
-                            if (isWindowFocused) {
-                                return Theme.primary;
-                            }
-                            return Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.6);
+                    Behavior on width {
+                        NumberAnimation {
+                            duration: Theme.shortDuration
+                            easing.type: Easing.OutCubic
                         }
-
-                        if (appData.type === "grouped" && appData.windowCount > 1) {
-                            const groupToplevels = getGroupedToplevels();
-                            if (index < groupToplevels.length && groupToplevels[index].activated) {
-                                return Theme.primary;
-                            }
+                    }
+                    Behavior on color {
+                        ColorAnimation {
+                            duration: Theme.shortDuration
                         }
-
-                        return Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.6);
                     }
                 }
             }
@@ -614,7 +622,9 @@ Item {
         id: columnIndicator
 
         Column {
-            spacing: 2
+            spacing: Theme.spacingXXS
+            width: implicitWidth
+            height: implicitHeight
 
             Repeater {
                 model: {
@@ -629,39 +639,39 @@ Item {
                 }
 
                 Rectangle {
+                    readonly property bool dotFocused: {
+                        if (!appData)
+                            return false;
+                        if (appData.type !== "grouped" || appData.windowCount === 1)
+                            return isWindowFocused;
+                        const groupToplevels = getGroupedToplevels();
+                        return index < groupToplevels.length && isToplevelFocused(groupToplevels[index]);
+                    }
+                    readonly property real baseHeight: {
+                        if (root.options.indicatorStyle === "circle")
+                            return Math.max(4, actualIconSize * 0.1);
+                        return appData && appData.type === "grouped" && appData.windowCount > 1 ? Math.max(3, actualIconSize * 0.1) : Math.max(6, actualIconSize * 0.2);
+                    }
                     width: {
-                        if (SettingsData.dockIndicatorStyle === "circle") {
+                        if (root.options.indicatorStyle === "circle") {
                             return Math.max(4, actualIconSize * 0.1);
                         }
                         return Math.max(2, actualIconSize * 0.05);
                     }
-                    height: {
-                        if (SettingsData.dockIndicatorStyle === "circle") {
-                            return Math.max(4, actualIconSize * 0.1);
+                    height: dotFocused ? baseHeight * 3 : baseHeight
+                    radius: width / 2
+                    color: !appData ? "transparent" : (dotFocused ? Theme.primary : Theme.surfaceTextSecondary)
+
+                    Behavior on height {
+                        NumberAnimation {
+                            duration: Theme.shortDuration
+                            easing.type: Easing.OutCubic
                         }
-                        return appData && appData.type === "grouped" && appData.windowCount > 1 ? Math.max(3, actualIconSize * 0.1) : Math.max(6, actualIconSize * 0.2);
                     }
-                    radius: SettingsData.dockIndicatorStyle === "circle" ? width / 2 : Theme.cornerRadius
-                    color: {
-                        if (!appData) {
-                            return "transparent";
+                    Behavior on color {
+                        ColorAnimation {
+                            duration: Theme.shortDuration
                         }
-
-                        if (appData.type !== "grouped" || appData.windowCount === 1) {
-                            if (isWindowFocused) {
-                                return Theme.primary;
-                            }
-                            return Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.6);
-                        }
-
-                        if (appData.type === "grouped" && appData.windowCount > 1) {
-                            const groupToplevels = getGroupedToplevels();
-                            if (index < groupToplevels.length && groupToplevels[index].activated) {
-                                return Theme.primary;
-                            }
-                        }
-
-                        return Qt.rgba(Theme.surfaceText.r, Theme.surfaceText.g, Theme.surfaceText.b, 0.6);
                     }
                 }
             }

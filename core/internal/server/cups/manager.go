@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/ipp"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/pkg/ipp"
 )
 
 func NewManager() (*Manager, error) {
@@ -141,8 +141,7 @@ func isNoPrintersError(err error) bool {
 		return false
 	}
 
-	var ippErr ipp.IPPError
-	if errors.As(err, &ippErr) {
+	if ippErr, ok := errors.AsType[ipp.IPPError](err); ok {
 		return ippErr.Status == 1030
 	}
 
@@ -229,6 +228,9 @@ func (m *Manager) snapshotState() CUPSState {
 func (m *Manager) Subscribe(id string) chan CUPSState {
 	ch := make(chan CUPSState, 64)
 
+	m.subLifecycleMu.Lock()
+	defer m.subLifecycleMu.Unlock()
+
 	wasEmpty := true
 	m.subscribers.Range(func(key string, ch chan CUPSState) bool {
 		wasEmpty = false
@@ -237,19 +239,25 @@ func (m *Manager) Subscribe(id string) chan CUPSState {
 
 	m.subscribers.Store(id, ch)
 
-	if wasEmpty && m.subscription != nil {
-		if err := m.subscription.Start(); err != nil {
-			log.Warnf("[CUPS] Failed to start subscription manager: %v", err)
-		} else {
-			m.eventWG.Add(1)
-			go m.eventHandler()
-		}
+	if !wasEmpty || m.subscription == nil {
+		return ch
 	}
+
+	if err := m.subscription.Start(); err != nil {
+		log.Warnf("[CUPS] Failed to start subscription manager: %v", err)
+		return ch
+	}
+
+	m.eventWG.Add(1)
+	go m.eventHandler()
 
 	return ch
 }
 
 func (m *Manager) Unsubscribe(id string) {
+	m.subLifecycleMu.Lock()
+	defer m.subLifecycleMu.Unlock()
+
 	if val, ok := m.subscribers.LoadAndDelete(id); ok {
 		close(val)
 	}
@@ -260,18 +268,22 @@ func (m *Manager) Unsubscribe(id string) {
 		return false
 	})
 
-	if isEmpty && m.subscription != nil {
-		m.subscription.Stop()
-		m.eventWG.Wait()
+	if !isEmpty || m.subscription == nil {
+		return
 	}
+
+	m.subscription.Stop()
+	m.eventWG.Wait()
 }
 
 func (m *Manager) Close() {
 	close(m.stopChan)
 
+	m.subLifecycleMu.Lock()
 	if m.subscription != nil {
 		m.subscription.Stop()
 	}
+	m.subLifecycleMu.Unlock()
 
 	m.eventWG.Wait()
 	m.notifierWg.Wait()

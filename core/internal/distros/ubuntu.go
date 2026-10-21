@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/deps"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/privesc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/deps"
+	"github.com/duxlabs-dev/dux-shell/core/internal/privesc"
 )
 
 func init() {
@@ -71,6 +71,7 @@ func (u *UbuntuDistribution) DetectDependenciesWithTerminal(ctx context.Context,
 	// Hyprland-specific tools
 	if wm == deps.WindowManagerHyprland {
 		dependencies = append(dependencies, u.detectHyprlandTools()...)
+		dependencies = append(dependencies, u.detectHyprlandGuiutils())
 	}
 
 	// Niri-specific tools
@@ -79,7 +80,8 @@ func (u *UbuntuDistribution) DetectDependenciesWithTerminal(ctx context.Context,
 	}
 
 	dependencies = append(dependencies, u.detectMatugen())
-	dependencies = append(dependencies, u.detectDgop())
+	dependencies = append(dependencies, u.detectDanksearch())
+	dependencies = append(dependencies, withGitVariant(u.detectDankCalendar(), u.packageInstalled("dankcalendar-git")))
 
 	return dependencies, nil
 }
@@ -97,11 +99,28 @@ func (u *UbuntuDistribution) detectAccountsService() deps.Dependency {
 }
 
 func (u *UbuntuDistribution) detectDMSGreeter() deps.Dependency {
-	return u.detectOptionalPackage("dms-greeter", "DankMaterialShell greetd greeter", u.packageInstalled("dms-greeter"))
+	gitInstalled := u.packageInstalled("dms-greeter-git")
+	dep := u.detectOptionalPackage("dms-greeter", "Dux Shell greetd greeter", gitInstalled || u.packageInstalled("dms-greeter"))
+	return withGitVariant(dep, gitInstalled)
 }
 
 func (u *UbuntuDistribution) packageInstalled(pkg string) bool {
 	return debianPackageInstalledPrecisely(pkg)
+}
+
+func (u *UbuntuDistribution) InstalledVariant(stable, git PackageMapping) (deps.PackageVariant, bool) {
+	return installedVariantByName(u.packageInstalled, stable, git)
+}
+
+// SwapVariants installs the new variants directly: their Conflicts/Replaces make apt remove the old ones.
+func (u *UbuntuDistribution) SwapVariants(ctx context.Context, swaps []VariantSwap, sudoPassword string, progressChan chan<- InstallProgressMsg) error {
+	if ppas := swapTargets(swaps, RepoTypePPA); len(ppas) > 0 {
+		if err := u.enablePPARepos(ctx, ppas, sudoPassword, progressChan); err != nil {
+			return err
+		}
+	}
+	_, to := swapNames(swaps)
+	return u.installAPTPackages(ctx, to, sudoPassword, progressChan)
 }
 
 func (u *UbuntuDistribution) GetPackageMapping(wm deps.WindowManager) map[string]PackageMapping {
@@ -118,12 +137,13 @@ func (u *UbuntuDistribution) GetPackageMappingWithVariants(wm deps.WindowManager
 		"accountsservice":        {Name: "accountsservice", Repository: RepoTypeSystem},
 
 		// DMS packages from PPAs
-		"dms (DankMaterialShell)": u.getDmsMapping(variants["dms (DankMaterialShell)"]),
-		"quickshell":              u.getQuickshellMapping(variants["quickshell"]),
-		"dms-greeter":             {Name: "dms-greeter", Repository: RepoTypePPA, RepoURL: "ppa:avengemedia/danklinux"},
-		"matugen":                 {Name: "matugen", Repository: RepoTypePPA, RepoURL: "ppa:avengemedia/danklinux"},
-		"dgop":                    {Name: "dgop", Repository: RepoTypePPA, RepoURL: "ppa:avengemedia/danklinux"},
-		"ghostty":                 {Name: "ghostty", Repository: RepoTypePPA, RepoURL: "ppa:avengemedia/danklinux"},
+		"dms (Dux Shell)": u.getDmsMapping(variants["dms (Dux Shell)"]),
+		"quickshell":      u.getQuickshellMapping(variants["quickshell"]),
+		"dms-greeter":     variantMapping("dms-greeter", variants["dms-greeter"], RepoTypePPA, "ppa:avengemedia/danklinux"),
+		"matugen":         {Name: "matugen", Repository: RepoTypePPA, RepoURL: "ppa:avengemedia/danklinux"},
+		"ghostty":         {Name: "ghostty", Repository: RepoTypePPA, RepoURL: "ppa:avengemedia/danklinux"},
+		"danksearch":      {Name: "danksearch", Repository: RepoTypePPA, RepoURL: "ppa:avengemedia/danklinux"},
+		"dankcalendar":    variantMapping("dankcalendar", variants["dankcalendar"], RepoTypePPA, "ppa:avengemedia/danklinux"),
 	}
 
 	switch wm {
@@ -132,6 +152,7 @@ func (u *UbuntuDistribution) GetPackageMappingWithVariants(wm deps.WindowManager
 		packages["hyprland"] = PackageMapping{Name: "hyprland", Repository: RepoTypePPA, RepoURL: "ppa:cppiber/hyprland"}
 		packages["hyprctl"] = PackageMapping{Name: "hyprland", Repository: RepoTypePPA, RepoURL: "ppa:cppiber/hyprland"}
 		packages["jq"] = PackageMapping{Name: "jq", Repository: RepoTypeSystem}
+		packages["hyprland-guiutils"] = PackageMapping{Name: "hyprland-guiutils", Repository: RepoTypePPA, RepoURL: "ppa:cppiber/hyprland"}
 	case deps.WindowManagerNiri:
 		niriVariant := variants["niri"]
 		packages["niri"] = u.getNiriMapping(niriVariant)
@@ -573,10 +594,6 @@ func (u *UbuntuDistribution) installBuildDependencies(ctx context.Context, manua
 			if err := u.installRust(ctx, sudoPassword, progressChan); err != nil {
 				return fmt.Errorf("failed to install Rust: %w", err)
 			}
-		case "dgop":
-			if err := u.installGo(ctx, sudoPassword, progressChan); err != nil {
-				return fmt.Errorf("failed to install Go: %w", err)
-			}
 		}
 	}
 
@@ -634,53 +651,6 @@ func (u *UbuntuDistribution) installRust(ctx context.Context, sudoPassword strin
 	}
 
 	return nil
-}
-
-func (u *UbuntuDistribution) installGo(ctx context.Context, sudoPassword string, progressChan chan<- InstallProgressMsg) error {
-	if u.commandExists("go") {
-		return nil
-	}
-
-	progressChan <- InstallProgressMsg{
-		Phase:       PhaseSystemPackages,
-		Progress:    0.87,
-		Step:        "Adding Go PPA repository...",
-		IsComplete:  false,
-		NeedsSudo:   true,
-		CommandInfo: "sudo add-apt-repository ppa:longsleep/golang-backports",
-	}
-
-	addPPACmd := privesc.ExecCommand(ctx, sudoPassword,
-		"add-apt-repository -y ppa:longsleep/golang-backports")
-	if err := u.runWithProgress(addPPACmd, progressChan, PhaseSystemPackages, 0.87, 0.88); err != nil {
-		return fmt.Errorf("failed to add Go PPA: %w", err)
-	}
-
-	progressChan <- InstallProgressMsg{
-		Phase:       PhaseSystemPackages,
-		Progress:    0.88,
-		Step:        "Updating package lists...",
-		IsComplete:  false,
-		NeedsSudo:   true,
-		CommandInfo: "sudo apt-get update",
-	}
-
-	updateCmd := privesc.ExecCommand(ctx, sudoPassword, "apt-get update")
-	if err := u.runWithProgress(updateCmd, progressChan, PhaseSystemPackages, 0.88, 0.89); err != nil {
-		return fmt.Errorf("failed to update package lists after adding Go PPA: %w", err)
-	}
-
-	progressChan <- InstallProgressMsg{
-		Phase:       PhaseSystemPackages,
-		Progress:    0.89,
-		Step:        "Installing Go...",
-		IsComplete:  false,
-		NeedsSudo:   true,
-		CommandInfo: "sudo apt-get install golang-go",
-	}
-
-	installCmd := privesc.ExecCommand(ctx, sudoPassword, "apt-get install -y golang-go")
-	return u.runWithProgress(installCmd, progressChan, PhaseSystemPackages, 0.89, 0.90)
 }
 
 func (u *UbuntuDistribution) InstallManualPackages(ctx context.Context, packages []string, variantMap map[string]deps.PackageVariant, sudoPassword string, progressChan chan<- InstallProgressMsg) error {

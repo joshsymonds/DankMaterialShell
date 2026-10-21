@@ -2,29 +2,28 @@ package themes
 
 import (
 	"fmt"
-	"net"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/themes"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	"github.com/duxlabs-dev/dux-shell/core/internal/themes"
 )
 
-func HandleList(conn net.Conn, req models.Request) {
+func HandleList(conn *ipc.ConnWriter, req ipc.Request) {
 	registry, err := themes.NewRegistry()
 	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to create registry: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to create registry: %v", err))
 		return
 	}
 
 	themeList, err := registry.List()
 	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to list themes: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to list themes: %v", err))
 		return
 	}
 
 	manager, err := themes.NewManager()
 	if err != nil {
-		models.RespondError(conn, req.ID, fmt.Sprintf("failed to create manager: %v", err))
+		conn.RespondError(req.ID, fmt.Sprintf("failed to create manager: %v", err))
 		return
 	}
 
@@ -41,14 +40,15 @@ func HandleList(conn net.Conn, req models.Request) {
 			SourceDir:   t.SourceDir,
 			Installed:   installed,
 			FirstParty:  isFirstParty(t.Author),
+			WCAG:        t.WCAG,
 		}
 		addVariantsInfo(&info, t.Variants)
 		result[i] = info
 	}
 
-	models.Respond(conn, req.ID, result)
+	conn.Respond(req.ID, result)
 }
 
 func isFirstParty(author string) bool {
-	return strings.EqualFold(author, "Avenge Media") || strings.EqualFold(author, "AvengeMedia")
+	return strings.EqualFold(author, "Dux Labs") || strings.EqualFold(author, "Avenge Media") || strings.EqualFold(author, "AvengeMedia")
 }

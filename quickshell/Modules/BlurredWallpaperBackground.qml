@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Effects
 import Quickshell
 import Quickshell.Wayland
 import qs.Common
@@ -7,12 +6,8 @@ import qs.Widgets
 import qs.Services
 
 Variants {
-    model: {
-        if (SessionData.isGreeterMode) {
-            return Quickshell.screens;
-        }
-        return SettingsData.getFilteredScreens("wallpaper");
-    }
+    readonly property var log: Log.scoped("BlurredWallpaperBackground")
+    model: SettingsData.getFilteredScreens("wallpaper")
 
     PanelWindow {
         id: blurWallpaperWindow
@@ -32,6 +27,10 @@ Variants {
 
         color: "transparent"
 
+        visible: root.contentReady && !root.surfaceBounce
+
+        updatesEnabled: root.renderActive || root._settleFrames > 0
+
         mask: Region {
             item: Item {}
         }
@@ -40,6 +39,11 @@ Variants {
             id: root
             anchors.fill: parent
 
+            Rectangle {
+                anchors.fill: parent
+                color: SettingsData.effectiveWallpaperBackgroundColor
+            }
+
             function encodeFileUrl(path) {
                 if (!path)
                     return "";
@@ -47,7 +51,173 @@ Variants {
             }
 
             property string source: SessionData.getMonitorWallpaper(modelData.name) || ""
-            property bool isColorSource: source.startsWith("#")
+            readonly property bool isColorSource: source.startsWith("#")
+            readonly property string displaySource: {
+                if (!source || isColorSource)
+                    return "";
+                return source.startsWith("file://") ? source : encodeFileUrl(source);
+            }
+            property bool contentReady: false
+            property bool surfaceBounce: false
+
+            // Live stack is captured into frozenLayer once stable, then unloaded; if the capture stalls the stack just stays live.
+            property bool liveActive: false
+            property bool frozenValid: false
+            property string _frozenSource: ""
+            property bool loadFailed: false
+            property int _freezeWaitFrames: 0
+
+            readonly property var backingWindow: Window.window
+            readonly property bool showsBackdrop: !source || isColorSource || loadFailed
+            readonly property bool backdropBusy: showsBackdrop && !(backdropLoader.item?.ready ?? false)
+            readonly property bool renderActive: backdropBusy || liveActive || _freezeWaitFrames > 0
+            property int _settleFrames: 3
+
+            readonly property int maxTextureSize: 8192
+            readonly property int textureWidth: Math.min(modelData.width, maxTextureSize)
+            readonly property int textureHeight: Math.min(modelData.height, maxTextureSize)
+
+            Component.onCompleted: {
+                if (!displaySource) {
+                    contentReady = true;
+                    return;
+                }
+                liveActive = true;
+            }
+
+            onDisplaySourceChanged: {
+                invalidate();
+                loadFailed = false;
+                _freezeWaitFrames = 0;
+                if (!displaySource) {
+                    liveActive = false;
+                    frozenValid = false;
+                    _frozenSource = "";
+                    contentReady = true;
+                    return;
+                }
+                liveActive = true;
+            }
+
+            function regenerate() {
+                invalidate();
+                if (!displaySource)
+                    return;
+                if (liveActive) {
+                    scheduleFreeze();
+                    return;
+                }
+                liveActive = true;
+            }
+
+            function handleDisplayable() {
+                contentReady = true;
+                if (liveLoader.item?.currentFailed) {
+                    if (!frozenValid)
+                        loadFailed = true;
+                    liveActive = false;
+                }
+                invalidate();
+            }
+
+            function scheduleFreeze() {
+                if (!liveLoader.item?.stable)
+                    return;
+                frozenLayer.scheduleUpdate();
+                _freezeWaitFrames = 3;
+                _settleFrames = 3;
+                // No wedge watchdog: an occluded surface may never produce frames, the freeze just waits
+                backingWindow?.update();
+            }
+
+            function completeFreeze() {
+                const live = liveLoader.item;
+                if (!live || !live.stable)
+                    return;
+                frozenValid = true;
+                _frozenSource = displaySource;
+                liveActive = false;
+                log.info("froze blur layer for", modelData.name);
+                invalidate();
+            }
+
+            onTextureWidthChanged: regenerate()
+            onTextureHeightChanged: regenerate()
+
+            function invalidate() {
+                _settleFrames = 3;
+                backingWindow?.update();
+                if (!_wedgeBounced)
+                    wedgeWatchdog.restart();
+            }
+
+            onRenderActiveChanged: invalidate()
+            onBackingWindowChanged: invalidate()
+
+            // Same wedge recovery as WallpaperBackground
+            property bool _wedgeBounced: false
+
+            Timer {
+                id: wedgeWatchdog
+                interval: 3000
+                repeat: false
+                onTriggered: {
+                    if (!root.backingWindow || !blurWallpaperWindow.visible || IdleService.isShellLocked)
+                        return;
+                    log.warn("no frame swapped on", modelData.name, "since last invalidate, re-attaching surface");
+                    root._wedgeBounced = true;
+                    surfaceReattach.restart();
+                }
+            }
+
+            Timer {
+                id: surfaceReattach
+                interval: 0
+                repeat: false
+                onTriggered: {
+                    root.surfaceBounce = true;
+                    Qt.callLater(() => {
+                        root.surfaceBounce = false;
+                    });
+                }
+            }
+
+            Connections {
+                target: root.backingWindow
+                function onFrameSwapped() {
+                    if (root._settleFrames > 0)
+                        root._settleFrames--;
+                    root._wedgeBounced = false;
+                    wedgeWatchdog.stop();
+                    if (root._freezeWaitFrames > 0 && --root._freezeWaitFrames === 0)
+                        root.completeFreeze();
+                }
+                function onVisibleChanged() {
+                    root.invalidate();
+                }
+                function onWidthChanged() {
+                    root.regenerate();
+                }
+                function onHeightChanged() {
+                    root.regenerate();
+                }
+            }
+
+            Connections {
+                target: blurWallpaperWindow
+                function onResourcesLost() {
+                    root.frozenValid = false;
+                    root.regenerate();
+                }
+            }
+
+            readonly property var quickshellScreens: Quickshell.screens
+            readonly property string settingsWallpaperFillMode: SettingsData.wallpaperFillMode
+            readonly property color settingsWallpaperBackgroundColor: SettingsData.effectiveWallpaperBackgroundColor
+
+            onQuickshellScreensChanged: regenerate()
+            onSettingsWallpaperFillModeChanged: regenerate()
+            onSettingsWallpaperBackgroundColorChanged: invalidate()
 
             Connections {
                 target: SessionData
@@ -59,272 +229,101 @@ Variants {
                         }
                     }
                 }
-            }
-
-            function getFillMode(modeName) {
-                switch (modeName) {
-                case "Stretch":
-                    return Image.Stretch;
-                case "Fit":
-                case "PreserveAspectFit":
-                    return Image.PreserveAspectFit;
-                case "Fill":
-                case "PreserveAspectCrop":
-                    return Image.PreserveAspectCrop;
-                case "Tile":
-                    return Image.Tile;
-                case "TileVertically":
-                    return Image.TileVertically;
-                case "TileHorizontally":
-                    return Image.TileHorizontally;
-                case "Pad":
-                    return Image.Pad;
-                default:
-                    return Image.PreserveAspectCrop;
+                function onMonitorWallpaperFillModesChanged() {
+                    root.regenerate();
+                }
+                function onPerMonitorWallpaperChanged() {
+                    root.regenerate();
                 }
             }
 
-            Component.onCompleted: {
-                if (typeof blurWallpaperWindow.updatesEnabled !== "undefined")
-                    blurWallpaperWindow.updatesEnabled = Qt.binding(() => !root.source || root.effectActive || root._renderSettling || currentWallpaper.status === Image.Loading || nextWallpaper.status === Image.Loading);
-                isInitialized = true;
+            // Theme changes repaint DBackdrop but nothing else wakes the render loop
+            readonly property color themePrimary: Theme.primary
+            readonly property color themeBackground: Theme.background
+            readonly property bool idleShellLocked: IdleService.isShellLocked
+
+            onThemePrimaryChanged: {
+                if (!showsBackdrop)
+                    return;
+                invalidate();
             }
 
-            property bool isInitialized: false
-            property real transitionProgress: 0
-            readonly property bool transitioning: transitionAnimation.running
-            property bool effectActive: false
-            property bool _renderSettling: true
-            property bool useNextForEffect: false
+            onThemeBackgroundChanged: {
+                if (!showsBackdrop)
+                    return;
+                invalidate();
+            }
 
-            Connections {
-                target: currentWallpaper
-                function onStatusChanged() {
-                    if (currentWallpaper.status !== Image.Ready && currentWallpaper.status !== Image.Error)
-                        return;
-                    root._renderSettling = true;
-                    renderSettleTimer.restart();
-                }
+            onIdleShellLockedChanged: {
+                if (idleShellLocked)
+                    return;
+                invalidate();
             }
 
             Connections {
-                target: blurWallpaperWindow
-                function onWidthChanged() {
-                    root._renderSettling = true;
-                    renderSettleTimer.restart();
+                target: liveLoader.item
+                function onBecameDisplayable() {
+                    root.handleDisplayable();
                 }
-                function onHeightChanged() {
-                    root._renderSettling = true;
-                    renderSettleTimer.restart();
+                function onStableChanged() {
+                    if (liveLoader.item.stable)
+                        root.scheduleFreeze();
                 }
-            }
-
-            Connections {
-                target: Quickshell
-                function onScreensChanged() {
-                    root._renderSettling = true;
-                    renderSettleTimer.restart();
+                function onTransitioningChanged() {
+                    root.invalidate();
                 }
-            }
-
-            Timer {
-                id: renderSettleTimer
-                interval: 1000
-                onTriggered: root._renderSettling = false
-            }
-
-            onSourceChanged: {
-                if (!source || source.startsWith("#")) {
-                    setWallpaperImmediate("");
-                    return;
-                }
-
-                const formattedSource = source.startsWith("file://") ? source : encodeFileUrl(source);
-
-                if (!isInitialized || !currentWallpaper.source) {
-                    setWallpaperImmediate(formattedSource);
-                    isInitialized = true;
-                    return;
-                }
-                if (CompositorService.isNiri && SessionData.isSwitchingMode) {
-                    setWallpaperImmediate(formattedSource);
-                    return;
-                }
-                changeWallpaper(formattedSource);
-            }
-
-            function setWallpaperImmediate(newSource) {
-                transitionAnimation.stop();
-                root.transitionProgress = 0.0;
-                root.effectActive = false;
-                root._renderSettling = true;
-                renderSettleTimer.restart();
-                currentWallpaper.source = newSource;
-                nextWallpaper.source = "";
-            }
-
-            function startTransition() {
-                root.useNextForEffect = true;
-                root.effectActive = true;
-                if (srcNext.scheduleUpdate)
-                    srcNext.scheduleUpdate();
-                transitionDelayTimer.start();
-            }
-
-            Timer {
-                id: transitionDelayTimer
-                interval: 16
-                repeat: false
-                onTriggered: transitionAnimation.start()
-            }
-
-            function changeWallpaper(newPath) {
-                if (newPath === currentWallpaper.source)
-                    return;
-                if (!newPath || newPath.startsWith("#"))
-                    return;
-                if (root.transitioning) {
-                    transitionAnimation.stop();
-                    root.transitionProgress = 0;
-                    root.effectActive = false;
-                    root._renderSettling = true;
-                    renderSettleTimer.restart();
-                    currentWallpaper.source = nextWallpaper.source;
-                    nextWallpaper.source = "";
-                }
-                if (!currentWallpaper.source) {
-                    setWallpaperImmediate(newPath);
-                    return;
-                }
-
-                root._renderSettling = true;
-                renderSettleTimer.restart();
-
-                nextWallpaper.source = newPath;
-
-                if (nextWallpaper.status === Image.Ready)
-                    root.startTransition();
             }
 
             Loader {
+                id: backdropLoader
                 anchors.fill: parent
-                active: !root.source || root.isColorSource
+                active: root.showsBackdrop
                 asynchronous: true
 
-                sourceComponent: DankBackdrop {
+                sourceComponent: DBackdrop {
                     screenName: modelData.name
-                }
-            }
-
-            readonly property int maxTextureSize: 8192
-            property int textureWidth: Math.min(modelData.width, maxTextureSize)
-            property int textureHeight: Math.min(modelData.height, maxTextureSize)
-
-            Image {
-                id: currentWallpaper
-                anchors.fill: parent
-                visible: false
-                opacity: 1
-                asynchronous: true
-                retainWhileLoading: true
-                smooth: true
-                cache: true
-                sourceSize: Qt.size(root.textureWidth, root.textureHeight)
-                fillMode: root.getFillMode(SessionData.isGreeterMode ? GreetdSettings.wallpaperFillMode : SessionData.getMonitorWallpaperFillMode(modelData.name))
-            }
-
-            Image {
-                id: nextWallpaper
-                anchors.fill: parent
-                visible: false
-                opacity: 0
-                asynchronous: true
-                retainWhileLoading: true
-                smooth: true
-                cache: true
-                sourceSize: Qt.size(root.textureWidth, root.textureHeight)
-                fillMode: root.getFillMode(SessionData.isGreeterMode ? GreetdSettings.wallpaperFillMode : SessionData.getMonitorWallpaperFillMode(modelData.name))
-
-                onStatusChanged: {
-                    if (status !== Image.Ready)
-                        return;
-                    if (!root.transitioning) {
-                        root.startTransition();
-                    }
+                    blur: Theme.wallpaperBlur
+                    onInvalidated: root.invalidate()
                 }
             }
 
             ShaderEffectSource {
-                id: srcNext
-                sourceItem: root.effectActive ? nextWallpaper : null
-                hideSource: root.effectActive
-                live: root.effectActive
-                mipmap: false
-                recursive: false
-                textureSize: Qt.size(root.textureWidth, root.textureHeight)
-            }
-
-            Rectangle {
-                id: dummyRect
-                width: 1
-                height: 1
-                visible: false
-                color: "transparent"
-            }
-
-            ShaderEffectSource {
-                id: srcDummy
-                sourceItem: dummyRect
-                hideSource: true
+                id: frozenLayer
+                anchors.fill: parent
+                sourceItem: liveContainer
                 live: false
                 mipmap: false
                 recursive: false
+                smooth: true
+                visible: root.frozenValid || root.liveActive
+                textureSize: Qt.size(root.textureWidth, root.textureHeight)
             }
 
             Item {
-                id: blurredLayer
+                id: liveContainer
                 anchors.fill: parent
+                visible: root.liveActive
 
-                MultiEffect {
+                Loader {
+                    id: liveLoader
                     anchors.fill: parent
-                    source: currentWallpaper
-                    visible: currentWallpaper.source !== ""
-                    blurEnabled: true
-                    blur: 0.8
-                    blurMax: 75
-                    opacity: 1 - root.transitionProgress
-                    autoPaddingEnabled: false
-                }
+                    active: root.liveActive
+                    asynchronous: false
 
-                MultiEffect {
-                    anchors.fill: parent
-                    source: root.useNextForEffect ? srcNext : srcDummy
-                    visible: nextWallpaper.source !== "" && root.useNextForEffect
-                    blurEnabled: true
-                    blur: 0.8
-                    blurMax: 75
-                    opacity: root.transitionProgress
-                    autoPaddingEnabled: false
-                }
-            }
+                    // Cached images reach Ready synchronously during creation, before Connections retargets
+                    onLoaded: {
+                        if (item.displayableNow)
+                            root.handleDisplayable();
+                        if (item.stable)
+                            root.scheduleFreeze();
+                    }
 
-            NumberAnimation {
-                id: transitionAnimation
-                target: root
-                property: "transitionProgress"
-                from: 0.0
-                to: 1.0
-                duration: 1000
-                easing.type: Easing.InOutCubic
-                onFinished: {
-                    if (nextWallpaper.source && nextWallpaper.status === Image.Ready)
-                        currentWallpaper.source = nextWallpaper.source;
-                    root.useNextForEffect = false;
-                    nextWallpaper.source = "";
-                    root.transitionProgress = 0.0;
-                    root._renderSettling = true;
-                    renderSettleTimer.restart();
-                    root.effectActive = false;
+                    sourceComponent: BlurredWallpaperLive {
+                        wallpaperSource: root.displaySource
+                        initialSource: root._frozenSource
+                        screenName: modelData.name
+                        blurTextureSize: Qt.size(root.textureWidth, root.textureHeight)
+                    }
                 }
             }
         }

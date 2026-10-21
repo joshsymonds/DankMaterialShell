@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
+import "../../Common/QmlUtils.js" as QmlUtils
 
 Column {
     id: root
@@ -18,7 +19,7 @@ Column {
     property bool isInitialized: false
 
     function loadValue() {
-        const settings = findSettings();
+        const settings = QmlUtils.findSettings(root.parent);
         if (settings && settings.pluginService) {
             const loadedValue = settings.loadValue(settingKey, defaultValue);
             if (textField.activeFocus && isInitialized)
@@ -39,26 +40,15 @@ Column {
         if (textField.text === value)
             return;
         value = textField.text;
-        const settings = findSettings();
+        const settings = QmlUtils.findSettings(root.parent);
         if (settings)
             settings.saveValue(settingKey, value);
-    }
-
-    function findSettings() {
-        let item = parent;
-        while (item) {
-            if (item.saveValue !== undefined && item.loadValue !== undefined) {
-                return item;
-            }
-            item = item.parent;
-        }
-        return null;
     }
 
     StyledText {
         text: root.label
         font.pixelSize: Theme.fontSizeMedium
-        font.weight: Font.Medium
+        font.weight: Theme.fontWeightMedium
         color: Theme.surfaceText
     }
 
@@ -71,7 +61,7 @@ Column {
         visible: root.description !== ""
     }
 
-    DankTextField {
+    DTextField {
         id: textField
         width: parent.width
         placeholderText: root.placeholder

@@ -10,13 +10,15 @@ AppPickerModal {
 
     property string url: ""
 
-    title: I18n.tr("Open with...")
+    title: I18n.tr("Open with", "app picker title, followed by a list of apps") + "…"
     targetData: url
     targetDataLabel: ""
     categoryFilter: ["WebBrowser", "X-WebBrowser"]
     viewMode: SettingsData.browserPickerViewMode || "grid"
     usageHistoryKey: "browserUsageHistory"
     showTargetData: true
+    mimeType: url.startsWith("https://") ? "x-scheme-handler/https" : (url.startsWith("http://") ? "x-scheme-handler/http" : "")
+    rememberMimeTypes: ["x-scheme-handler/http", "x-scheme-handler/https", "text/html", "application/xhtml+xml"]
 
     function shellEscape(str) {
         return "'" + str.replace(/'/g, "'\\''") + "'";

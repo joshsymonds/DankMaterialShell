@@ -7,6 +7,9 @@ import Quickshell
 import Quickshell.Io
 import qs.Common
 import qs.Services
+import qs.Modules.Settings.Widgets
+import "../../../Common/ConfigIncludeResolve.js" as ConfigIncludeResolve
+import "../../../Common/OutputModel.js" as OutputModel
 
 Singleton {
     id: root
@@ -16,14 +19,18 @@ Singleton {
     readonly property var wlrOutputs: WlrOutputService.outputs
     property var outputs: ({})
     property var savedOutputs: ({})
+    property var savedParsedOutputs: ({})
     property var allOutputs: buildAllOutputsMap()
 
-    property var includeStatus: ({
-            "exists": false,
-            "included": false
-        })
-    property bool checkingInclude: false
-    property bool fixingInclude: false
+    readonly property ConfigInclude include: ConfigInclude {
+        includeKind: "outputs"
+        warningCategory: "display-config"
+        onFixed: root.writeOutputsAfterIncludeFix()
+    }
+    readonly property var includeStatus: include.status
+    readonly property bool readOnly: include.readOnly
+    readonly property bool checkingInclude: include.checking
+    readonly property bool fixingInclude: include.fixing
 
     property var pendingChanges: ({})
     property var pendingNiriChanges: ({})
@@ -36,6 +43,166 @@ Singleton {
     property bool hasPendingChanges: Object.keys(pendingChanges).length > 0 || Object.keys(pendingNiriChanges).length > 0 || Object.keys(pendingHyprlandChanges).length > 0 || formatChanged
 
     property bool validatingConfig: false
+    property var _cancelOutputWrite: null
+    property var aqueousPreview: null
+
+    function outputFingerprint(outputs) {
+        return OutputModel.outputFingerprint(outputs);
+    }
+
+    function outputHeads(outputs) {
+        return OutputModel.outputHeads(outputs);
+    }
+
+    function outputHeadsMatch(candidate, actual, original) {
+        return OutputModel.outputHeadsMatch(candidate, actual, original);
+    }
+
+    function freshAqueousOutputs(callback) {
+        DMSService.sendRequest("wlroutput.getState", null, response => {
+            callback(response.result?.outputs || null, response.error || "");
+        }, 5000);
+    }
+
+    function aqueousDisplayError(message) {
+        validatingConfig = false;
+        validationError = AqueousService.errorMessage(message);
+        ToastService.showError(I18n.tr("Error"), validationError, message);
+    }
+
+    function discardAqueousPreview() {
+        if (validatingConfig)
+            return;
+        aqueousPreview = null;
+        restoreDisplayNameMode();
+        validationError = "";
+        clearPendingChanges();
+        WlrOutputService.requestState();
+    }
+
+    function previewAqueousOutputs(descriptions) {
+        if (validatingConfig)
+            return;
+        if (!AqueousService.available) {
+            aqueousDisplayError("unavailable: compositor state");
+            return;
+        }
+        if (aqueousPreview) {
+            observeAqueousPreview(aqueousPreview, descriptions, "");
+            return;
+        }
+        const session = AqueousService.session;
+        validatingConfig = true;
+        AqueousConfigService.load((snapshot, error) => {
+            if (!snapshot) {
+                aqueousDisplayError(error);
+                return;
+            }
+            freshAqueousOutputs((original, error) => {
+                if (AqueousService.session !== session) {
+                    aqueousDisplayError("conflict: compositor session changed");
+                    return;
+                }
+                if (!original) {
+                    aqueousDisplayError(error);
+                    return;
+                }
+                const candidate = WlrOutputService.outputsConfigHeads(buildOutputsWithPendingChanges(), outputs);
+                WlrOutputService.testConfiguration(candidate, (success, message) => {
+                    if (AqueousService.session !== session) {
+                        aqueousDisplayError("conflict: compositor session changed");
+                        return;
+                    }
+                    if (!success) {
+                        aqueousDisplayError(message);
+                        return;
+                    }
+                    const preview = {
+                        snapshot: snapshot,
+                        original: original,
+                        heads: candidate,
+                        fingerprint: null,
+                        session: session
+                    };
+                    aqueousPreview = preview;
+                    WlrOutputService.applyConfiguration(candidate, (success, message) => {
+                        observeAqueousPreview(preview, descriptions, success ? "" : message);
+                    });
+                });
+            });
+        });
+    }
+
+    function observeAqueousPreview(preview, descriptions, applyError) {
+        validatingConfig = true;
+        freshAqueousOutputs((actual, error) => {
+            if (aqueousPreview !== preview)
+                return;
+            if (!actual || AqueousService.session !== preview.session || !outputHeadsMatch(preview.heads, actual, preview.original)) {
+                if (actual && outputFingerprint(actual) === outputFingerprint(preview.original))
+                    aqueousPreview = null;
+                aqueousDisplayError(error || applyError || "conflict: display preview changed externally");
+                return;
+            }
+            preview.fingerprint = outputFingerprint(actual);
+            validatingConfig = false;
+            validationError = applyError ? AqueousService.errorMessage(applyError) : "";
+            changesApplied(descriptions);
+        });
+    }
+
+    function finishAqueousPreview(keep) {
+        if (validatingConfig || !aqueousPreview)
+            return;
+        const preview = aqueousPreview;
+        validatingConfig = true;
+        freshAqueousOutputs((actual, error) => {
+            if (!actual || AqueousService.session !== preview.session || outputFingerprint(actual) !== preview.fingerprint) {
+                aqueousDisplayError(error || "conflict: output configuration changed after preview");
+                return;
+            }
+            if (keep) {
+                let draft;
+                try {
+                    draft = AqueousConfigService.buildOutputsConfig(preview.snapshot, actual, preview.original);
+                } catch (e) {
+                    aqueousDisplayError(String(e));
+                    return;
+                }
+                AqueousConfigService.apply(draft, (snapshot, message) => {
+                    if (!snapshot) {
+                        aqueousDisplayError(message);
+                        return;
+                    }
+                    aqueousPreview = null;
+                    if (formatChanged)
+                        SettingsData.saveSettings();
+                    clearPendingChanges();
+                    freshAqueousOutputs((live, error) => {
+                        validatingConfig = false;
+                        if (!live || AqueousService.session !== preview.session || outputFingerprint(live) !== preview.fingerprint) {
+                            aqueousDisplayError("conflict: configuration saved but live display state changed");
+                            return;
+                        }
+                        changesConfirmed();
+                    });
+                });
+                return;
+            }
+            WlrOutputService.applyConfiguration(outputHeads(preview.original), (success, message) => {
+                if (!success) {
+                    aqueousDisplayError(message);
+                    return;
+                }
+                validatingConfig = false;
+                aqueousPreview = null;
+                restoreDisplayNameMode();
+                clearPendingChanges();
+                WlrOutputService.requestState();
+                changesReverted();
+            });
+        });
+    }
     property string validationError: ""
 
     property var currentOutputSet: []
@@ -63,23 +230,11 @@ Singleton {
     signal profileError(string message)
 
     function buildCurrentOutputSet() {
-        const connected = [];
-        for (const name in outputs) {
-            const output = outputs[name];
-            connected.push(getOutputIdentifier(output, name));
-        }
-        return connected.sort();
+        return OutputModel.currentOutputSet(outputs, SettingsData.displayNameMode, CompositorService.compositor);
     }
 
     function getOutputIdentifier(output, outputName) {
-        if (SettingsData.displayNameMode === "model" && output?.make && output?.model) {
-            if (CompositorService.isNiri) {
-                const serial = output.serial || "Unknown";
-                return output.make + " " + output.model + " " + serial;
-            }
-            return output.make + " " + output.model;
-        }
-        return outputName;
+        return OutputModel.profileIdentifier(output, outputName, SettingsData.displayNameMode, CompositorService.compositor);
     }
 
     FileView {
@@ -154,12 +309,14 @@ Singleton {
         const compositorDirs = {
             "niri": configDir + "/niri/dms/profiles",
             "hyprland": configDir + "/hypr/dms/profiles",
-            "dwl": configDir + "/mango/dms/profiles"
+            "dwl": configDir + "/mango/dms/profiles",
+            "mango": configDir + "/mango/dms/profiles"
         };
         const compositorExts = {
             "niri": ".kdl",
             "hyprland": ".conf",
-            "dwl": ".conf"
+            "dwl": ".conf",
+            "mango": ".conf"
         };
 
         const tasks = [];
@@ -216,19 +373,20 @@ Singleton {
                         let parsed;
                         switch (t.compositor) {
                         case "niri":
-                            parsed = parseNiriOutputs(content);
+                            parsed = OutputModel.parseNiriOutputs(content);
                             break;
                         case "hyprland":
-                            parsed = parseHyprlandOutputs(content);
+                            parsed = OutputModel.parseHyprlandOutputs(content);
                             break;
                         case "dwl":
-                            parsed = parseMangoOutputs(content);
+                        case "mango":
+                            parsed = OutputModel.parseMangoOutputs(content);
                             break;
                         default:
                             parsed = {};
                         }
-                        const niriSettings = SettingsData.niriOutputSettings || {};
-                        const hyprSettings = SettingsData.hyprlandOutputSettings || {};
+                        const niriSettings = SessionData.niriOutputSettings || {};
+                        const hyprSettings = SessionData.hyprlandOutputSettings || {};
                         const profileOutputs = {};
                         for (const outputName in parsed) {
                             const od = parsed[outputName];
@@ -258,63 +416,52 @@ Singleton {
             callback(true);
     }
 
+    function publishActiveProfileModes() {
+        const compositor = CompositorService.compositor;
+        const profileId = SessionData.getActiveDisplayProfile(compositor);
+        const profile = profileId ? validatedProfiles[profileId] : null;
+        const outputs = profile?.outputs || {};
+        const modes = {};
+
+        for (const outputId in outputs) {
+            const mode = outputs[outputId]?.mode;
+            if (mode)
+                modes[outputId] = {
+                    "mode": mode
+                };
+        }
+
+        SessionData.setActiveDisplayProfileModes(compositor, modes);
+    }
+
     function generateProfileId() {
         return "profile_" + Date.now() + "_" + Math.random().toString(36).slice(2, 9);
     }
 
+    function generateAutoProfileId(outputIdentifiers) {
+        const fp = outputSetFingerprint(outputIdentifiers);
+        let hash = 0;
+        for (let i = 0; i < fp.length; i++) {
+            hash = ((hash << 5) - hash) + fp.charCodeAt(i);
+        }
+        const hashStr = (hash >>> 0).toString(16);
+        return "auto_" + hashStr;
+    }
+
     function configFingerprint(configEntry) {
-        return Object.keys(configEntry.outputs || {}).sort().join("+");
+        return OutputModel.configFingerprint(configEntry);
     }
 
     function outputSetFingerprint(outputIdentifiers) {
-        return [...outputIdentifiers].sort().join("+");
+        return OutputModel.outputSetFingerprint(outputIdentifiers);
     }
 
     function findConfigEntryById(data, id) {
-        const configs = data.configurations || [];
-        for (let i = 0; i < configs.length; i++) {
-            if (configs[i].id === id)
-                return {
-                    entry: configs[i],
-                    index: i
-                };
-        }
-        return null;
+        return OutputModel.findConfigEntryById(data, id);
     }
 
-    function findConfigEntryByFingerprint(data, outputIdentifiers) {
-        const targetKey = outputSetFingerprint(outputIdentifiers);
-        const configs = data.configurations || [];
-        for (let i = 0; i < configs.length; i++) {
-            if (configFingerprint(configs[i]) === targetKey)
-                return {
-                    entry: configs[i],
-                    index: i
-                };
-        }
-        return null;
-    }
-
-    function findPartialConfigEntry(data, outputIdentifiers) {
-        const currentSet = new Set(outputIdentifiers);
-        const configs = data.configurations || [];
-        let bestEntry = null;
-        let bestCount = 0;
-        for (let i = 0; i < configs.length; i++) {
-            const cfgKeys = Object.keys(configs[i].outputs || {});
-            if (cfgKeys.length === 0)
-                continue;
-            if (!cfgKeys.every(k => currentSet.has(k)))
-                continue;
-            if (cfgKeys.length > bestCount) {
-                bestCount = cfgKeys.length;
-                bestEntry = {
-                    entry: configs[i],
-                    index: i
-                };
-            }
-        }
-        return bestEntry;
+    function findConfigEntryByFingerprint(data, outputIdentifiers, autoOnly) {
+        return OutputModel.findConfigEntryByFingerprint(data, outputIdentifiers, autoOnly);
     }
 
     function getProfileMonitorInclusion(profileId) {
@@ -365,90 +512,24 @@ Singleton {
                 };
                 validatedProfiles = updated;
                 matchedProfile = findMatchingProfile();
+                publishActiveProfileModes();
                 profileSaved(profileId, profileName);
             });
         });
     }
 
-    // Extract neutral per-output config from current live state
     function extractOutputNeutralConfig(outputName, outputData, niriSettings, hyprlandSettings) {
-        const modeData = (outputData.modes && outputData.current_mode !== undefined) ? outputData.modes[outputData.current_mode] : null;
-        const modeStr = modeData ? modeData.width + "x" + modeData.height + "@" + (modeData.refresh_rate / 1000).toFixed(3) : null;
-        const cfg = {
-            "mode": modeStr,
-            "position": {
-                "x": outputData.logical?.x ?? 0,
-                "y": outputData.logical?.y ?? 0
-            },
-            "scale": outputData.logical?.scale || 1.0,
-            "transform": outputData.logical?.transform ?? "Normal",
-            "vrr": outputData.vrr_enabled ?? false,
-            "disabled": false
-        };
-        if (CompositorService.isNiri) {
-            cfg.niri = Object.assign({}, niriSettings?.[getNiriOutputIdentifier(outputData, outputName)] || {});
-            if (cfg.niri.disabled) {
-                delete cfg.niri.disabled;
-                cfg.disabled = true;
-            }
-        }
-        if (CompositorService.isHyprland) {
-            cfg.hyprland = Object.assign({}, hyprlandSettings?.[getHyprlandOutputIdentifier(outputData, outputName)] || {});
-            if (outputData.mirror)
-                cfg.hyprland.mirror = outputData.mirror;
-            if (cfg.hyprland.disabled) {
-                delete cfg.hyprland.disabled;
-                cfg.disabled = true;
-            }
-        }
-        return cfg;
+        return OutputModel.outputNeutralConfig(outputName, outputData, niriSettings, hyprlandSettings, SettingsData.displayNameMode, CompositorService.compositor);
     }
 
-    // Convert monitors.json config entry → internal outputsData map
+    function profileKeyMatchesOutput(outputId, output, name) {
+        return OutputModel.profileKeyMatchesOutput(outputId, output, name, SettingsData.displayNameMode, CompositorService.compositor);
+    }
+
     function generateOutputsDataFromConfig(configEntry) {
-        const result = {};
-        const cfgOutputs = configEntry.outputs || {};
-        for (const outputId in cfgOutputs) {
-            const cfg = cfgOutputs[outputId];
-            // Find matching live output to get modes list
-            let liveOutput = null;
-            for (const name in outputs) {
-                if (getOutputIdentifier(outputs[name], name) === outputId || name === outputId) {
-                    liveOutput = outputs[name];
-                    break;
-                }
-            }
-            const liveModes = liveOutput?.modes || [];
-            let currentMode = liveModes.findIndex(m => {
-                const s = m.width + "x" + m.height + "@" + (m.refresh_rate / 1000).toFixed(3);
-                return s === cfg.mode;
-            });
-            if (currentMode < 0 && liveModes.length > 0)
-                currentMode = 0;
-            const entry = {
-                "name": outputId,
-                "make": liveOutput?.make || "",
-                "model": liveOutput?.model || "",
-                "serial": liveOutput?.serial || "",
-                "modes": liveModes,
-                "current_mode": currentMode,
-                "vrr_supported": liveOutput?.vrr_supported ?? false,
-                "vrr_enabled": cfg.vrr ?? false,
-                "logical": {
-                    "x": cfg.position?.x ?? 0,
-                    "y": cfg.position?.y ?? 0,
-                    "scale": cfg.scale ?? 1.0,
-                    "transform": cfg.transform ?? "Normal"
-                }
-            };
-            if (cfg.hyprland?.mirror)
-                entry.mirror = cfg.hyprland.mirror;
-            result[outputId] = entry;
-        }
-        return result;
+        return OutputModel.outputsDataFromConfigEntry(configEntry, outputs, SettingsData.displayNameMode, CompositorService.compositor);
     }
 
-    // Extract niri settings map from neutral config entry for generateNiriOutputsKdl
     function getNiriSettingsFromConfig(configEntry) {
         const result = {};
         for (const outputId in (configEntry.outputs || {})) {
@@ -462,7 +543,6 @@ Singleton {
         return result;
     }
 
-    // Extract hyprland settings map from neutral config entry
     function getHyprlandSettingsFromConfig(configEntry) {
         const result = {};
         for (const outputId in (configEntry.outputs || {})) {
@@ -476,25 +556,46 @@ Singleton {
         return result;
     }
 
-    function ensureEnabledOutput(configEntry) {
-        const outputKeys = Object.keys(configEntry.outputs || {});
-        if (outputKeys.length === 0)
-            return false;
-        const hasEnabled = outputKeys.some(k => !configEntry.outputs[k].disabled);
-        if (hasEnabled)
-            return false;
-        delete configEntry.outputs[outputKeys[0]].disabled;
-        return true;
+    function backendSettingsFromConfig(configEntry) {
+        switch (CompositorService.compositor) {
+        case "niri":
+            return getNiriSettingsFromConfig(configEntry);
+        case "hyprland":
+            return getHyprlandSettingsFromConfig(configEntry);
+        default:
+            return null;
+        }
     }
 
-    // Write compositor config from a neutral config entry and optionally reload
-    function applyConfigEntry(configEntry, configId, profileName, isManual) {
-        ensureEnabledOutput(configEntry);
-        // Capture the entry being applied so disabled-output settings fields can read
-        // scale/position/transform back even when wlr reports no logical viewport.
-        root.lastAppliedEntry = JSON.parse(JSON.stringify(configEntry));
-        const outputsData = generateOutputsDataFromConfig(configEntry);
+    function backendMergedSettings() {
+        switch (CompositorService.compositor) {
+        case "niri":
+            return buildMergedNiriSettings();
+        case "hyprland":
+            return buildMergedHyprlandSettings();
+        default:
+            return null;
+        }
+    }
 
+    function ensureEnabledOutput(configEntry) {
+        return OutputModel.ensureEnabledOutput(configEntry, outputs, SettingsData.displayNameMode, CompositorService.compositor);
+    }
+
+    function profileOutputIsReal(outputId) {
+        return OutputModel.profileOutputIsReal(outputId, outputs, SettingsData.displayNameMode, CompositorService.compositor);
+    }
+
+    function applyConfigEntry(configEntry, configId, profileName, isManual) {
+        if (CompositorService.isHyprland && readOnly) {
+            if (isManual) {
+                profilesLoading = false;
+                manualActivation = false;
+                profileError(I18n.tr("Hyprland conf mode is read-only in Settings"));
+            }
+            showHyprlandReadOnlyWarning();
+            return;
+        }
         const onWriteFailed = () => {
             if (isManual) {
                 profilesLoading = false;
@@ -502,58 +603,35 @@ Singleton {
                 profileError(I18n.tr("Failed to apply profile"));
             }
         };
+
+        ensureEnabledOutput(configEntry);
+        if (!Object.keys(configEntry.outputs || {}).some(k => profileOutputIsReal(k))) {
+            log.warn("Profile", configId, "has no real outputs, not applying");
+            onWriteFailed();
+            return;
+        }
+        // Capture the entry being applied so disabled-output settings fields can read
+        // scale/position/transform back even when wlr reports no logical viewport.
+        root.lastAppliedEntry = JSON.parse(JSON.stringify(configEntry));
+        const outputsData = generateOutputsDataFromConfig(configEntry);
         const onWriteSuccess = () => {
-            SettingsData.setActiveDisplayProfile(CompositorService.compositor, configEntry.name ? configId : "");
+            SessionData.setActiveDisplayProfile(CompositorService.compositor, configId);
+            publishActiveProfileModes();
             if (isManual) {
-                WlrOutputService.requestState();
                 profilesLoading = false;
                 profileActivated(configId, profileName);
                 manualActivationTimer.restart();
-            } else {
-                saveConfigEntry(configEntry);
             }
+            WlrOutputService.requestState();
         };
 
-        switch (CompositorService.compositor) {
-        case "niri":
-            {
-                const paths = getConfigPaths();
-                if (!paths) {
-                    onWriteFailed();
-                    return;
-                }
-                const configContent = generateNiriOutputsKdl(outputsData, getNiriSettingsFromConfig(configEntry));
-                Proc.runCommand("apply-config-write", ["sh", "-c", `mkdir -p "$(dirname "${paths.outputsFile}")" && cat > "${paths.outputsFile}" << 'EOF'\n${configContent}EOF`], (output, exitCode) => {
-                    if (exitCode !== 0) {
-                        onWriteFailed();
-                        return;
-                    }
-                    onWriteSuccess();
-                });
-                break;
-            }
-        case "hyprland":
-            HyprlandService.generateOutputsConfig(outputsData, getHyprlandSettingsFromConfig(configEntry), success => {
-                if (success)
-                    onWriteSuccess();
-                else
-                    onWriteFailed();
-            });
-            break;
-        case "dwl":
-            DwlService.generateOutputsConfig(outputsData, success => {
-                if (success)
-                    onWriteSuccess();
-                else
-                    onWriteFailed();
-            });
-            break;
-        default:
-            onWriteFailed();
-        }
+        backendWriteOutputsConfig(outputsData, backendSettingsFromConfig(configEntry), success => {
+            if (success)
+                onWriteSuccess();
+            else
+                onWriteFailed();
+        });
     }
-
-    // ── Profile management ─────────────────────────────────────────────────
 
     function validateProfiles() {
         log.info("Validating profiles against current outputs...");
@@ -580,6 +658,7 @@ Singleton {
                 writeMonitorsJson(data, null);
             validatedProfiles = validated;
             matchedProfile = findMatchingProfile();
+            publishActiveProfileModes();
             if (!profilesReady) {
                 profilesReady = true;
                 applyAutoConfig();
@@ -591,6 +670,8 @@ Singleton {
         const currentKey = currentOutputSet.join("+");
         for (const id in validatedProfiles) {
             const p = validatedProfiles[id];
+            if (p.name === "")
+                continue;
             if (Object.keys(p.outputs || {}).sort().join("+") === currentKey)
                 return id;
         }
@@ -624,7 +705,8 @@ Singleton {
                 validatedProfiles = updated;
                 currentOutputSet = buildCurrentOutputSet();
                 matchedProfile = findMatchingProfile();
-                SettingsData.setActiveDisplayProfile(CompositorService.compositor, id);
+                SessionData.setActiveDisplayProfile(CompositorService.compositor, id);
+                publishActiveProfileModes();
                 profileSaved(id, profileName);
             });
         });
@@ -652,7 +734,7 @@ Singleton {
 
     function deleteProfile(profileId) {
         const compositor = CompositorService.compositor;
-        const isActive = SettingsData.getActiveDisplayProfile(compositor) === profileId;
+        const isActive = SessionData.getActiveDisplayProfile(compositor) === profileId;
 
         profilesLoading = true;
         readMonitorsJson(data => {
@@ -663,13 +745,14 @@ Singleton {
                 profilesLoading = false;
                 SettingsData.removeDisplayProfile(compositor, profileId);
                 if (isActive) {
-                    SettingsData.setActiveDisplayProfile(compositor, "");
+                    SessionData.setActiveDisplayProfile(compositor, "");
                     backendWriteOutputsConfig(allOutputs);
                 }
                 const updated = JSON.parse(JSON.stringify(validatedProfiles));
                 delete updated[profileId];
                 validatedProfiles = updated;
                 matchedProfile = findMatchingProfile();
+                publishActiveProfileModes();
                 profileDeleted(profileId);
             });
         });
@@ -696,42 +779,94 @@ Singleton {
         onTriggered: root.manualActivation = false
     }
 
-    function applyAutoConfig() {
-        if (!profilesReady || !SettingsData.displayProfileAutoSelect || manualActivation || !currentOutputSet.length)
+    Timer {
+        id: autoSelectDebounceTimer
+        interval: 400
+        onTriggered: {
+            if (root.hasPendingChanges)
+                return;
+            root.applyAutoConfig();
+        }
+    }
+
+    function configEntryMatchesLiveLayout(configEntry) {
+        return OutputModel.configEntryMatchesLiveLayout(configEntry, outputs, SettingsData.displayNameMode, CompositorService.compositor);
+    }
+
+    function profileEnabledOutputsConnected(profile) {
+        const connected = new Set(currentOutputSet);
+        const cfg = profile.outputs || {};
+        return Object.keys(cfg).every(id => cfg[id].disabled || connected.has(id));
+    }
+
+    function profileCoversConnectedOutputs(profile) {
+        const cfg = profile.outputs || {};
+        // Hyprland adds a make/model-less FALLBACK head once the last enabled output is gone
+        return currentOutputSet.filter(id => profileOutputIsReal(id)).every(id => id in cfg);
+    }
+
+    function fallbackFromDisconnectedProfile() {
+        const activeId = SessionData.getActiveDisplayProfile(CompositorService.compositor);
+        const active = validatedProfiles[activeId];
+        if (!active?.name || profileEnabledOutputsConnected(active))
             return;
+        const fallbackId = Object.keys(validatedProfiles).find(id => {
+            const p = validatedProfiles[id];
+            return p.name && profileEnabledOutputsConnected(p) && profileCoversConnectedOutputs(p);
+        });
+        if (!fallbackId)
+            return;
+        log.info("Profile", activeId, "lost an output, falling back to", fallbackId);
+        activateProfile(fallbackId);
+    }
+
+    function applyAutoConfig() {
+        if (!profilesReady || manualActivation || !currentOutputSet.length)
+            return;
+        if (!SettingsData.displayProfileAutoSelect) {
+            fallbackFromDisconnectedProfile();
+            return;
+        }
 
         readMonitorsJson(data => {
-            const match = findConfigEntryByFingerprint(data, currentOutputSet);
+            const match = findConfigEntryByFingerprint(data, currentOutputSet, false);
             if (match) {
-                applyConfigEntry(match.entry, match.entry.id, match.entry.name || "", false);
-                return;
-            }
-
-            const partial = findPartialConfigEntry(data, currentOutputSet);
-            const niriSettings = buildMergedNiriSettings();
-            const hyprlandSettings = buildMergedHyprlandSettings();
-            const mergedOutputs = buildOutputsWithPendingChanges();
-
-            const outputConfigs = partial ? JSON.parse(JSON.stringify(partial.entry.outputs || {})) : {};
-
-            for (const name in outputs) {
-                const outputId = getOutputIdentifier(outputs[name], name);
-                const alreadyCovered = Object.keys(outputConfigs).some(k => k === outputId);
-                if (!alreadyCovered) {
-                    const od = mergedOutputs[name];
-                    if (od)
-                        outputConfigs[outputId] = extractOutputNeutralConfig(name, od, niriSettings, hyprlandSettings);
+                if (configEntryMatchesLiveLayout(match.entry)) {
+                    SessionData.setActiveDisplayProfile(CompositorService.compositor, match.entry.id);
+                    return;
                 }
+                applyConfigEntry(match.entry, match.entry.id, "", false);
+                return;
             }
 
-            if (Object.keys(outputConfigs).length === 0)
-                return;
-
-            const syntheticEntry = {
-                name: "",
-                outputs: outputConfigs
+            const outputConfigs = buildCurrentOutputConfigs();
+            const id = generateAutoProfileId(currentOutputSet);
+            const entry = {
+                "id": id,
+                "name": "",
+                "outputs": outputConfigs
             };
-            applyConfigEntry(syntheticEntry, "", "", false);
+            ensureEnabledOutput(entry);
+            const existingIdx = data.configurations.findIndex(c => c.id === id);
+            if (existingIdx >= 0)
+                data.configurations[existingIdx] = entry;
+            else
+                data.configurations.push(entry);
+            writeMonitorsJson(data, success => {
+                if (!success)
+                    return;
+                const updated = JSON.parse(JSON.stringify(validatedProfiles));
+                updated[id] = {
+                    id: id,
+                    name: "",
+                    outputs: outputConfigs
+                };
+                validatedProfiles = updated;
+                matchedProfile = "";
+                const match = findConfigEntryById(data, id);
+                if (match)
+                    applyConfigEntry(match.entry, id, "", false);
+            });
         });
     }
 
@@ -746,22 +881,6 @@ Singleton {
                 outputConfigs[getOutputIdentifier(od, name)] = extractOutputNeutralConfig(name, od, niriSettings, hyprlandSettings);
         }
         return outputConfigs;
-    }
-
-    function saveConfigEntry(configEntry) {
-        if (!configEntry.id || !configEntry.name)
-            return;
-        readMonitorsJson(data => {
-            const match = findConfigEntryById(data, configEntry.id);
-            if (!match)
-                return;
-            data.configurations[match.index] = {
-                "id": configEntry.id,
-                "name": configEntry.name,
-                "outputs": configEntry.outputs
-            };
-            writeMonitorsJson(data, null);
-        });
     }
 
     function deleteDisconnectedOutput(outputName) {
@@ -831,7 +950,7 @@ Singleton {
         if (hasPendingChanges)
             clearPendingChanges();
         currentOutputSet = newOutputSet;
-        applyAutoConfig();
+        autoSelectDebounceTimer.restart();
     }
     onSavedOutputsChanged: allOutputs = buildAllOutputsMap()
     onLastAppliedEntryChanged: allOutputs = buildAllOutputsMap()
@@ -845,9 +964,32 @@ Singleton {
     }
 
     Connections {
+        target: HyprlandService
+        function onMonitorLayoutChanged() {
+            root.outputs = root.buildOutputsMap();
+        }
+    }
+
+    Connections {
         target: CompositorService
         function onCompositorChanged() {
-            root.checkIncludeStatus();
+            root.include.check();
+            root.publishActiveProfileModes();
+        }
+    }
+
+    Connections {
+        target: SessionData
+        function onActiveDisplayProfileChanged() {
+            root.publishActiveProfileModes();
+        }
+    }
+
+    Connections {
+        target: NiriService
+        enabled: CompositorService.isNiri
+        function onConfigReloaded() {
+            root.include.check();
         }
     }
 
@@ -857,570 +999,352 @@ Singleton {
     }
 
     function reloadSavedOutputs() {
-        const paths = getConfigPaths();
-        if (!paths) {
+        const outputsFile = outputsConfigFile();
+        if (!outputsFile) {
             savedOutputs = {};
+            savedParsedOutputs = {};
             return;
         }
 
-        Proc.runCommand("load-saved-outputs", ["cat", paths.outputsFile], (content, exitCode) => {
+        Proc.runCommand("load-saved-outputs", ["cat", outputsFile], (content, exitCode) => {
             if (exitCode !== 0 || !content.trim()) {
                 savedOutputs = {};
+                savedParsedOutputs = {};
                 return;
             }
             const parsed = parseOutputsConfig(content);
+            savedParsedOutputs = parsed;
             const filtered = filterDisconnectedOnly(parsed);
             savedOutputs = filtered;
 
             if (CompositorService.isHyprland) {
                 initHyprlandSettingsFromConfig(parsed);
-                syncHyprlandVrrFromConfig(parsed);
+                syncHyprlandDisabledFromConfig(parsed);
             }
-            if (CompositorService.isNiri)
+            if (CompositorService.isNiri) {
                 syncNiriVrrFromConfig(parsed);
+                syncNiriDisabledFromConfig(parsed);
+            }
         });
     }
 
     function initHyprlandSettingsFromConfig(parsedOutputs) {
-        const current = JSON.parse(JSON.stringify(SettingsData.hyprlandOutputSettings));
+        const importedFields = ["colorManagement", "bitdepth", "sdrBrightness", "sdrSaturation", "supportsWideColor", "supportsHdr", "sdrEotf", "icc", "sdrMinLuminance", "sdrMaxLuminance", "minLuminance", "maxLuminance", "maxAvgLuminance"];
+        const current = JSON.parse(JSON.stringify(SessionData.hyprlandOutputSettings));
         let changed = false;
 
         for (const outputName in parsedOutputs) {
-            const output = parsedOutputs[outputName];
-            const settings = output.hyprlandSettings;
+            const settings = parsedOutputs[outputName]?.hyprlandSettings;
             if (!settings)
                 continue;
 
-            if (current[outputName])
+            const entry = current[outputName] ?? {};
+            let imported = false;
+            for (const field of importedFields) {
+                if (settings[field] === undefined || entry[field] !== undefined)
+                    continue;
+                entry[field] = settings[field];
+                imported = true;
+            }
+            if (!imported)
                 continue;
 
-            const hasSettings = settings.colorManagement || settings.bitdepth || settings.sdrBrightness !== undefined || settings.sdrSaturation !== undefined;
-            if (!hasSettings)
-                continue;
-
-            current[outputName] = {};
-            if (settings.colorManagement)
-                current[outputName].colorManagement = settings.colorManagement;
-            if (settings.bitdepth)
-                current[outputName].bitdepth = settings.bitdepth;
-            if (settings.sdrBrightness !== undefined)
-                current[outputName].sdrBrightness = settings.sdrBrightness;
-            if (settings.sdrSaturation !== undefined)
-                current[outputName].sdrSaturation = settings.sdrSaturation;
+            current[outputName] = entry;
             changed = true;
         }
 
         if (changed) {
-            SettingsData.hyprlandOutputSettings = current;
-            SettingsData.saveSettings();
+            SessionData.hyprlandOutputSettings = current;
+            SessionData.saveSettings();
         }
     }
 
-    function syncHyprlandVrrFromConfig(parsedOutputs) {
-        const current = JSON.parse(JSON.stringify(SettingsData.hyprlandOutputSettings));
+    function syncNiriVrrFromConfig(parsedOutputs) {
+        for (const outputName in parsedOutputs) {
+            const output = parsedOutputs[outputName];
+            const current = SessionData.getNiriOutputSetting(outputName, "vrrOnDemand", false);
+            const fromConfig = output.vrr_on_demand ?? false;
+            if (current === fromConfig)
+                continue;
+            SessionData.setNiriOutputSetting(outputName, "vrrOnDemand", fromConfig || undefined);
+        }
+    }
+
+    function syncHyprlandDisabledFromConfig(parsedOutputs) {
+        const current = JSON.parse(JSON.stringify(SessionData.hyprlandOutputSettings));
         let changed = false;
         for (const outputName in parsedOutputs) {
             const settings = parsedOutputs[outputName]?.hyprlandSettings;
-            const fromConfig = settings?.vrrFullscreenOnly ?? false;
-            const stored = current[outputName]?.vrrFullscreenOnly ?? false;
+            const fromConfig = settings?.disabled ?? false;
+            const stored = current[outputName]?.disabled ?? false;
             if (fromConfig === stored)
                 continue;
             if (!current[outputName])
                 current[outputName] = {};
             if (fromConfig)
-                current[outputName].vrrFullscreenOnly = true;
+                current[outputName].disabled = true;
             else
-                delete current[outputName].vrrFullscreenOnly;
+                delete current[outputName].disabled;
             changed = true;
         }
         if (changed) {
-            SettingsData.hyprlandOutputSettings = current;
-            SettingsData.saveSettings();
+            SessionData.hyprlandOutputSettings = current;
+            SessionData.saveSettings();
         }
     }
 
-    function syncNiriVrrFromConfig(parsedOutputs) {
-        let changed = false;
+    function syncNiriDisabledFromConfig(parsedOutputs) {
         for (const outputName in parsedOutputs) {
             const output = parsedOutputs[outputName];
-            const current = SettingsData.getNiriOutputSetting(outputName, "vrrOnDemand", false);
-            const fromConfig = output.vrr_on_demand ?? false;
+            const fromConfig = output.disabled ?? false;
+            const current = SessionData.getNiriOutputSetting(outputName, "disabled", false);
             if (current === fromConfig)
                 continue;
-            SettingsData.setNiriOutputSetting(outputName, "vrrOnDemand", fromConfig || undefined);
-            changed = true;
+            SessionData.setNiriOutputSetting(outputName, "disabled", fromConfig || undefined);
         }
-        if (changed)
-            SettingsData.saveSettings();
     }
 
     function filterDisconnectedOnly(parsedOutputs) {
-        const result = {};
-        const liveNames = Object.keys(outputs);
-        const liveByIdentifier = {};
-        for (const name of liveNames) {
-            const o = outputs[name];
-            if (o?.make && o?.model) {
-                const serial = o.serial || "Unknown";
-                const id = (o.make + " " + o.model + " " + serial).trim();
-                liveByIdentifier[id] = true;
-                liveByIdentifier[o.make + " " + o.model] = true;
-            }
-            liveByIdentifier[name] = true;
-        }
-
-        for (const savedName in parsedOutputs) {
-            const trimmed = savedName.trim();
-            if (!liveByIdentifier[trimmed])
-                result[savedName] = parsedOutputs[savedName];
-        }
-        return result;
+        return OutputModel.filterDisconnectedOnly(parsedOutputs, outputs, SettingsData.displayNameMode, CompositorService.compositor);
     }
 
     function parseOutputsConfig(content) {
         switch (CompositorService.compositor) {
         case "niri":
-            return parseNiriOutputs(content);
+            return OutputModel.parseNiriOutputs(content);
         case "hyprland":
-            return parseHyprlandOutputs(content);
-        case "dwl":
-            return parseMangoOutputs(content);
+            return OutputModel.parseHyprlandOutputs(content);
+        case "mango":
+            return OutputModel.parseMangoOutputs(content);
         default:
             return {};
         }
     }
 
-    function parseNiriOutputs(content) {
-        const result = {};
-        const outputRegex = /output\s+"([^"]+)"\s*\{([^}]*)\}/g;
-        let match;
-        while ((match = outputRegex.exec(content)) !== null) {
-            const name = match[1];
-            const body = match[2];
-
-            const modeMatch = body.match(/mode\s+"(\d+)x(\d+)@([\d.]+)"/);
-            const posMatch = body.match(/position\s+x=(-?\d+)\s+y=(-?\d+)/);
-            const scaleMatch = body.match(/scale\s+([\d.]+)/);
-            const transformMatch = body.match(/transform\s+"([^"]+)"/);
-            const vrrMatch = body.match(/variable-refresh-rate/);
-            const vrrOnDemandMatch = body.match(/variable-refresh-rate\s+on-demand=true/);
-
-            result[name] = {
-                "name": name,
-                "logical": {
-                    "x": posMatch ? parseInt(posMatch[1]) : 0,
-                    "y": posMatch ? parseInt(posMatch[2]) : 0,
-                    "scale": scaleMatch ? parseFloat(scaleMatch[1]) : 1.0,
-                    "transform": transformMatch ? transformMatch[1] : "Normal"
-                },
-                "modes": modeMatch ? [
-                    {
-                        "width": parseInt(modeMatch[1]),
-                        "height": parseInt(modeMatch[2]),
-                        "refresh_rate": Math.round(parseFloat(modeMatch[3]) * 1000)
-                    }
-                ] : [],
-                "current_mode": 0,
-                "vrr_enabled": !!vrrMatch,
-                "vrr_on_demand": !!vrrOnDemandMatch,
-                "vrr_supported": true
-            };
-        }
-        return result;
-    }
-
-    function parseHyprlandOutputs(content) {
-        const result = {};
-        const lines = content.split("\n");
-        for (const line of lines) {
-            const disableMatch = line.match(/^\s*monitor\s*=\s*([^,]+),\s*disable\s*$/);
-            if (disableMatch) {
-                const name = disableMatch[1].trim();
-                result[name] = {
-                    "name": name,
-                    "logical": {
-                        "x": 0,
-                        "y": 0,
-                        "scale": 1.0,
-                        "transform": "Normal"
-                    },
-                    "modes": [],
-                    "current_mode": -1,
-                    "vrr_enabled": false,
-                    "vrr_supported": false,
-                    "hyprlandSettings": {
-                        "disabled": true
-                    }
-                };
-                continue;
-            }
-            const match = line.match(/^\s*monitor\s*=\s*([^,]+),\s*(\d+)x(\d+)@([\d.]+),\s*(-?\d+)x(-?\d+),\s*([\d.]+)/);
-            if (!match)
-                continue;
-            const name = match[1].trim();
-            const rest = line.substring(line.indexOf(match[7]) + match[7].length);
-
-            let transform = 0, vrrMode = 0, bitdepth = undefined, cm = undefined;
-            let sdrBrightness = undefined, sdrSaturation = undefined;
-
-            const transformMatch = rest.match(/,\s*transform,\s*(\d+)/);
-            if (transformMatch)
-                transform = parseInt(transformMatch[1]);
-
-            const vrrMatch = rest.match(/,\s*vrr,\s*(\d+)/);
-            if (vrrMatch)
-                vrrMode = parseInt(vrrMatch[1]);
-
-            const bitdepthMatch = rest.match(/,\s*bitdepth,\s*(\d+)/);
-            if (bitdepthMatch)
-                bitdepth = parseInt(bitdepthMatch[1]);
-
-            const cmMatch = rest.match(/,\s*cm,\s*(\w+)/);
-            if (cmMatch)
-                cm = cmMatch[1];
-
-            const sdrBrightnessMatch = rest.match(/,\s*sdrbrightness,\s*([\d.]+)/);
-            if (sdrBrightnessMatch)
-                sdrBrightness = parseFloat(sdrBrightnessMatch[1]);
-
-            const sdrSaturationMatch = rest.match(/,\s*sdrsaturation,\s*([\d.]+)/);
-            if (sdrSaturationMatch)
-                sdrSaturation = parseFloat(sdrSaturationMatch[1]);
-
-            let mirror = "";
-            const mirrorMatch = rest.match(/,\s*mirror,\s*([^,\s]+)/);
-            if (mirrorMatch)
-                mirror = mirrorMatch[1];
-
-            result[name] = {
-                "name": name,
-                "logical": {
-                    "x": parseInt(match[5]),
-                    "y": parseInt(match[6]),
-                    "scale": parseFloat(match[7]),
-                    "transform": hyprlandToTransform(transform)
-                },
-                "modes": [
-                    {
-                        "width": parseInt(match[2]),
-                        "height": parseInt(match[3]),
-                        "refresh_rate": Math.round(parseFloat(match[4]) * 1000)
-                    }
-                ],
-                "current_mode": 0,
-                "vrr_enabled": vrrMode >= 1,
-                "vrr_supported": true,
-                "hyprlandSettings": {
-                    "bitdepth": bitdepth,
-                    "colorManagement": cm,
-                    "sdrBrightness": sdrBrightness,
-                    "sdrSaturation": sdrSaturation,
-                    "vrrFullscreenOnly": vrrMode === 2 ? true : undefined
-                },
-                "mirror": mirror
-            };
-        }
-        return result;
-    }
-
-    function hyprlandToTransform(value) {
-        switch (value) {
-        case 0:
-            return "Normal";
-        case 1:
-            return "90";
-        case 2:
-            return "180";
-        case 3:
-            return "270";
-        case 4:
-            return "Flipped";
-        case 5:
-            return "Flipped90";
-        case 6:
-            return "Flipped180";
-        case 7:
-            return "Flipped270";
-        default:
-            return "Normal";
-        }
-    }
-
-    function parseMangoOutputs(content) {
-        const result = {};
-        const lines = content.split("\n");
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("monitorrule="))
-                continue;
-
-            const params = {};
-            for (const pair of trimmed.substring("monitorrule=".length).split(",")) {
-                const colonIdx = pair.indexOf(":");
-                if (colonIdx < 0)
-                    continue;
-                params[pair.substring(0, colonIdx).trim()] = pair.substring(colonIdx + 1).trim();
-            }
-
-            const name = params.name;
-            if (!name)
-                continue;
-
-            result[name] = {
-                "name": name,
-                "logical": {
-                    "x": parseInt(params.x || "0"),
-                    "y": parseInt(params.y || "0"),
-                    "scale": parseFloat(params.scale || "1"),
-                    "transform": mangoToTransform(parseInt(params.rr || "0"))
-                },
-                "modes": [
-                    {
-                        "width": parseInt(params.width || "1920"),
-                        "height": parseInt(params.height || "1080"),
-                        "refresh_rate": parseFloat(params.refresh || "60") * 1000
-                    }
-                ],
-                "current_mode": 0,
-                "vrr_enabled": parseInt(params.vrr || "0") === 1,
-                "vrr_supported": true
-            };
-        }
-        return result;
-    }
-
-    function mangoToTransform(value) {
-        switch (value) {
-        case 0:
-            return "Normal";
-        case 1:
-            return "90";
-        case 2:
-            return "180";
-        case 3:
-            return "270";
-        case 4:
-            return "Flipped";
-        case 5:
-            return "Flipped90";
-        case 6:
-            return "Flipped180";
-        case 7:
-            return "Flipped270";
-        default:
-            return "Normal";
-        }
-    }
-
-    function getConfigPaths() {
+    function outputsConfigFile() {
         const configDir = Paths.strip(StandardPaths.writableLocation(StandardPaths.ConfigLocation));
-        switch (CompositorService.compositor) {
-        case "niri":
-            return {
-                "configFile": configDir + "/niri/config.kdl",
-                "outputsFile": configDir + "/niri/dms/outputs.kdl",
-                "grepPattern": 'include.*"dms/outputs.kdl"',
-                "includeLine": 'include "dms/outputs.kdl"'
-            };
-        case "hyprland":
-            return {
-                "configFile": configDir + "/hypr/hyprland.conf",
-                "outputsFile": configDir + "/hypr/dms/outputs.conf",
-                "grepPattern": 'source.*dms/outputs.conf',
-                "includeLine": "source = ./dms/outputs.conf"
-            };
-        case "dwl":
-            return {
-                "configFile": configDir + "/mango/config.conf",
-                "outputsFile": configDir + "/mango/dms/outputs.conf",
-                "grepPattern": 'source.*dms/outputs.conf',
-                "includeLine": "source=./dms/outputs.conf"
-            };
-        default:
-            return null;
-        }
-    }
-
-    function checkIncludeStatus() {
-        const compositor = CompositorService.compositor;
-        if (compositor !== "niri" && compositor !== "hyprland" && compositor !== "dwl") {
-            includeStatus = {
-                "exists": false,
-                "included": false
-            };
-            return;
-        }
-
-        const filename = (compositor === "niri") ? "outputs.kdl" : "outputs.conf";
-        const compositorArg = (compositor === "dwl") ? "mangowc" : compositor;
-
-        checkingInclude = true;
-        Proc.runCommand("check-outputs-include", ["dms", "config", "resolve-include", compositorArg, filename], (output, exitCode) => {
-            checkingInclude = false;
-            if (exitCode !== 0) {
-                includeStatus = {
-                    "exists": false,
-                    "included": false
-                };
-                return;
-            }
-            try {
-                includeStatus = JSON.parse(output.trim());
-            } catch (e) {
-                includeStatus = {
-                    "exists": false,
-                    "included": false
-                };
-            }
-        });
+        const paths = ConfigIncludeResolve.includePaths("outputs", CompositorService.compositor, configDir);
+        return paths ? paths.fragmentFiles[0] : "";
     }
 
     function fixOutputsInclude() {
-        const paths = getConfigPaths();
-        if (!paths)
+        include.fix();
+    }
+
+    function writeOutputsAfterIncludeFix() {
+        const liveOutputs = buildOutputsMap();
+        if (Object.keys(liveOutputs).length > 0) {
+            outputs = liveOutputs;
+            include.fixing = true;
+            backendWriteOutputsConfig(liveOutputs, backendMergedSettings(), success => {
+                include.fixing = false;
+                if (!success)
+                    ToastService.showError(I18n.tr("Display setup failed"), I18n.tr("Failed to write outputs config."), "", "display-config");
+                include.check();
+                WlrOutputService.requestState();
+            });
             return;
+        }
+        include.check();
+        WlrOutputService.requestState();
+    }
 
-        fixingInclude = true;
-        const outputsDir = paths.outputsFile.substring(0, paths.outputsFile.lastIndexOf("/"));
-        const unixTime = Math.floor(Date.now() / 1000);
-        const backupFile = paths.configFile + ".backup" + unixTime;
-
-        Proc.runCommand("fix-outputs-include", ["sh", "-c", `cp "${paths.configFile}" "${backupFile}" 2>/dev/null; ` + `mkdir -p "${outputsDir}" && ` + `touch "${paths.outputsFile}" && ` + `if ! grep -v '^[[:space:]]*\\(//\\|#\\)' "${paths.configFile}" 2>/dev/null | grep -q '${paths.grepPattern}'; then ` + `echo '' >> "${paths.configFile}" && ` + `echo '${paths.includeLine}' >> "${paths.configFile}"; fi`], (output, exitCode) => {
-            fixingInclude = false;
-            if (exitCode !== 0)
-                return;
-            checkIncludeStatus();
-            WlrOutputService.requestState();
-        });
+    function showHyprlandReadOnlyWarning() {
+        ToastService.showWarning(I18n.tr("Hyprland conf mode"), I18n.tr("This install is still using hyprland.conf. Run dms setup to migrate before changing these settings."), "dms setup", "display-config");
     }
 
     function buildOutputsMap() {
-        const map = {};
+        const liveMonitors = {};
         for (const output of wlrOutputs) {
-            const normalizedModes = (output.modes || []).map(m => ({
-                        "id": m.id,
-                        "width": m.width,
-                        "height": m.height,
-                        "refresh_rate": m.refresh,
-                        "preferred": m.preferred ?? false
-                    }));
-            map[output.name] = {
-                "name": output.name,
-                "make": output.make || "",
-                "model": output.model || "",
-                "serial": output.serialNumber || "",
-                "modes": normalizedModes,
-                "current_mode": normalizedModes.findIndex(m => m.id === output.currentMode?.id),
-                "vrr_supported": output.adaptiveSyncSupported ?? false,
-                "vrr_enabled": output.adaptiveSync === 1,
-                "logical": {
-                    "x": output.x ?? 0,
-                    "y": output.y ?? 0,
-                    "width": output.currentMode?.width ?? 1920,
-                    "height": output.currentMode?.height ?? 1080,
-                    "scale": output.scale || 1.0,
-                    "transform": mapWlrTransform(output.transform)
-                }
+            const live = HyprlandService.liveMonitor(output.name);
+            if (!live)
+                continue;
+            liveMonitors[output.name] = {
+                "x": live.x,
+                "y": live.y,
+                "scale": live.scale,
+                "transformIndex": live.lastIpcObject?.transform ?? 0,
+                "hardware": OutputModel.hyprlandHardware(live.lastIpcObject)
             };
         }
-        return map;
-    }
-
-    function mapWlrTransform(wlrTransform) {
-        switch (wlrTransform) {
-        case 0:
-            return "Normal";
-        case 1:
-            return "90";
-        case 2:
-            return "180";
-        case 3:
-            return "270";
-        case 4:
-            return "Flipped";
-        case 5:
-            return "Flipped90";
-        case 6:
-            return "Flipped180";
-        case 7:
-            return "Flipped270";
-        default:
-            return "Normal";
-        }
-    }
-
-    function mapTransformToWlr(transform) {
-        switch (transform) {
-        case "Normal":
-            return 0;
-        case "90":
-            return 1;
-        case "180":
-            return 2;
-        case "270":
-            return 3;
-        case "Flipped":
-            return 4;
-        case "Flipped90":
-            return 5;
-        case "Flipped180":
-            return 6;
-        case "Flipped270":
-            return 7;
-        default:
-            return 0;
-        }
+        return OutputModel.outputsFromWlr(wlrOutputs, liveMonitors);
     }
 
     function backendFetchOutputs() {
         WlrOutputService.requestState();
     }
 
-    function backendWriteOutputsConfig(outputsData) {
+    function backendWriteOutputsConfig(outputsData, settingsOrCallback, maybeCallback) {
+        const settings = typeof settingsOrCallback === "function" ? null : settingsOrCallback;
+        const callback = typeof settingsOrCallback === "function" ? settingsOrCallback : maybeCallback;
+        const hasExplicitSettings = settings !== null && settings !== undefined;
+
+        function finish(success) {
+            if (callback)
+                callback(success);
+        }
+
         switch (CompositorService.compositor) {
         case "niri":
-            NiriService.generateOutputsConfig(outputsData);
-            break;
+            {
+                const niriSettings = hasExplicitSettings ? settings : buildMergedNiriSettings();
+                NiriService.generateOutputsConfig(outputsData, niriSettings, success => {
+                    if (!success) {
+                        finish(false);
+                        return;
+                    }
+                    reloadAndApplyNiriLiveOutputsConfig(outputsData, niriSettings, finish);
+                });
+                break;
+            }
         case "hyprland":
-            HyprlandService.generateOutputsConfig(outputsData, buildMergedHyprlandSettings());
-            break;
-        case "dwl":
-            DwlService.generateOutputsConfig(outputsData);
+            {
+                if (readOnly) {
+                    showHyprlandReadOnlyWarning();
+                    finish(false);
+                    return;
+                }
+                const hyprlandSettings = hasExplicitSettings ? settings : buildMergedHyprlandSettings();
+                HyprlandService.generateOutputsConfig(outputsData, hyprlandSettings, finish);
+                break;
+            }
+        case "mango":
+            MangoService.generateOutputsConfig(outputsData, finish);
             break;
         default:
-            WlrOutputService.applyOutputsConfig(outputsData, outputs);
-            break;
+            {
+                if (_cancelOutputWrite)
+                    _cancelOutputWrite();
+                let completed = false;
+                const complete = success => {
+                    if (completed)
+                        return;
+                    completed = true;
+                    root._cancelOutputWrite = null;
+                    finish(success);
+                };
+                _cancelOutputWrite = () => complete(false);
+                WlrOutputService.applyOutputsConfig(outputsData, outputs, complete);
+                break;
+            }
         }
     }
 
+    function getLiveNiriOutputName(outputName, outputData) {
+        if (outputs[outputName])
+            return outputName;
+        const targetId = getNiriOutputIdentifier(outputData, outputName);
+        for (const liveName in outputs) {
+            if (getNiriOutputIdentifier(outputs[liveName], liveName) === targetId)
+                return liveName;
+        }
+        return "";
+    }
+
+    function applyNiriLiveOutputsConfig(outputsData, niriSettings, callback) {
+        const names = Object.keys(outputsData || {});
+        let pending = 0;
+        let failed = false;
+
+        function done(success) {
+            if (callback)
+                callback(success);
+        }
+
+        for (const outputName of names) {
+            const output = outputsData[outputName];
+            if (!output)
+                continue;
+            const liveName = getLiveNiriOutputName(outputName, output);
+            if (!liveName)
+                continue;
+
+            const identifier = getNiriOutputIdentifier(output, outputName);
+            const settings = niriSettings?.[outputName] || niriSettings?.[identifier] || {};
+            const config = {};
+
+            if (settings.disabled === true)
+                config.disabled = true;
+            else if (settings.disabled === false)
+                config.disabled = false;
+
+            if (!config.disabled) {
+                if (output.current_mode !== undefined && output.modes && output.modes[output.current_mode]) {
+                    const mode = output.modes[output.current_mode];
+                    config.mode = mode.width + "x" + mode.height + "@" + (mode.refresh_rate / 1000).toFixed(3);
+                }
+                if (output.logical) {
+                    config.scale = output.logical.scale ?? 1.0;
+                    config.position = {
+                        "x": output.logical.x ?? 0,
+                        "y": output.logical.y ?? 0
+                    };
+                    config.transform = OutputModel.niriTransform(output.logical.transform);
+                }
+                if (settings.vrrOnDemand !== undefined)
+                    config.vrrOnDemand = settings.vrrOnDemand;
+                else if (output.vrr_enabled !== undefined)
+                    config.vrr = output.vrr_enabled;
+            }
+
+            pending++;
+            NiriService.applyOutputConfig(liveName, config, success => {
+                failed = failed || !success;
+                pending--;
+                if (pending === 0) {
+                    WlrOutputService.requestState();
+                    done(!failed);
+                }
+            });
+        }
+
+        if (pending === 0)
+            done(true);
+    }
+
+    function reloadAndApplyNiriLiveOutputsConfig(outputsData, niriSettings, callback) {
+        Proc.runCommand("niri-reload-output-config", ["niri", "msg", "action", "load-config-file"], () => {
+            applyNiriLiveOutputsConfig(outputsData, niriSettings, callback);
+        });
+    }
+
     function normalizeOutputPositions(outputsData) {
-        const names = Object.keys(outputsData);
-        if (names.length === 0)
-            return outputsData;
+        return OutputModel.normalizeOutputPositions(outputsData);
+    }
 
-        let minX = Infinity;
-        let minY = Infinity;
-
-        for (const name of names) {
-            const output = outputsData[name];
-            if (!output.logical)
-                continue;
-            minX = Math.min(minX, output.logical.x);
-            minY = Math.min(minY, output.logical.y);
+    function findSavedParsedOutput(outputName) {
+        const output = outputs[outputName];
+        const candidates = [outputName];
+        if (output?.make && output?.model) {
+            candidates.push(output.make + " " + output.model + " " + (output.serial || "Unknown"));
+            candidates.push(output.make + " " + output.model);
         }
-
-        if (minX === Infinity || (minX === 0 && minY === 0))
-            return outputsData;
-
-        const normalized = JSON.parse(JSON.stringify(outputsData));
-        for (const name of names) {
-            if (!normalized[name].logical)
-                continue;
-            normalized[name].logical.x -= minX;
-            normalized[name].logical.y -= minY;
+        for (const savedName in savedParsedOutputs) {
+            if (candidates.includes(savedName.trim()))
+                return savedParsedOutputs[savedName];
         }
+        return null;
+    }
 
-        return normalized;
+    // A disabled wlr head reports no current mode, scale 0 and position 0,0 —
+    // overlay the last written config so rewrites don't discard real settings.
+    function overlaySavedDisabledOutput(entry, outputName) {
+        const saved = findSavedParsedOutput(outputName);
+        if (!saved)
+            return;
+
+        const savedMode = saved.modes?.[saved.current_mode ?? 0];
+        if (savedMode && !entry.configured_mode)
+            entry.configured_mode = savedMode.width + "x" + savedMode.height + "@" + (savedMode.refresh_rate / 1000).toFixed(3);
+        if (saved.vrr_enabled !== undefined)
+            entry.vrr_enabled = saved.vrr_enabled;
+        if (!saved.logical || !entry.logical)
+            return;
+
+        entry.logical.x = saved.logical.x;
+        entry.logical.y = saved.logical.y;
+        entry.logical.scale = saved.logical.scale;
+        entry.logical.transform = saved.logical.transform;
     }
 
     function buildOutputsWithPendingChanges() {
@@ -1432,7 +1356,10 @@ Singleton {
         }
 
         for (const outputName in outputs) {
-            result[outputName] = JSON.parse(JSON.stringify(outputs[outputName]));
+            const entry = JSON.parse(JSON.stringify(outputs[outputName]));
+            if (entry.enabled === false)
+                overlaySavedDisabledOutput(entry, outputName);
+            result[outputName] = entry;
         }
 
         for (const outputName in pendingChanges) {
@@ -1444,6 +1371,8 @@ Singleton {
                 result[outputName].logical.y = changes.position.y;
             }
             if (changes.mode !== undefined && result[outputName].modes) {
+                if (result[outputName].configured_mode)
+                    result[outputName].configured_mode = changes.mode;
                 for (var i = 0; i < result[outputName].modes.length; i++) {
                     if (formatMode(result[outputName].modes[i]) === changes.mode) {
                         result[outputName].current_mode = i;
@@ -1501,11 +1430,7 @@ Singleton {
     }
 
     function getNiriOutputIdentifier(output, outputName) {
-        if (SettingsData.displayNameMode === "model" && output?.make && output?.model) {
-            const serial = output.serial || "Unknown";
-            return output.make + " " + output.model + " " + serial;
-        }
-        return outputName;
+        return OutputModel.niriIdentifier(output, outputName, SettingsData.displayNameMode);
     }
 
     function getNiriSetting(output, outputName, key, defaultValue) {
@@ -1515,7 +1440,7 @@ Singleton {
         const pending = pendingNiriChanges[identifier];
         if (pending && pending[key] !== undefined)
             return pending[key];
-        return SettingsData.getNiriOutputSetting(identifier, key, defaultValue);
+        return SessionData.getNiriOutputSetting(identifier, key, defaultValue);
     }
 
     function setNiriSetting(output, outputName, key, value) {
@@ -1533,13 +1458,11 @@ Singleton {
     function initOriginalNiriSettings() {
         if (originalNiriSettings)
             return;
-        originalNiriSettings = JSON.parse(JSON.stringify(SettingsData.niriOutputSettings));
+        originalNiriSettings = JSON.parse(JSON.stringify(SessionData.niriOutputSettings));
     }
 
     function getHyprlandOutputIdentifier(output, outputName) {
-        if (SettingsData.displayNameMode === "model" && output?.make && output?.model)
-            return "desc:" + output.make + " " + output.model + " " + (output?.serial || "Unknown");
-        return outputName;
+        return OutputModel.hyprlandIdentifier(output, outputName, SettingsData.displayNameMode);
     }
 
     function getHyprlandSetting(output, outputName, key, defaultValue) {
@@ -1551,7 +1474,7 @@ Singleton {
             const val = pending[key];
             return (val !== null && val !== undefined) ? val : defaultValue;
         }
-        return SettingsData.getHyprlandOutputSetting(identifier, key, defaultValue);
+        return SessionData.getHyprlandOutputSetting(identifier, key, defaultValue);
     }
 
     function setHyprlandSetting(output, outputName, key, value) {
@@ -1566,10 +1489,34 @@ Singleton {
         pendingHyprlandChanges = newPending;
     }
 
+    function getHyprlandCaps(output, outputName) {
+        return OutputModel.hyprlandCaps(outputs[outputName]?.hardware ?? null, {
+            "supportsWideColor": getHyprlandSetting(output, outputName, "supportsWideColor", undefined),
+            "supportsHdr": getHyprlandSetting(output, outputName, "supportsHdr", undefined)
+        });
+    }
+
+    function hyprlandCmAllowed(cm, caps) {
+        return OutputModel.hyprlandCmAllowed(cm, caps);
+    }
+
+    function getHyprlandVrrMode(output, outputName) {
+        const settings = {
+            "vrr": getHyprlandSetting(output, outputName, "vrr", undefined),
+            "vrrFullscreenOnly": getHyprlandSetting(output, outputName, "vrrFullscreenOnly", false)
+        };
+        return OutputModel.hyprlandVrrMode(settings, savedParsedOutputs[getHyprlandOutputIdentifier(output, outputName)]);
+    }
+
+    function setHyprlandVrrMode(output, outputName, mode) {
+        setHyprlandSetting(output, outputName, "vrr", mode);
+        setHyprlandSetting(output, outputName, "vrrFullscreenOnly", null);
+    }
+
     function initOriginalHyprlandSettings() {
         if (originalHyprlandSettings)
             return;
-        originalHyprlandSettings = JSON.parse(JSON.stringify(SettingsData.hyprlandOutputSettings));
+        originalHyprlandSettings = JSON.parse(JSON.stringify(SessionData.hyprlandOutputSettings));
     }
 
     function initOriginalOutputs() {
@@ -1592,54 +1539,17 @@ Singleton {
     }
 
     function recalculateAdjacentPositions(changedOutput, newScale) {
-        const output = outputs[changedOutput];
-        if (!output?.logical)
-            return;
-        const oldPhys = getPhysicalSize(output);
-        const oldLogicalW = Math.round(oldPhys.w / (output.logical.scale || 1.0));
-        const newLogicalW = Math.round(oldPhys.w / newScale);
-
-        const changedX = getPendingValue(changedOutput, "position")?.x ?? output.logical.x;
-        const changedY = getPendingValue(changedOutput, "position")?.y ?? output.logical.y;
-
-        for (const name in outputs) {
-            if (name === changedOutput)
-                continue;
-            const other = outputs[name];
-            if (!other?.logical)
-                continue;
-            const otherX = getPendingValue(name, "position")?.x ?? other.logical.x;
-            const otherY = getPendingValue(name, "position")?.y ?? other.logical.y;
-            const otherSize = getLogicalSize(other);
-            const otherRight = otherX + otherSize.w;
-
-            if (Math.abs(changedX - otherRight) < 5) {
-                const newX = otherRight;
-                const newPending = JSON.parse(JSON.stringify(pendingChanges));
-                if (!newPending[changedOutput])
-                    newPending[changedOutput] = {};
-                newPending[changedOutput].position = {
-                    "x": newX,
-                    "y": changedY
-                };
-                pendingChanges = newPending;
-                backendUpdateOutputPosition(changedOutput, newX, changedY);
-                return;
-            }
-
-            const changedRight = changedX + oldLogicalW;
-            if (Math.abs(otherX - changedRight) < 5) {
-                const newOtherX = changedX + newLogicalW;
-                const newPending = JSON.parse(JSON.stringify(pendingChanges));
-                if (!newPending[name])
-                    newPending[name] = {};
-                newPending[name].position = {
-                    "x": newOtherX,
-                    "y": otherY
-                };
-                pendingChanges = newPending;
-                backendUpdateOutputPosition(name, newOtherX, otherY);
-            }
+        const moves = OutputModel.recalculateAdjacentPositions(outputs, pendingChanges, changedOutput, newScale, CompositorService.compositor);
+        for (const move of moves) {
+            const newPending = JSON.parse(JSON.stringify(pendingChanges));
+            if (!newPending[move.name])
+                newPending[move.name] = {};
+            newPending[move.name].position = {
+                "x": move.x,
+                "y": move.y
+            };
+            pendingChanges = newPending;
+            backendUpdateOutputPosition(move.name, move.x, move.y);
         }
     }
 
@@ -1654,7 +1564,6 @@ Singleton {
         return pending !== undefined ? pending : originalValue;
     }
 
-    // Returns true if the given output can currently be disabled.
     // Prevents disabling all outputs and prevents disabling the only output
     // in a single-display configuration.
     function canDisableOutput() {
@@ -1686,11 +1595,15 @@ Singleton {
         originalDisplayNameMode = "";
     }
 
+    function restoreDisplayNameMode() {
+        if (originalDisplayNameMode === "")
+            return;
+        SettingsData.displayNameMode = originalDisplayNameMode;
+        SettingsData.saveSettings();
+    }
+
     function discardChanges() {
-        if (originalDisplayNameMode !== "") {
-            SettingsData.displayNameMode = originalDisplayNameMode;
-            SettingsData.saveSettings();
-        }
+        restoreDisplayNameMode();
         backendFetchOutputs();
         clearPendingChanges();
     }
@@ -1698,6 +1611,10 @@ Singleton {
     function applyChanges() {
         if (!hasPendingChanges)
             return;
+        if (CompositorService.isHyprland && readOnly) {
+            showHyprlandReadOnlyWarning();
+            return;
+        }
         const changeDescriptions = [];
 
         if (formatChanged) {
@@ -1716,7 +1633,7 @@ Singleton {
             if (changes.transform)
                 changeDescriptions.push(outputName + ": " + I18n.tr("Transform") + " → " + getTransformLabel(changes.transform));
             if (changes.vrr !== undefined)
-                changeDescriptions.push(outputName + ": " + I18n.tr("VRR") + " → " + (changes.vrr ? I18n.tr("Enabled") : I18n.tr("Disabled")));
+                changeDescriptions.push(outputName + ": " + "VRR" + " → " + (changes.vrr ? I18n.tr("Enabled") : I18n.tr("Disabled")));
         }
 
         for (const outputId in pendingNiriChanges) {
@@ -1726,9 +1643,9 @@ Singleton {
             if (changes.vrrOnDemand !== undefined)
                 changeDescriptions.push(outputId + ": " + I18n.tr("VRR On-Demand") + " → " + (changes.vrrOnDemand ? I18n.tr("Enabled") : I18n.tr("Disabled")));
             if (changes.focusAtStartup !== undefined)
-                changeDescriptions.push(outputId + ": " + I18n.tr("Focus at Startup") + " → " + (changes.focusAtStartup ? I18n.tr("Yes") : I18n.tr("No")));
+                changeDescriptions.push(outputId + ": " + I18n.tr("Focus at startup") + " → " + (changes.focusAtStartup ? I18n.tr("Yes") : I18n.tr("No")));
             if (changes.hotCorners !== undefined)
-                changeDescriptions.push(outputId + ": " + I18n.tr("Hot Corners") + " → " + I18n.tr("Modified"));
+                changeDescriptions.push(outputId + ": " + I18n.tr("Hot corners") + " → " + I18n.tr("Modified"));
             if (changes.layout !== undefined)
                 changeDescriptions.push(outputId + ": " + I18n.tr("Layout") + " → " + I18n.tr("Modified"));
         }
@@ -1742,15 +1659,17 @@ Singleton {
             if (changes.colorManagement !== undefined)
                 changeDescriptions.push(outputId + ": " + I18n.tr("Color Management") + " → " + changes.colorManagement);
             if (changes.sdrBrightness !== undefined)
-                changeDescriptions.push(outputId + ": " + I18n.tr("SDR Brightness") + " → " + changes.sdrBrightness);
+                changeDescriptions.push(outputId + ": " + I18n.tr("SDR brightness") + " → " + changes.sdrBrightness);
             if (changes.sdrSaturation !== undefined)
-                changeDescriptions.push(outputId + ": " + I18n.tr("SDR Saturation") + " → " + changes.sdrSaturation);
+                changeDescriptions.push(outputId + ": " + I18n.tr("SDR saturation") + " → " + changes.sdrSaturation);
             if (changes.supportsHdr !== undefined)
                 changeDescriptions.push(outputId + ": " + I18n.tr("Force HDR") + " → " + (changes.supportsHdr ? I18n.tr("Yes") : I18n.tr("No")));
             if (changes.supportsWideColor !== undefined)
                 changeDescriptions.push(outputId + ": " + I18n.tr("Force Wide Color") + " → " + (changes.supportsWideColor ? I18n.tr("Yes") : I18n.tr("No")));
-            if (changes.vrrFullscreenOnly !== undefined)
-                changeDescriptions.push(outputId + ": " + I18n.tr("VRR Fullscreen Only") + " → " + (changes.vrrFullscreenOnly ? I18n.tr("Enabled") : I18n.tr("Disabled")));
+            if (changes.vrr !== undefined)
+                changeDescriptions.push(outputId + ": " + "VRR" + " → " + hyprlandVrrLabel(changes.vrr));
+            if (changes.sdrEotf !== undefined)
+                changeDescriptions.push(outputId + ": " + I18n.tr("SDR transfer function") + " → " + (changes.sdrEotf || I18n.tr("Default")));
         }
 
         if (CompositorService.isNiri) {
@@ -1758,16 +1677,32 @@ Singleton {
             return;
         }
 
-        changesApplied(changeDescriptions);
-
-        if (formatChanged)
-            SettingsData.saveSettings();
-
-        if (CompositorService.isHyprland)
-            commitHyprlandSettingsChanges();
+        if (CompositorService.isAqueous) {
+            previewAqueousOutputs(changeDescriptions);
+            return;
+        }
 
         const mergedOutputs = buildOutputsWithPendingChanges();
-        backendWriteOutputsConfig(mergedOutputs);
+        if (CompositorService.isHyprland || CompositorService.isMango) {
+            changesApplied(changeDescriptions);
+            if (formatChanged)
+                SettingsData.saveSettings();
+            if (CompositorService.isHyprland)
+                commitHyprlandSettingsChanges();
+            backendWriteOutputsConfig(mergedOutputs);
+            return;
+        }
+        validatingConfig = true;
+        backendWriteOutputsConfig(mergedOutputs, success => {
+            validatingConfig = false;
+            if (!success) {
+                ToastService.showError(I18n.tr("Error"), I18n.tr("Failed to apply profile"));
+                return;
+            }
+            if (formatChanged)
+                SettingsData.saveSettings();
+            changesApplied(changeDescriptions);
+        });
     }
 
     function validateAndApplyNiriConfig(changeDescriptions) {
@@ -1776,7 +1711,7 @@ Singleton {
 
         const mergedOutputs = buildOutputsWithPendingChanges();
         const mergedNiriSettings = buildMergedNiriSettings();
-        const configContent = generateNiriOutputsKdl(mergedOutputs, mergedNiriSettings);
+        const configContent = NiriService.buildOutputsConfig(mergedOutputs, mergedNiriSettings);
 
         const configDir = Paths.strip(StandardPaths.writableLocation(StandardPaths.ConfigLocation));
         const tempFile = configDir + "/niri/dms/.outputs-validate-tmp.kdl";
@@ -1800,13 +1735,13 @@ Singleton {
                 if (formatChanged)
                     SettingsData.saveSettings();
                 commitNiriSettingsChanges();
-                backendWriteOutputsConfig(mergedOutputs);
+                backendWriteOutputsConfig(mergedOutputs, mergedNiriSettings);
             });
         });
     }
 
     function buildMergedNiriSettings() {
-        const merged = JSON.parse(JSON.stringify(SettingsData.niriOutputSettings));
+        const merged = JSON.parse(JSON.stringify(SessionData.niriOutputSettings));
         for (const outputId in pendingNiriChanges) {
             if (!merged[outputId])
                 merged[outputId] = {};
@@ -1825,20 +1760,34 @@ Singleton {
     function commitNiriSettingsChanges() {
         for (const outputId in pendingNiriChanges) {
             for (const key in pendingNiriChanges[outputId]) {
-                SettingsData.setNiriOutputSetting(outputId, key, pendingNiriChanges[outputId][key]);
+                SessionData.setNiriOutputSetting(outputId, key, pendingNiriChanges[outputId][key]);
             }
         }
         // Clear stale disabled from SettingsData so NiriService reads clean state
         if (Object.keys(outputs).length <= 1) {
-            for (const id in SettingsData.niriOutputSettings) {
-                if (SettingsData.niriOutputSettings[id]?.disabled)
-                    SettingsData.setNiriOutputSetting(id, "disabled", null);
+            for (const id in SessionData.niriOutputSettings) {
+                if (SessionData.niriOutputSettings[id]?.disabled)
+                    SessionData.setNiriOutputSetting(id, "disabled", null);
             }
         }
     }
 
+    function hyprlandVrrLabel(mode) {
+        switch (mode) {
+        case 0:
+            return I18n.tr("Off");
+        case 1:
+            return I18n.tr("On", "adjective, enabled state");
+        case 2:
+        case 3:
+            return I18n.tr("Fullscreen only");
+        default:
+            return I18n.tr("Default (Global)");
+        }
+    }
+
     function buildMergedHyprlandSettings() {
-        const merged = JSON.parse(JSON.stringify(SettingsData.hyprlandOutputSettings));
+        const merged = JSON.parse(JSON.stringify(SessionData.hyprlandOutputSettings));
         for (const outputId in pendingHyprlandChanges) {
             if (!merged[outputId])
                 merged[outputId] = {};
@@ -1863,138 +1812,49 @@ Singleton {
             for (const key in pendingHyprlandChanges[outputId]) {
                 const val = pendingHyprlandChanges[outputId][key];
                 if (val === null || val === undefined)
-                    SettingsData.removeHyprlandOutputSetting(outputId, key);
+                    SessionData.removeHyprlandOutputSetting(outputId, key);
                 else
-                    SettingsData.setHyprlandOutputSetting(outputId, key, val);
+                    SessionData.setHyprlandOutputSetting(outputId, key, val);
             }
         }
         // Clear stale disabled from SettingsData so HyprlandService reads clean state
         if (Object.keys(outputs).length <= 1) {
-            for (const id in SettingsData.hyprlandOutputSettings) {
-                if (SettingsData.hyprlandOutputSettings[id]?.disabled)
-                    SettingsData.removeHyprlandOutputSetting(id, "disabled");
+            for (const id in SessionData.hyprlandOutputSettings) {
+                if (SessionData.hyprlandOutputSettings[id]?.disabled)
+                    SessionData.removeHyprlandOutputSetting(id, "disabled");
             }
         }
     }
 
-    function generateNiriOutputsKdl(outputsData, niriSettings) {
-        let kdlContent = `// Auto-generated by DMS - do not edit manually\n\n`;
-        const sortedNames = Object.keys(outputsData).sort((a, b) => {
-            const la = outputsData[a].logical || {};
-            const lb = outputsData[b].logical || {};
-            return (la.x ?? 0) - (lb.x ?? 0) || (la.y ?? 0) - (lb.y ?? 0);
-        });
-        for (const outputName of sortedNames) {
-            const output = outputsData[outputName];
-            const identifier = getNiriOutputIdentifier(output, outputName);
-            const settings = niriSettings[identifier] || {};
-            kdlContent += `output "${identifier}" {\n`;
-            if (settings.disabled) {
-                kdlContent += `    off\n}\n\n`;
-                continue;
-            }
-            if (output.current_mode !== undefined && output.modes && output.modes[output.current_mode]) {
-                const mode = output.modes[output.current_mode];
-                kdlContent += `    mode "${mode.width}x${mode.height}@${(mode.refresh_rate / 1000).toFixed(3)}"\n`;
-            }
-            if (output.logical) {
-                kdlContent += `    scale ${output.logical.scale ?? 1.0}\n`;
-                if (output.logical.transform && output.logical.transform !== "Normal") {
-                    const transformMap = {
-                        "Normal": "normal",
-                        "90": "90",
-                        "180": "180",
-                        "270": "270",
-                        "Flipped": "flipped",
-                        "Flipped90": "flipped-90",
-                        "Flipped180": "flipped-180",
-                        "Flipped270": "flipped-270"
-                    };
-                    kdlContent += `    transform "${transformMap[output.logical.transform] || "normal"}"\n`;
-                }
-                if (output.logical.x !== undefined && output.logical.y !== undefined)
-                    kdlContent += `    position x=${output.logical.x} y=${output.logical.y}\n`;
-            }
-            if (settings.vrrOnDemand) {
-                kdlContent += `    variable-refresh-rate on-demand=true\n`;
-            } else if (output.vrr_enabled) {
-                kdlContent += `    variable-refresh-rate\n`;
-            }
-            if (settings.focusAtStartup)
-                kdlContent += `    focus-at-startup\n`;
-            if (settings.backdropColor)
-                kdlContent += `    backdrop-color "${settings.backdropColor}"\n`;
-            kdlContent += generateHotCornersBlock(settings);
-            kdlContent += generateLayoutBlock(settings);
-            kdlContent += `}\n\n`;
+    function confirmChanges(profileId) {
+        if (CompositorService.isAqueous) {
+            finishAqueousPreview(true);
+            return;
         }
-        return kdlContent;
-    }
-
-    function generateHotCornersBlock(settings) {
-        if (!settings.hotCorners)
-            return "";
-        const hc = settings.hotCorners;
-        if (hc.off)
-            return `    hot-corners {\n        off\n    }\n`;
-        const corners = hc.corners || [];
-        if (corners.length === 0)
-            return "";
-        let block = `    hot-corners {\n`;
-        for (const corner of corners)
-            block += `        ${corner}\n`;
-        block += `    }\n`;
-        return block;
-    }
-
-    function generateLayoutBlock(settings) {
-        if (!settings.layout)
-            return "";
-        const layout = settings.layout;
-        const hasSettings = layout.gaps !== undefined || layout.defaultColumnWidth || layout.presetColumnWidths || layout.alwaysCenterSingleColumn !== undefined;
-        if (!hasSettings)
-            return "";
-        let block = `    layout {\n`;
-        if (layout.gaps !== undefined)
-            block += `        gaps ${layout.gaps}\n`;
-        if (layout.defaultColumnWidth?.type === "proportion") {
-            const val = layout.defaultColumnWidth.value;
-            const formatted = Number.isInteger(val) ? val.toFixed(1) : val.toString();
-            block += `        default-column-width { proportion ${formatted}; }\n`;
-        }
-        if (layout.presetColumnWidths && layout.presetColumnWidths.length > 0) {
-            block += `        preset-column-widths {\n`;
-            for (const preset of layout.presetColumnWidths) {
-                if (preset.type === "proportion") {
-                    const val = preset.value;
-                    const formatted = Number.isInteger(val) ? val.toFixed(1) : val.toString();
-                    block += `            proportion ${formatted}\n`;
-                }
-            }
-            block += `        }\n`;
-        }
-        if (layout.alwaysCenterSingleColumn !== undefined)
-            block += layout.alwaysCenterSingleColumn ? `        always-center-single-column\n` : `        always-center-single-column false\n`;
-        block += `    }\n`;
-        return block;
-    }
-
-    function confirmChanges() {
         const outputConfigs = buildCurrentOutputConfigs();
         lastAppliedEntry = {
             outputs: outputConfigs
         };
 
         readMonitorsJson(data => {
-            const match = findConfigEntryByFingerprint(data, Object.keys(outputConfigs));
-            if (!match || !match.entry.name)
+            const match = profileId ? findConfigEntryById(data, profileId) : findConfigEntryByFingerprint(data, currentOutputSet, true);
+            if (!match)
                 return;
             data.configurations[match.index] = {
                 "id": match.entry.id,
-                "name": match.entry.name,
+                "name": match.entry.name || "",
                 "outputs": outputConfigs
             };
-            writeMonitorsJson(data, null);
+            writeMonitorsJson(data, success => {
+                if (!success || !profileId)
+                    return;
+                const updated = JSON.parse(JSON.stringify(validatedProfiles));
+                if (updated[profileId]) {
+                    updated[profileId].outputs = outputConfigs;
+                    validatedProfiles = updated;
+                    publishActiveProfileModes();
+                }
+            });
         });
 
         clearPendingChanges();
@@ -2002,23 +1862,24 @@ Singleton {
     }
 
     function revertChanges() {
+        if (CompositorService.isAqueous && aqueousPreview) {
+            finishAqueousPreview(false);
+            return;
+        }
         const hadFormatChange = originalDisplayNameMode !== "";
         const hadNiriChanges = originalNiriSettings !== null;
         const hadHyprlandChanges = originalHyprlandSettings !== null;
 
-        if (hadFormatChange) {
-            SettingsData.displayNameMode = originalDisplayNameMode;
-            SettingsData.saveSettings();
-        }
+        restoreDisplayNameMode();
 
         if (hadNiriChanges) {
-            SettingsData.niriOutputSettings = JSON.parse(JSON.stringify(originalNiriSettings));
-            SettingsData.saveSettings();
+            SessionData.niriOutputSettings = JSON.parse(JSON.stringify(originalNiriSettings));
+            SessionData.saveSettings();
         }
 
         if (hadHyprlandChanges) {
-            SettingsData.hyprlandOutputSettings = JSON.parse(JSON.stringify(originalHyprlandSettings));
-            SettingsData.saveSettings();
+            SessionData.hyprlandOutputSettings = JSON.parse(JSON.stringify(originalHyprlandSettings));
+            SessionData.saveSettings();
         }
 
         pendingHyprlandChanges = {};
@@ -2039,298 +1900,85 @@ Singleton {
         }
         backendWriteOutputsConfig(original);
         clearPendingChanges();
-        if (originalOutputs)
-            outputs = original;
+        // clearPendingChanges() resets originalOutputs, so restore the model from the snapshot.
+        outputs = original;
         changesReverted();
     }
 
     function getOutputBounds() {
-        if (!allOutputs || Object.keys(allOutputs).length === 0)
-            return {
-                "minX": 0,
-                "minY": 0,
-                "maxX": 1920,
-                "maxY": 1080,
-                "width": 1920,
-                "height": 1080
-            };
-
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
-        for (const name in allOutputs) {
-            const output = allOutputs[name];
-            if (!output.logical)
-                continue;
-            const x = output.logical.x;
-            const y = output.logical.y;
-            const size = getLogicalSize(output);
-            minX = Math.min(minX, x);
-            minY = Math.min(minY, y);
-            maxX = Math.max(maxX, x + size.w);
-            maxY = Math.max(maxY, y + size.h);
-        }
-
-        if (minX === Infinity)
-            return {
-                "minX": 0,
-                "minY": 0,
-                "maxX": 1920,
-                "maxY": 1080,
-                "width": 1920,
-                "height": 1080
-            };
-        return {
-            "minX": minX,
-            "minY": minY,
-            "maxX": maxX,
-            "maxY": maxY,
-            "width": maxX - minX,
-            "height": maxY - minY
-        };
-    }
-
-    function isRotated(transform) {
-        switch (transform) {
-        case "90":
-        case "270":
-        case "Flipped90":
-        case "Flipped270":
-            return true;
-        default:
-            return false;
-        }
+        return OutputModel.outputBounds(allOutputs, CompositorService.compositor);
     }
 
     function getPhysicalSize(output) {
-        if (!output)
-            return {
-                "w": 1920,
-                "h": 1080
-            };
-
-        let w = 1920, h = 1080;
-        if (output.modes && output.current_mode !== undefined) {
-            const mode = output.modes[output.current_mode];
-            if (mode) {
-                w = mode.width || 1920;
-                h = mode.height || 1080;
-            }
-        } else if (output.logical) {
-            const scale = output.logical.scale || 1.0;
-            w = Math.round((output.logical.width || 1920) * scale);
-            h = Math.round((output.logical.height || 1080) * scale);
-        }
-
-        if (output.logical && isRotated(output.logical.transform))
-            return {
-                "w": h,
-                "h": w
-            };
-        return {
-            "w": w,
-            "h": h
-        };
+        return OutputModel.physicalSize(output);
     }
 
     function getLogicalSize(output) {
-        if (!output)
-            return {
-                "w": 1920,
-                "h": 1080
-            };
+        return OutputModel.logicalSize(output, CompositorService.compositor);
+    }
 
-        const phys = getPhysicalSize(output);
-        const scale = output.logical?.scale || 1.0;
+    function isOutputDisabled(outputName) {
+        if (!outputs[outputName])
+            return false;
+        if (CompositorService.isHyprland)
+            return getHyprlandSetting(outputs[outputName], outputName, "disabled", false);
+        if (CompositorService.isNiri)
+            return getNiriSetting(outputs[outputName], outputName, "disabled", false);
+        return false;
+    }
 
+    function canvasLayout() {
+        const disabled = {};
+        for (const name in outputs) {
+            if (isOutputDisabled(name))
+                disabled[name] = true;
+        }
         return {
-            "w": Math.round(phys.w / scale),
-            "h": Math.round(phys.h / scale)
+            "outputs": outputs,
+            "disabled": disabled,
+            "compositor": CompositorService.compositor
         };
     }
 
     function checkOverlap(testName, testX, testY, testW, testH) {
-        for (const name in outputs) {
-            if (name === testName)
-                continue;
-            const output = outputs[name];
-            if (!output.logical)
-                continue;
-            const x = output.logical.x;
-            const y = output.logical.y;
-            const size = getLogicalSize(output);
-            if (!(testX + testW <= x || testX >= x + size.w || testY + testH <= y || testY >= y + size.h))
-                return true;
-        }
-        return false;
+        return OutputModel.checkOverlap(canvasLayout(), testName, testX, testY, testW, testH);
     }
 
     function snapToEdges(testName, posX, posY, testW, testH) {
-        const snapThreshold = 200;
-        let snappedX = posX;
-        let snappedY = posY;
-        let bestXDist = snapThreshold;
-        let bestYDist = snapThreshold;
-
-        for (const name in outputs) {
-            if (name === testName)
-                continue;
-            const output = outputs[name];
-            if (!output.logical)
-                continue;
-            const x = output.logical.x;
-            const y = output.logical.y;
-            const size = getLogicalSize(output);
-
-            const rightEdge = x + size.w;
-            const bottomEdge = y + size.h;
-            const testRight = posX + testW;
-            const testBottom = posY + testH;
-
-            const xSnaps = [
-                {
-                    "val": rightEdge,
-                    "dist": Math.abs(posX - rightEdge)
-                },
-                {
-                    "val": x - testW,
-                    "dist": Math.abs(testRight - x)
-                },
-                {
-                    "val": x,
-                    "dist": Math.abs(posX - x)
-                },
-                {
-                    "val": rightEdge - testW,
-                    "dist": Math.abs(testRight - rightEdge)
-                }
-            ];
-
-            const ySnaps = [
-                {
-                    "val": bottomEdge,
-                    "dist": Math.abs(posY - bottomEdge)
-                },
-                {
-                    "val": y - testH,
-                    "dist": Math.abs(testBottom - y)
-                },
-                {
-                    "val": y,
-                    "dist": Math.abs(posY - y)
-                },
-                {
-                    "val": bottomEdge - testH,
-                    "dist": Math.abs(testBottom - bottomEdge)
-                }
-            ];
-
-            for (const snap of xSnaps) {
-                if (snap.dist < bestXDist) {
-                    bestXDist = snap.dist;
-                    snappedX = snap.val;
-                }
-            }
-
-            for (const snap of ySnaps) {
-                if (snap.dist < bestYDist) {
-                    bestYDist = snap.dist;
-                    snappedY = snap.val;
-                }
-            }
-        }
-
-        if (checkOverlap(testName, snappedX, snappedY, testW, testH)) {
-            if (!checkOverlap(testName, snappedX, posY, testW, testH))
-                return Qt.point(snappedX, posY);
-            if (!checkOverlap(testName, posX, snappedY, testW, testH))
-                return Qt.point(posX, snappedY);
-            return Qt.point(posX, posY);
-        }
-        return Qt.point(snappedX, snappedY);
-    }
-
-    function findBestSnapPosition(testName, posX, posY, testW, testH) {
-        const outputNames = Object.keys(outputs).filter(n => n !== testName);
-
-        if (outputNames.length === 0)
-            return Qt.point(posX, posY);
-
-        let bestPos = null;
-        let bestDist = Infinity;
-
-        for (const name of outputNames) {
-            const output = outputs[name];
-            if (!output.logical)
-                continue;
-            const x = output.logical.x;
-            const y = output.logical.y;
-            const size = getLogicalSize(output);
-
-            const candidates = [
-                {
-                    "px": x + size.w,
-                    "py": y
-                },
-                {
-                    "px": x - testW,
-                    "py": y
-                },
-                {
-                    "px": x,
-                    "py": y + size.h
-                },
-                {
-                    "px": x,
-                    "py": y - testH
-                },
-                {
-                    "px": x + size.w,
-                    "py": y + size.h - testH
-                },
-                {
-                    "px": x - testW,
-                    "py": y + size.h - testH
-                },
-                {
-                    "px": x + size.w - testW,
-                    "py": y + size.h
-                },
-                {
-                    "px": x + size.w - testW,
-                    "py": y - testH
-                }
-            ];
-
-            for (const c of candidates) {
-                if (checkOverlap(testName, c.px, c.py, testW, testH))
-                    continue;
-                const dist = Math.hypot(c.px - posX, c.py - posY);
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestPos = Qt.point(c.px, c.py);
-                }
-            }
-        }
-
-        return bestPos || Qt.point(posX, posY);
+        const snapped = OutputModel.snapToEdges(canvasLayout(), testName, posX, posY, testW, testH);
+        return Qt.point(snapped.x, snapped.y);
     }
 
     function formatMode(mode) {
-        if (!mode)
-            return "";
-        return mode.width + "x" + mode.height + "@" + (mode.refresh_rate / 1000).toFixed(3);
+        return OutputModel.formatMode(mode);
+    }
+
+    function formatScaleLabel(scale) {
+        return OutputModel.formatScaleLabel(scale);
+    }
+
+    function getScalePresetValues(outputName, outputData) {
+        return OutputModel.scalePresetValues(outputData, getPendingValue(outputName, "mode"), CompositorService.compositor);
+    }
+
+    function snapScale(outputName, outputData, scale) {
+        return OutputModel.snapScaleToMode(outputData, getPendingValue(outputName, "mode"), CompositorService.compositor, scale);
+    }
+
+    function formatScaleOption(outputName, outputData, scale) {
+        return OutputModel.formatScaleOption(outputData, getPendingValue(outputName, "mode"), scale);
     }
 
     function getTransformLabel(transform) {
         switch (transform) {
         case "Normal":
-            return I18n.tr("Normal");
+            return I18n.tr("Normal", "display rotation option", true);
         case "90":
-            return I18n.tr("90°");
+            return "90°";
         case "180":
-            return I18n.tr("180°");
+            return "180°";
         case "270":
-            return I18n.tr("270°");
+            return "270°";
         case "Flipped":
             return I18n.tr("Flipped");
         case "Flipped90":
@@ -2340,18 +1988,18 @@ Singleton {
         case "Flipped270":
             return I18n.tr("Flipped 270°");
         default:
-            return I18n.tr("Normal");
+            return I18n.tr("Normal", "display rotation option", true);
         }
     }
 
     function getTransformValue(label) {
-        if (label === I18n.tr("Normal"))
+        if (label === I18n.tr("Normal", "display rotation option", true))
             return "Normal";
-        if (label === I18n.tr("90°"))
+        if (label === "90°")
             return "90";
-        if (label === I18n.tr("180°"))
+        if (label === "180°")
             return "180";
-        if (label === I18n.tr("270°"))
+        if (label === "270°")
             return "270";
         if (label === I18n.tr("Flipped"))
             return "Flipped";

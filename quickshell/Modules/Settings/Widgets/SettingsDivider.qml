@@ -1,11 +1,12 @@
-pragma ComponentBehavior: Bound
-
 import QtQuick
 import qs.Common
 
 Rectangle {
-    width: parent?.width ?? 0
-    height: 1
-    color: Theme.outline
-    opacity: 0.15
+    property bool vertical: false
+
+    width: vertical ? Theme.dividerWidth : parent?.width ?? 0
+    height: vertical ? SettingsMetrics.splitDividerHeight : Theme.dividerWidth
+    color: Theme.outlineVariant
+    visible: !(parent?.isSettingsGroupHost ?? false)
+    anchors.verticalCenter: vertical ? parent?.verticalCenter : undefined
 }

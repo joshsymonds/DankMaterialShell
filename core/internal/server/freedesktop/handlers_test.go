@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
-	mockdbus "github.com/AvengeMedia/DankMaterialShell/core/internal/mocks/github.com/godbus/dbus/v5"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server/models"
+	"github.com/duxlabs-dev/dux-go/ipc"
+	mockdbus "github.com/duxlabs-dev/dux-shell/core/internal/mocks/github.com/godbus/dbus/v5"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/models"
 	"github.com/godbus/dbus/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -42,6 +46,8 @@ func (m *mockNetConn) Close() error {
 	return nil
 }
 
+func (m *mockNetConn) SetWriteDeadline(t time.Time) error { return nil }
+
 func mockGetAllAccountsProperties() *dbus.Call {
 	props := map[string]dbus.Variant{
 		"IconFile":      dbus.MakeVariant("/path/to/icon.png"),
@@ -57,35 +63,6 @@ func mockGetAllAccountsProperties() *dbus.Call {
 		"PasswordMode":  dbus.MakeVariant(int32(1)),
 	}
 	return &dbus.Call{Err: nil, Body: []any{props}}
-}
-
-func TestRespondError_Freedesktop(t *testing.T) {
-	conn := newMockNetConn()
-	models.RespondError(conn, 123, "test error")
-
-	var resp models.Response[any]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-	require.NoError(t, err)
-
-	assert.Equal(t, 123, resp.ID)
-	assert.Equal(t, "test error", resp.Error)
-	assert.Nil(t, resp.Result)
-}
-
-func TestRespond_Freedesktop(t *testing.T) {
-	conn := newMockNetConn()
-	result := models.SuccessResult{Success: true, Message: "test"}
-	models.Respond(conn, 123, result)
-
-	var resp models.Response[models.SuccessResult]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-	require.NoError(t, err)
-
-	assert.Equal(t, 123, resp.ID)
-	assert.Empty(t, resp.Error)
-	require.NotNil(t, resp.Result)
-	assert.True(t, resp.Result.Success)
-	assert.Equal(t, "test", resp.Result.Message)
 }
 
 func TestHandleGetState(t *testing.T) {
@@ -105,13 +82,14 @@ func TestHandleGetState(t *testing.T) {
 		stateMutex: sync.RWMutex{},
 	}
 
-	conn := newMockNetConn()
-	req := models.Request{ID: 123, Method: "freedesktop.getState"}
+	mc := newMockNetConn()
+	conn := ipc.NewConnWriter(mc)
+	req := ipc.Request{ID: 123, Method: "freedesktop.getState"}
 
 	handleGetState(conn, req, manager)
 
-	var resp models.Response[FreedeskState]
-	err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+	var resp ipc.Response[FreedeskState]
+	err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 	require.NoError(t, err)
 
 	assert.Equal(t, 123, resp.ID)
@@ -130,8 +108,9 @@ func TestHandleSetIconFile(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setIconFile",
 			Params: map[string]any{},
@@ -139,8 +118,8 @@ func TestHandleSetIconFile(t *testing.T) {
 
 		handleSetIconFile(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -148,9 +127,19 @@ func TestHandleSetIconFile(t *testing.T) {
 	})
 
 	t.Run("successful set icon file", func(t *testing.T) {
+		iconPath := filepath.Join(t.TempDir(), "icon.png")
+		require.NoError(t, os.WriteFile(iconPath, []byte("image-bytes"), 0o600))
+
 		mockAccountsObj := mockdbus.NewMockBusObject(t)
 		mockCall := &dbus.Call{Err: nil}
-		mockAccountsObj.EXPECT().Call("org.freedesktop.Accounts.User.SetIconFile", dbus.Flags(0), "/path/to/icon.png").Return(mockCall)
+		stagedCopy := mock.MatchedBy(func(path string) bool {
+			if path == iconPath {
+				return false
+			}
+			data, err := os.ReadFile(path)
+			return err == nil && string(data) == "image-bytes"
+		})
+		mockAccountsObj.EXPECT().Call("org.freedesktop.Accounts.User.SetIconFile", dbus.Flags(0), stagedCopy).Return(mockCall)
 		mockAccountsObj.EXPECT().CallWithContext(mock.Anything, "org.freedesktop.DBus.Properties.GetAll", dbus.Flags(0), "org.freedesktop.Accounts.User").Return(mockGetAllAccountsProperties())
 
 		manager := &Manager{
@@ -163,19 +152,20 @@ func TestHandleSetIconFile(t *testing.T) {
 			accountsObj: mockAccountsObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setIconFile",
 			Params: map[string]any{
-				"path": "/path/to/icon.png",
+				"path": iconPath,
 			},
 		}
 
 		handleSetIconFile(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -195,8 +185,9 @@ func TestHandleSetIconFile(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setIconFile",
 			Params: map[string]any{
@@ -206,8 +197,8 @@ func TestHandleSetIconFile(t *testing.T) {
 
 		handleSetIconFile(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -222,8 +213,9 @@ func TestHandleSetRealName(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setRealName",
 			Params: map[string]any{},
@@ -231,8 +223,8 @@ func TestHandleSetRealName(t *testing.T) {
 
 		handleSetRealName(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -255,8 +247,9 @@ func TestHandleSetRealName(t *testing.T) {
 			accountsObj: mockAccountsObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setRealName",
 			Params: map[string]any{
@@ -266,8 +259,8 @@ func TestHandleSetRealName(t *testing.T) {
 
 		handleSetRealName(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -285,8 +278,9 @@ func TestHandleSetEmail(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setEmail",
 			Params: map[string]any{},
@@ -294,8 +288,8 @@ func TestHandleSetEmail(t *testing.T) {
 
 		handleSetEmail(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -318,8 +312,9 @@ func TestHandleSetEmail(t *testing.T) {
 			accountsObj: mockAccountsObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setEmail",
 			Params: map[string]any{
@@ -329,8 +324,8 @@ func TestHandleSetEmail(t *testing.T) {
 
 		handleSetEmail(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -348,8 +343,9 @@ func TestHandleSetLanguage(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setLanguage",
 			Params: map[string]any{},
@@ -357,8 +353,8 @@ func TestHandleSetLanguage(t *testing.T) {
 
 		handleSetLanguage(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -373,8 +369,9 @@ func TestHandleSetLocation(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.setLocation",
 			Params: map[string]any{},
@@ -382,8 +379,8 @@ func TestHandleSetLocation(t *testing.T) {
 
 		handleSetLocation(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -398,8 +395,9 @@ func TestHandleGetUserIconFile(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.getUserIconFile",
 			Params: map[string]any{},
@@ -407,8 +405,8 @@ func TestHandleGetUserIconFile(t *testing.T) {
 
 		handleGetUserIconFile(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -425,8 +423,9 @@ func TestHandleGetUserIconFile(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.accounts.getUserIconFile",
 			Params: map[string]any{
@@ -436,8 +435,8 @@ func TestHandleGetUserIconFile(t *testing.T) {
 
 		handleGetUserIconFile(conn, req, manager)
 
-		var resp models.Response[models.SuccessResult]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[models.SuccessResult]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -456,13 +455,14 @@ func TestHandleGetColorScheme(t *testing.T) {
 			stateMutex: sync.RWMutex{},
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "freedesktop.settings.getColorScheme"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "freedesktop.settings.getColorScheme"}
 
 		handleGetColorScheme(conn, req, manager)
 
-		var resp models.Response[map[string]uint32]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[map[string]uint32]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -487,13 +487,14 @@ func TestHandleGetColorScheme(t *testing.T) {
 			settingsObj: mockSettingsObj,
 		}
 
-		conn := newMockNetConn()
-		req := models.Request{ID: 123, Method: "freedesktop.settings.getColorScheme"}
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{ID: 123, Method: "freedesktop.settings.getColorScheme"}
 
 		handleGetColorScheme(conn, req, manager)
 
-		var resp models.Response[map[string]uint32]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[map[string]uint32]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -515,16 +516,17 @@ func TestHandleRequest(t *testing.T) {
 	}
 
 	t.Run("unknown method", func(t *testing.T) {
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.unknown",
 		}
 
 		HandleRequest(conn, req, manager)
 
-		var resp models.Response[any]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[any]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
@@ -532,50 +534,20 @@ func TestHandleRequest(t *testing.T) {
 	})
 
 	t.Run("valid method - getState", func(t *testing.T) {
-		conn := newMockNetConn()
-		req := models.Request{
+		mc := newMockNetConn()
+		conn := ipc.NewConnWriter(mc)
+		req := ipc.Request{
 			ID:     123,
 			Method: "freedesktop.getState",
 		}
 
 		HandleRequest(conn, req, manager)
 
-		var resp models.Response[FreedeskState]
-		err := json.NewDecoder(conn.writeBuf).Decode(&resp)
+		var resp ipc.Response[FreedeskState]
+		err := json.NewDecoder(mc.writeBuf).Decode(&resp)
 		require.NoError(t, err)
 
 		assert.Equal(t, 123, resp.ID)
 		assert.Empty(t, resp.Error)
-	})
-
-	t.Run("all method routes", func(t *testing.T) {
-		tests := []string{
-			"freedesktop.accounts.setIconFile",
-			"freedesktop.accounts.setRealName",
-			"freedesktop.accounts.setEmail",
-			"freedesktop.accounts.setLanguage",
-			"freedesktop.accounts.setLocation",
-			"freedesktop.accounts.getUserIconFile",
-			"freedesktop.settings.getColorScheme",
-		}
-
-		for _, method := range tests {
-			conn := newMockNetConn()
-			req := models.Request{
-				ID:     123,
-				Method: method,
-				Params: map[string]any{},
-			}
-
-			HandleRequest(conn, req, manager)
-
-			var resp models.Response[any]
-			err := json.NewDecoder(conn.writeBuf).Decode(&resp)
-			require.NoError(t, err)
-
-			assert.Equal(t, 123, resp.ID)
-			// Will have errors due to missing params or service unavailable
-			// but the method routing should work
-		}
 	})
 }

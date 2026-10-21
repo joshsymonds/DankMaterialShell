@@ -72,7 +72,6 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
-          - govet
           - unused
           - ineffassign
           - staticcheck
@@ -93,14 +92,14 @@ linters:
       - linters:
           - errcheck
         text: "Error return value of `.+\\.AddMatchSignal` is not checked"
-      # Exclude wayland pkg from errcheck and ineffassign (generated code patterns)
-      - linters:
-          - errcheck
-          - ineffassign
-        path: pkg/go-wayland/
       # Exclude proto pkg from ineffassign (generated protocol code)
       - linters:
           - ineffassign
+        path: internal/proto/
+      # Exclude proto pkg SA4006 (generated protocol code has trailing dead offset increments)
+      - linters:
+          - staticcheck
+        text: "SA4006:"
         path: internal/proto/
       # binary.Write/Read to bytes.Buffer can't fail
       - linters:

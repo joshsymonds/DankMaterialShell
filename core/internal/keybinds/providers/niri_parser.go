@@ -2,6 +2,7 @@ package providers
 
 import (
 	"fmt"
+	"github.com/duxlabs-dev/dux-shell/core/internal/configfrag"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,6 +34,8 @@ type NiriSection struct {
 
 type NiriParser struct {
 	configDir          string
+	modKey             string
+	modKeyNested       string
 	processedFiles     map[string]bool
 	bindMap            map[string]*NiriKeyBinding
 	bindOrder          []string
@@ -51,7 +54,7 @@ type NiriParser struct {
 }
 
 func parseKDL(data []byte) (*document.Document, error) {
-	return kdl.Parse(strings.NewReader(normalizeKDLBraces(string(data))))
+	return kdl.Parse(strings.NewReader(normalizeKDLBraces(quoteLeadingUnderscoreIdents(string(data)))))
 }
 
 func normalizeKDLBraces(input string) string {
@@ -92,6 +95,93 @@ func normalizeKDLBraces(input string) string {
 	}
 
 	return sb.String()
+}
+
+// quoteLeadingUnderscoreIdents wraps bare KDL identifiers that begin with '_'
+// in double quotes. kdl-go rejects '_' as the first character of a bare
+// identifier (e.g. the common `_JAVA_AWT_WM_NONREPARENTING "1"` environment
+// node), even though niri's own parser and the KDL spec accept it — so without
+// this the whole config fails to parse and no keybinds load. Quoting lets
+// kdl-go parse it; this is safe because the niri parser only dispatches on
+// fixed node/section names (binds, recent-windows, include, ...) that never
+// start with '_', so re-quoting such a name cannot change what DMS reads.
+// Underscores elsewhere in an identifier (XDG_CURRENT_DESKTOP) are left
+// untouched, and underscores inside strings or comments are skipped. Only a
+// leading '_' is handled; other start characters kdl-go over-rejects (e.g. '.'
+// or '?') do not occur in niri configs.
+func quoteLeadingUnderscoreIdents(input string) string {
+	var sb strings.Builder
+	sb.Grow(len(input))
+
+	var prev byte
+	n := len(input)
+	for i := 0; i < n; {
+		c := input[i]
+
+		switch {
+		case c == '"':
+			end := findStringEnd(input, i)
+			sb.WriteString(input[i:end])
+			prev = '"'
+			i = end
+		case c == '/' && i+1 < n && input[i+1] == '/':
+			end := findLineCommentEnd(input, i)
+			sb.WriteString(input[i:end])
+			prev = '\n'
+			i = end
+		case c == '/' && i+1 < n && input[i+1] == '*':
+			end := findBlockCommentEnd(input, i)
+			sb.WriteString(input[i:end])
+			prev = ' '
+			i = end
+		case c == '/' && i+1 < n && input[i+1] == '-':
+			// KDL slashdash: /- comments out the next node/value. Keep the
+			// marker but treat what follows as a fresh token start, so a
+			// slashdashed leading-underscore node (e.g. `/-_FOO "1"`) still
+			// gets quoted instead of crashing kdl-go.
+			sb.WriteByte('/')
+			sb.WriteByte('-')
+			prev = ' '
+			i += 2
+		case c == '_' && isIdentBoundary(prev):
+			end := scanBareIdent(input, i)
+			sb.WriteByte('"')
+			sb.WriteString(input[i:end])
+			sb.WriteByte('"')
+			prev = '"'
+			i = end
+		default:
+			sb.WriteByte(c)
+			prev = c
+			i++
+		}
+	}
+
+	return sb.String()
+}
+
+// isIdentBoundary reports whether the previously emitted byte ends a token, so
+// that a following '_' starts a fresh bare identifier rather than sitting in
+// the middle of one.
+func isIdentBoundary(prev byte) bool {
+	switch prev {
+	case 0, ' ', '\t', '\n', '\r', '{', '}', ';', '=', '(', ')', ',':
+		return true
+	}
+	return false
+}
+
+// scanBareIdent returns the index just past the bare identifier starting at
+// start, stopping at whitespace or any KDL delimiter.
+func scanBareIdent(s string, start int) int {
+	n := len(s)
+	for i := start; i < n; i++ {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r', '"', '{', '}', '(', ')', ';', '=', ',', '/', '\\', '<', '>', '[', ']':
+			return i
+		}
+	}
+	return n
 }
 
 func findStringEnd(s string, start int) int {
@@ -162,6 +252,14 @@ func NewNiriParser(configDir string) *NiriParser {
 	}
 }
 
+func normalizeNiriBindKey(key string) string {
+	parts := strings.Split(key, "+")
+	for i := range parts {
+		parts[i] = strings.ToLower(strings.TrimSpace(parts[i]))
+	}
+	return strings.Join(parts, "+")
+}
+
 func (p *NiriParser) Parse() (*NiriSection, error) {
 	dmsBindsPath := filepath.Join(p.configDir, "dms", "binds.kdl")
 	if _, err := os.Stat(dmsBindsPath); err == nil {
@@ -213,24 +311,25 @@ func (p *NiriParser) finalizeBinds() []NiriKeyBinding {
 
 func (p *NiriParser) addBind(kb *NiriKeyBinding) {
 	key := p.formatBindKey(kb)
+	normalizedKey := normalizeNiriBindKey(key)
 	isDMSBind := strings.Contains(kb.Source, "dms/binds.kdl")
 
 	if isDMSBind {
-		p.dmsBindKeys[key] = true
-		p.dmsBindMap[key] = kb
-	} else if p.dmsBindKeys[key] {
+		p.dmsBindKeys[normalizedKey] = true
+		p.dmsBindMap[normalizedKey] = kb
+	} else if p.dmsBindKeys[normalizedKey] {
 		p.bindsAfterDMS++
-		p.conflictingConfigs[key] = kb
-		p.configBindKeys[key] = true
+		p.conflictingConfigs[normalizedKey] = kb
+		p.configBindKeys[normalizedKey] = true
 		return
 	} else {
-		p.configBindKeys[key] = true
+		p.configBindKeys[normalizedKey] = true
 	}
 
-	if _, exists := p.bindMap[key]; !exists {
-		p.bindOrder = append(p.bindOrder, key)
+	if _, exists := p.bindMap[normalizedKey]; !exists {
+		p.bindOrder = append(p.bindOrder, normalizedKey)
 	}
-	p.bindMap[key] = kb
+	p.bindMap[normalizedKey] = kb
 }
 
 func (p *NiriParser) formatBindKey(kb *NiriKeyBinding) string {
@@ -281,10 +380,30 @@ func (p *NiriParser) processNodes(nodes []*document.Node, section *NiriSection, 
 		switch name {
 		case "include":
 			p.handleInclude(node, section, baseDir)
+		case "input":
+			p.handleInput(node)
 		case "binds":
-			p.extractBinds(node, section, "")
+			p.extractBinds(node, "")
 		case "recent-windows":
-			p.handleRecentWindows(node, section)
+			p.handleRecentWindows(node)
+		}
+	}
+}
+
+func (p *NiriParser) handleInput(node *document.Node) {
+	for _, child := range node.Children {
+		if len(child.Arguments) == 0 {
+			continue
+		}
+		value := strings.Trim(strings.TrimSpace(child.Arguments[0].String()), "\"")
+		if value == "" {
+			continue
+		}
+		switch child.Name.String() {
+		case "mod-key":
+			p.modKey = value
+		case "mod-key-nested":
+			p.modKeyNested = value
 		}
 	}
 }
@@ -295,21 +414,17 @@ func (p *NiriParser) handleInclude(node *document.Node, section *NiriSection, ba
 	}
 
 	includePath := strings.Trim(node.Arguments[0].String(), "\"")
-	isDMSInclude := includePath == "dms/binds.kdl" || strings.HasSuffix(includePath, "/dms/binds.kdl")
+	fullPath := filepath.Join(baseDir, includePath)
+	if filepath.IsAbs(includePath) {
+		fullPath = includePath
+	}
+	isDMSInclude := strings.HasSuffix(fullPath, "/dms/binds.kdl")
 
 	p.includeCount++
 	if isDMSInclude {
 		p.dmsBindsIncluded = true
 		p.dmsIncludePos = p.includeCount
 		p.bindsBeforeDMS = len(p.bindMap)
-	}
-
-	fullPath := filepath.Join(baseDir, includePath)
-	if filepath.IsAbs(includePath) {
-		fullPath = includePath
-	}
-
-	if isDMSInclude {
 		p.dmsProcessed = true
 	}
 
@@ -325,7 +440,7 @@ func (p *NiriParser) HasDMSBindsIncluded() bool {
 	return p.dmsBindsIncluded
 }
 
-func (p *NiriParser) handleRecentWindows(node *document.Node, section *NiriSection) {
+func (p *NiriParser) handleRecentWindows(node *document.Node) {
 	if node.Children == nil {
 		return
 	}
@@ -334,11 +449,11 @@ func (p *NiriParser) handleRecentWindows(node *document.Node, section *NiriSecti
 		if child.Name.String() != "binds" {
 			continue
 		}
-		p.extractBinds(child, section, "Alt-Tab")
+		p.extractBinds(child, "Alt-Tab")
 	}
 }
 
-func (p *NiriParser) extractBinds(node *document.Node, section *NiriSection, subcategory string) {
+func (p *NiriParser) extractBinds(node *document.Node, subcategory string) {
 	if node.Children == nil {
 		return
 	}
@@ -369,7 +484,7 @@ func (p *NiriParser) parseKeybindNode(node *document.Node, _ string) *NiriKeyBin
 			args = append(args, arg.ValueString())
 		}
 		if actionNode.Properties != nil {
-			for _, propName := range []string{"focus", "show-pointer", "write-to-disk", "skip-confirmation", "delay-ms"} {
+			for _, propName := range []string{"focus", "show-pointer", "write-to-disk", "skip-confirmation", "delay-ms", "filter", "scope"} {
 				if val, ok := actionNode.Properties.Get(propName); ok {
 					args = append(args, propName+"="+val.String())
 				}
@@ -438,48 +553,24 @@ func (p *NiriParser) parseKeyCombo(combo string) ([]string, string) {
 
 type NiriParseResult struct {
 	Section            *NiriSection
+	ModKey             string
+	ModKeyNested       string
 	DMSBindsIncluded   bool
-	DMSStatus          *DMSBindsStatusInfo
+	DMSStatus          *configfrag.Status
 	ConflictingConfigs map[string]*NiriKeyBinding
 }
 
-type DMSBindsStatusInfo struct {
-	Exists          bool
-	Included        bool
-	IncludePosition int
-	TotalIncludes   int
-	BindsAfterDMS   int
-	Effective       bool
-	OverriddenBy    int
-	StatusMessage   string
+var niriBindsMessages = configfrag.Messages{
+	Missing:     "dms/binds.kdl does not exist",
+	NotIncluded: "dms/binds.kdl is not included in config.kdl",
+	Overridden:  "Some DMS binds may be overridden by config binds",
+	Active:      "DMS binds are active",
 }
 
-func (p *NiriParser) buildDMSStatus() *DMSBindsStatusInfo {
-	status := &DMSBindsStatusInfo{
-		Exists:          p.dmsBindsExists,
-		Included:        p.dmsBindsIncluded,
-		IncludePosition: p.dmsIncludePos,
-		TotalIncludes:   p.includeCount,
-		BindsAfterDMS:   p.bindsAfterDMS,
-	}
-
-	switch {
-	case !p.dmsBindsExists:
-		status.Effective = false
-		status.StatusMessage = "dms/binds.kdl does not exist"
-	case !p.dmsBindsIncluded:
-		status.Effective = false
-		status.StatusMessage = "dms/binds.kdl is not included in config.kdl"
-	case p.bindsAfterDMS > 0:
-		status.Effective = true
-		status.OverriddenBy = p.bindsAfterDMS
-		status.StatusMessage = "Some DMS binds may be overridden by config binds"
-	default:
-		status.Effective = true
-		status.StatusMessage = "DMS binds are active"
-	}
-
-	return status
+func (p *NiriParser) buildDMSStatus() *configfrag.Status {
+	scan := configfrag.IncludeScan{Count: p.includeCount, DMSPosition: p.dmsIncludePos, DMSSeen: p.dmsBindsIncluded}
+	status := configfrag.BuildStatus(scan, p.dmsBindsExists, p.bindsAfterDMS, "", false, niriBindsMessages)
+	return &status
 }
 
 func ParseNiriKeys(configDir string) (*NiriParseResult, error) {
@@ -490,6 +581,8 @@ func ParseNiriKeys(configDir string) (*NiriParseResult, error) {
 	}
 	return &NiriParseResult{
 		Section:            section,
+		ModKey:             parser.modKey,
+		ModKeyNested:       parser.modKeyNested,
 		DMSBindsIncluded:   parser.HasDMSBindsIncluded(),
 		DMSStatus:          parser.buildDMSStatus(),
 		ConflictingConfigs: parser.conflictingConfigs,

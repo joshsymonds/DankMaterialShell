@@ -1,163 +1,104 @@
-pragma ComponentBehavior: Bound
-
 import QtQuick
 import qs.Common
-import qs.Widgets
 import qs.Modules.Settings.Widgets
 
-Column {
+DesktopWidgetInstanceSettings {
     id: root
 
-    property string instanceId: ""
-    property var instanceData: null
-
-    readonly property var cfg: instanceData?.config ?? {}
-
-    function updateConfig(key, value) {
-        if (!instanceId)
-            return;
-        var updates = {};
-        updates[key] = value;
-        SettingsData.updateDesktopWidgetInstanceConfig(instanceId, updates);
-    }
-
-    width: parent?.width ?? 400
-    spacing: 0
+    readonly property var styles: ["digital", "analog", "stacked", "expressive", "overlap"]
+    readonly property var styleLabels: [I18n.tr("Digital"), I18n.tr("Analog"), I18n.tr("Stacked", "desktop clock style option"), I18n.tr("Expressive"), I18n.tr("Overlapping", "clock style with overlapping digit rows")]
+    readonly property string style: cfg.style ?? "analog"
+    readonly property bool analog: style === "analog"
+    readonly property bool overlap: style === "overlap"
 
     SettingsDropdownRow {
-        text: I18n.tr("Clock Style")
-        options: [I18n.tr("Digital"), I18n.tr("Analog"), I18n.tr("Stacked")]
-        currentValue: {
-            switch (cfg.style) {
-            case "analog":
-                return I18n.tr("Analog");
-            case "stacked":
-                return I18n.tr("Stacked");
-            default:
-                return I18n.tr("Digital");
-            }
-        }
+        text: I18n.tr("Clock style")
+        options: root.styleLabels
+        currentValue: root.styleLabels[Math.max(0, root.styles.indexOf(root.style))]
         onValueChanged: value => {
-            switch (value) {
-            case I18n.tr("Analog"):
-                root.updateConfig("style", "analog");
-                return;
-            case I18n.tr("Stacked"):
-                root.updateConfig("style", "stacked");
-                return;
-            default:
-                root.updateConfig("style", "digital");
-            }
+            const index = root.styleLabels.indexOf(value);
+            if (index >= 0)
+                root.updateConfig("style", root.styles[index]);
         }
     }
 
-    SettingsDivider {
-        visible: cfg.style === "analog"
+    SettingsFontDropdownRow {
+        visible: !root.analog
+        text: I18n.tr("Font")
+        currentFont: root.cfg.fontFamily ?? ""
+        defaultFamily: (root.lockScreenInstance ? SettingsData.lockScreenFontFamily : SettingsData.fontFamily) || Theme.defaultFontFamily
+        onFontSelected: family => root.updateConfig("fontFamily", family)
+    }
+
+    SettingsSliderRow {
+        visible: !root.analog
+        text: I18n.tr("Weight")
+        minimum: 0
+        maximum: 900
+        step: 100
+        minimumLabel: I18n.tr("Default")
+        value: root.cfg.weight ?? 0
+        onSliderValueChanged: newValue => root.updateConfig("weight", newValue)
     }
 
     SettingsToggleRow {
-        visible: cfg.style === "analog"
-        text: I18n.tr("Show Hour Numbers")
-        checked: cfg.showAnalogNumbers ?? false
+        visible: root.style === "expressive"
+        text: I18n.tr("Rounded")
+        checked: root.cfg.rounded ?? true
+        onToggled: checked => root.updateConfig("rounded", checked)
+    }
+
+    SettingsToggleRow {
+        visible: root.style === "digital"
+        text: I18n.tr("Italic", "clock font style toggle")
+        checked: root.cfg.italic ?? false
+        onToggled: checked => root.updateConfig("italic", checked)
+    }
+
+    SettingsToggleRow {
+        visible: !root.analog && !root.overlap
+        text: I18n.tr("Accent minutes", "lock screen clock colors")
+        checked: root.cfg.twoTone ?? root.lockScreenInstance
+        onToggled: checked => root.updateConfig("twoTone", checked)
+    }
+
+    SettingsToggleRow {
+        visible: root.analog
+        text: I18n.tr("Show hour numbers")
+        checked: root.cfg.showAnalogNumbers ?? false
         onToggled: checked => root.updateConfig("showAnalogNumbers", checked)
     }
 
-    SettingsDivider {
-        visible: cfg.style === "analog"
-    }
-
     SettingsToggleRow {
-        visible: cfg.style === "analog"
-        text: I18n.tr("Show Seconds")
-        checked: cfg.showAnalogSeconds ?? true
+        visible: root.analog
+        text: I18n.tr("Show seconds")
+        checked: root.cfg.showAnalogSeconds ?? true
         onToggled: checked => root.updateConfig("showAnalogSeconds", checked)
     }
 
-    SettingsDivider {
-        visible: cfg.style === "digital" || cfg.style === "stacked"
-    }
-
     SettingsToggleRow {
-        visible: cfg.style === "digital" || cfg.style === "stacked"
-        text: I18n.tr("Show Seconds")
-        checked: cfg.showDigitalSeconds ?? false
+        visible: !root.analog && !root.overlap
+        text: I18n.tr("Show seconds")
+        checked: root.cfg.showDigitalSeconds ?? false
         onToggled: checked => root.updateConfig("showDigitalSeconds", checked)
     }
 
-    SettingsDivider {}
-
     SettingsToggleRow {
-        text: I18n.tr("Show Date")
-        checked: cfg.showDate ?? true
+        visible: !root.overlap
+        text: I18n.tr("Show date")
+        checked: root.cfg.showDate ?? !root.lockScreenInstance
         onToggled: checked => root.updateConfig("showDate", checked)
     }
 
-    SettingsDivider {}
-
-    SettingsSliderRow {
-        text: I18n.tr("Transparency")
-        minimum: 0
-        maximum: 100
-        value: Math.round((cfg.transparency ?? 0.8) * 100)
-        unit: "%"
-        onSliderValueChanged: newValue => root.updateConfig("transparency", newValue / 100)
-    }
-
-    SettingsDivider {}
-
-    SettingsColorPicker {
-        colorMode: cfg.colorMode ?? "primary"
-        customColor: cfg.customColor ?? "#ffffff"
-        onColorModeSelected: mode => root.updateConfig("colorMode", mode)
-        onCustomColorSelected: selectedColor => root.updateConfig("customColor", selectedColor.toString())
-    }
-
-    SettingsDivider {}
-
-    SettingsDisplayPicker {
-        displayPreferences: cfg.displayPreferences ?? ["all"]
-        onPreferencesChanged: prefs => root.updateConfig("displayPreferences", prefs)
-    }
-
-    SettingsDivider {}
-
-    Item {
-        width: parent.width
-        height: resetRow.height + Theme.spacingM * 2
-
-        Row {
-            id: resetRow
-            x: Theme.spacingM
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Theme.spacingM
-
-            DankButton {
-                text: I18n.tr("Reset Position")
-                backgroundColor: Theme.surfaceHover
-                textColor: Theme.surfaceText
-                buttonHeight: 36
-                onClicked: {
-                    if (!root.instanceId)
-                        return;
-                    SettingsData.updateDesktopWidgetInstance(root.instanceId, {
-                        positions: {}
-                    });
-                }
-            }
-
-            DankButton {
-                text: I18n.tr("Reset Size")
-                backgroundColor: Theme.surfaceHover
-                textColor: Theme.surfaceText
-                buttonHeight: 36
-                onClicked: {
-                    if (!root.instanceId)
-                        return;
-                    SettingsData.updateDesktopWidgetInstance(root.instanceId, {
-                        positions: {}
-                    });
-                }
-            }
+    SettingsToggleRow {
+        visible: root.lockScreenInstance
+        text: I18n.tr("Automatic placement", "lock screen clock placement")
+        description: I18n.tr("Choose a clear area of the background. Drag the clock to place it yourself.", "lock screen automatic clock placement")
+        checked: root.cfg.autoPosition ?? true
+        onToggled: checked => {
+            if (checked)
+                SessionData.resetDesktopWidgetInstanceGeometry(root.instanceId, ["x", "y"]);
+            root.updateConfig("autoPosition", checked);
         }
     }
 }

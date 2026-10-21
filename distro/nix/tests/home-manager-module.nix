@@ -6,8 +6,8 @@
 let
   homeManagerNixosModule =
     (fetchTarball {
-      url = "https://github.com/nix-community/home-manager/archive/e82d4a4ecd18363aa2054cbaa3e32e4134c3dbf4.tar.gz";
-      sha256 = "sha256-ZTYDofOM3/PJhRF1EuBh6uibm+DmkhU7Wor6mMN7YTc=";
+      url = "https://github.com/nix-community/home-manager/archive/53ebbdc405acc04acd9bb73ccca462b51ddb8c6d.tar.gz";
+      sha256 = "1cqmfgwb3jac2zzv82bwvgypxff1z30xkz9j6qcinkmqf58j3k3b";
     })
     + "/nixos";
 in
@@ -85,16 +85,16 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
 
     machine.succeed("su -- danklinux -c 'command -v dms'")
-    machine.succeed("su -- danklinux -c 'test -f ~/.config/DankMaterialShell/settings.json'")
-    machine.succeed("su -- danklinux -c 'test -f ~/.config/DankMaterialShell/clsettings.json'")
-    machine.succeed("su -- danklinux -c 'test -f ~/.config/DankMaterialShell/plugin_settings.json'")
-    machine.succeed("su -- danklinux -c 'test -e ~/.config/DankMaterialShell/plugins/TestPlugin'")
-    machine.succeed("su -- danklinux -c 'test -f ~/.local/state/DankMaterialShell/session.json'")
+    machine.succeed("su -- danklinux -c 'test -f ~/.config/dms/settings.json'")
+    machine.succeed("su -- danklinux -c 'test -f ~/.config/dms/clsettings.json'")
+    machine.succeed("su -- danklinux -c 'test -f ~/.config/dms/plugin_settings.json'")
+    machine.succeed("su -- danklinux -c 'test -e ~/.config/dms/plugins/TestPlugin'")
+    machine.succeed("su -- danklinux -c 'test -f ~/.local/state/dms/session.json'")
 
-    settings = json.loads(machine.succeed("su -- danklinux -c 'cat ~/.config/DankMaterialShell/settings.json'"))
-    clipboard = json.loads(machine.succeed("su -- danklinux -c 'cat ~/.config/DankMaterialShell/clsettings.json'"))
-    session = json.loads(machine.succeed("su -- danklinux -c 'cat ~/.local/state/DankMaterialShell/session.json'"))
-    plugins = json.loads(machine.succeed("su -- danklinux -c 'cat ~/.config/DankMaterialShell/plugin_settings.json'"))
+    settings = json.loads(machine.succeed("su -- danklinux -c 'cat ~/.config/dms/settings.json'"))
+    clipboard = json.loads(machine.succeed("su -- danklinux -c 'cat ~/.config/dms/clsettings.json'"))
+    session = json.loads(machine.succeed("su -- danklinux -c 'cat ~/.local/state/dms/session.json'"))
+    plugins = json.loads(machine.succeed("su -- danklinux -c 'cat ~/.config/dms/plugin_settings.json'"))
     doctor = json.loads(machine.succeed("su -- danklinux -c 'dms doctor --json'"))
 
     t.assertEqual(settings["theme"], "integration-test")

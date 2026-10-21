@@ -3,11 +3,13 @@ import qs.Common
 import qs.Services
 import qs.Widgets
 
-DankOSD {
+DOSD {
     id: root
 
-    osdWidth: Theme.iconSize + Theme.spacingS * 2
-    osdHeight: Theme.iconSize + Theme.spacingS * 2
+    osdKind: "capsLock"
+
+    osdWidth: Theme.osdHeight
+    osdHeight: Theme.osdHeight
     autoHideInterval: 2000
     enableMouseInteraction: false
 
@@ -18,20 +20,22 @@ DankOSD {
 
         function onCapsLockStateChanged() {
             if (lastCapsLockState !== DMSService.capsLockState && SettingsData.osdCapsLockEnabled) {
-                root.show()
+                root.show();
             }
-            lastCapsLockState = DMSService.capsLockState
+            lastCapsLockState = DMSService.capsLockState;
         }
     }
 
     Component.onCompleted: {
-        lastCapsLockState = DMSService.capsLockState
+        lastCapsLockState = DMSService.capsLockState;
     }
 
-    content: DankIcon {
-        anchors.centerIn: parent
-        name: DMSService.capsLockState ? "shift_lock" : "shift_lock_off"
-        size: Theme.iconSize
-        color: Theme.primary
+    content: Item {
+        OsdIcon {
+            tonal: false
+            anchors.centerIn: parent
+            iconName: DMSService.capsLockState ? "shift_lock" : "shift_lock_off"
+            iconColor: Theme.primary
+        }
     }
 }

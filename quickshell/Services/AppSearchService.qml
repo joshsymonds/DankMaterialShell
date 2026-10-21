@@ -3,16 +3,19 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import qs.Common
 import qs.Services
 
 Singleton {
     id: root
     readonly property var log: Log.scoped("AppSearchService")
+    property int refCount: 0
 
     property var applications: []
     property var _cachedCategories: null
     property var _cachedVisibleApps: null
+    property var _searchIndex: null
     property var _hiddenAppsSet: new Set()
 
     property var _transformCache: ({})
@@ -51,6 +54,7 @@ Singleton {
         applications = DesktopEntries.applications.values;
         _cachedCategories = null;
         _cachedVisibleApps = null;
+        _searchIndex = null;
         invalidateLauncherCache();
     }
 
@@ -102,6 +106,7 @@ Singleton {
     function _rebuildHiddenSet() {
         _hiddenAppsSet = new Set(SessionData.hiddenApps || []);
         _cachedVisibleApps = null;
+        _searchIndex = null;
     }
 
     function isAppHidden(app) {
@@ -109,6 +114,25 @@ Singleton {
             return false;
         const appId = app.id || app.execString || app.exec || "";
         return _hiddenAppsSet.has(appId);
+    }
+
+    function _visibleSearchIndex() {
+        if (_searchIndex !== null)
+            return _searchIndex;
+        const apps = getVisibleApplications();
+        _searchIndex = {
+            apps: apps,
+            entries: apps.map(app => ({
+                        app: app,
+                        name: (app.name || "").toLowerCase(),
+                        nameWords: tokenize(app.name || ""),
+                        genericName: (app.genericName || "").toLowerCase(),
+                        comment: (app.comment || "").toLowerCase(),
+                        id: (app.id || "").toLowerCase(),
+                        keywords: app.keywords ? app.keywords.map(k => k.toLowerCase()) : []
+                    }))
+        };
+        return _searchIndex;
     }
 
     function getVisibleApplications() {
@@ -136,6 +160,7 @@ Singleton {
         }
         function onAppOverridesChanged() {
             root._cachedVisibleApps = null;
+            root._searchIndex = null;
             root.invalidateLauncherCache();
         }
     }
@@ -170,7 +195,7 @@ Singleton {
                 name: I18n.tr("Settings", "settings window title"),
                 icon: "svg+corner:" + dmsLogoPath + "|settings",
                 cornerIcon: "settings",
-                comment: "DMS",
+                comment: "dms",
                 action: "ipc:settings",
                 categories: ["Settings", "System"],
                 defaultTrigger: "",
@@ -181,7 +206,7 @@ Singleton {
                 name: I18n.tr("Notepad", "Notepad"),
                 icon: "svg+corner:" + dmsLogoPath + "|description",
                 cornerIcon: "description",
-                comment: "DMS",
+                comment: "dms",
                 action: "ipc:notepad",
                 categories: ["Office", "Utility"],
                 defaultTrigger: "",
@@ -192,7 +217,7 @@ Singleton {
                 name: I18n.tr("System Monitor", "sysmon window title"),
                 icon: "svg+corner:" + dmsLogoPath + "|monitor_heart",
                 cornerIcon: "monitor_heart",
-                comment: "DMS",
+                comment: "dms",
                 action: "ipc:processlist",
                 categories: ["System", "Monitor"],
                 defaultTrigger: "",
@@ -203,19 +228,64 @@ Singleton {
                 name: I18n.tr("Color Picker"),
                 icon: "svg+corner:" + dmsLogoPath + "|palette",
                 cornerIcon: "palette",
-                comment: "DMS",
+                comment: "dms",
                 action: "ipc:color-picker",
                 categories: ["Graphics", "Utility"],
                 defaultTrigger: "",
                 isLauncher: false
             },
+            "dms_power": {
+                id: "dms_power",
+                name: I18n.tr("Power"),
+                cornerIcon: "power_settings_new",
+                comment: "dms",
+                defaultTrigger: "pw",
+                isLauncher: true,
+                viewMode: "list",
+                viewModeEnforced: true,
+                defaultSectionPriority: 2.3
+            },
+            "dms_vpn": {
+                id: "dms_vpn",
+                name: I18n.tr("VPN", "virtual private network, widget and page title"),
+                cornerIcon: "vpn_key",
+                comment: "dms",
+                defaultTrigger: "",
+                isLauncher: true,
+                viewMode: "list",
+                viewModeEnforced: true,
+                defaultSectionPriority: 2.4
+            },
+            "dms_qr_generator": {
+                id: "dms_qr_generator",
+                name: I18n.tr("QR Generator"),
+                icon: "svg+corner:" + dmsLogoPath + "|qr_code",
+                cornerIcon: "qr_code",
+                comment: "dms",
+                action: "ipc:qr-generator",
+                categories: ["Utility"],
+                defaultTrigger: "qrg",
+                isLauncher: true,
+                viewMode: "list",
+                viewModeEnforced: true
+            },
             "dms_settings_search": {
                 id: "dms_settings_search",
-                name: I18n.tr("Settings", "settings window title"),
+                name: I18n.tr("Search settings", "launcher plugin name that searches DMS settings"),
                 cornerIcon: "search",
-                comment: "DMS",
+                comment: I18n.tr("DMS Settings"),
                 defaultTrigger: "?",
                 isLauncher: true
+            },
+            "dms_clipboard_search": {
+                id: "dms_clipboard_search",
+                name: I18n.tr("Clipboard"),
+                cornerIcon: "content_paste",
+                comment: "dms",
+                defaultTrigger: "cb",
+                isLauncher: true,
+                viewMode: "list",
+                viewModeEnforced: true
             }
         })
 
@@ -233,7 +303,7 @@ Singleton {
             if (!SettingsData.getBuiltInPluginSetting(pluginId, "enabled", true))
                 continue;
             const plugin = builtInPlugins[pluginId];
-            if (plugin.isLauncher)
+            if (plugin.isLauncher && !plugin.action)
                 continue;
             apps.push({
                 name: plugin.name,
@@ -284,21 +354,125 @@ Singleton {
         return result;
     }
 
-    function getBuiltInLauncherItems(pluginId, query) {
+    readonly property var powerLauncherKeywords: ({
+            lock: ["lock"],
+            logout: ["logout", "exit", "sign out"],
+            suspend: ["suspend", "sleep"],
+            hibernate: ["hibernate"],
+            reboot: ["reboot", "restart"],
+            softreboot: ["soft reboot"],
+            poweroff: ["poweroff", "shutdown", "halt"],
+            restart: ["restart", "shell", "reload"]
+        })
+
+    function getPowerLauncherActions() {
+        const ids = ["lock", "logout", "suspend", "hibernate", "reboot", "softreboot", "poweroff", "restart"];
+        return ids.filter(a => SessionService.isPowerActionSupported(a)).concat(SessionService.extraPowerActions).map(a => {
+            const data = SessionService.getPowerActionData(a);
+            return {
+                action: a,
+                name: data.label,
+                icon: data.icon,
+                keywords: powerLauncherKeywords[a] || []
+            };
+        }).filter(a => a.name);
+    }
+
+    function getBuiltInLauncherItems(pluginId, query, allowEmptyQuery) {
+        if (pluginId === "dms_power") {
+            const q = (query || "").toString().trim().toLowerCase();
+            return getPowerLauncherActions().filter(a => {
+                if (!q)
+                    return true;
+                if (a.name.toLowerCase().includes(q))
+                    return true;
+                return a.keywords.some(k => k.includes(q));
+            }).map(a => ({
+                        name: a.name,
+                        icon: "material:" + a.icon,
+                        comment: I18n.tr("Power"),
+                        action: "power:" + a.action,
+                        keywords: a.keywords,
+                        isBuiltInLauncher: true,
+                        builtInPluginId: pluginId
+                    }));
+        }
+
+        if (pluginId === "dms_clipboard_search") {
+            const trimmed = (query || "").toString().trim();
+            const entries = ClipboardService.getCachedLauncherSearchEntries(trimmed, 20).slice().sort((a, b) => {
+                if (a.pinned !== b.pinned)
+                    return b.pinned ? 1 : -1;
+                return (b.id || 0) - (a.id || 0);
+            });
+            return entries.map(entry => ({
+                        type: "clipboard",
+                        data: entry
+                    }));
+        }
+
+        if (pluginId === "dms_vpn") {
+            if (!DMSNetworkService.vpnAvailable)
+                return [];
+            const q = (query || "").toString().trim().toLowerCase();
+            if (!q && !allowEmptyQuery && !getBuiltInPluginTrigger(pluginId))
+                return [];
+            return (DMSNetworkService.profiles || []).map(profile => {
+                const id = profile.uuid || profile.name || "";
+                const active = DMSNetworkService.isActiveVpnUuid(id);
+                const connecting = DMSNetworkService.isVpnConnectingUuid(id);
+                const typeLabel = VPNService.getVpnTypeFromProfile(profile);
+                return {
+                    name: profile.name || I18n.tr("VPN", "virtual private network, widget and page title"),
+                    icon: active ? "material:vpn_lock" : "material:vpn_key_off",
+                    comment: typeLabel,
+                    action: "vpn:" + id,
+                    keywords: ["vpn", typeLabel],
+                    badgeLabel: connecting ? I18n.tr("Connecting...") : (active ? I18n.tr("Connected") : I18n.tr("Disconnected")),
+                    isBuiltInLauncher: true,
+                    builtInPluginId: pluginId
+                };
+            }).filter(item => {
+                if (!q)
+                    return true;
+                if (item.name.toLowerCase().includes(q))
+                    return true;
+                return item.keywords.some(k => k.toLowerCase().includes(q));
+            });
+        }
+
+        if (pluginId === "dms_qr_generator") {
+            const text = (query || "").toString().trim();
+            return [
+                {
+                    name: text.length > 0 ? text : I18n.tr("Enter text to encode"),
+                    icon: "material:qr_code",
+                    comment: I18n.tr("QR Generator"),
+                    action: "qr_generate:" + text,
+                    isBuiltInLauncher: true,
+                    builtInPluginId: pluginId
+                }
+            ];
+        }
+
         if (pluginId !== "dms_settings_search")
             return [];
 
-        SettingsSearchService.search(query);
-        const results = SettingsSearchService.results;
+        const results = SettingsSearchService.searchForLauncher(query);
         const items = [];
         for (let i = 0; i < results.length; i++) {
             const r = results[i];
             items.push({
                 name: r.label,
+                type: "setting",
+                section: "settings",
                 icon: "material:" + r.icon,
-                comment: r.category,
-                action: "settings_nav:" + r.tabIndex + ":" + r.section,
+                comment: r.description || r.category,
+                action: r.page ? "settings_page:" + r.page : "settings_nav:" + r.tabIndex + ":" + r.section,
                 categories: ["Settings"],
+                keywords: r.keywords || [],
+                source: I18n.tr("Settings", "settings window title"),
+                badgeLabel: I18n.tr("Setting"),
                 isCore: true,
                 isBuiltInLauncher: true,
                 builtInPluginId: pluginId
@@ -312,14 +486,41 @@ Singleton {
             return false;
 
         const parts = item.action.split(":");
-        if (parts[0] !== "settings_nav")
-            return false;
+        switch (parts[0]) {
+        case "settings_nav":
+            {
+                const tabIndex = parseInt(parts[1]);
+                const section = parts.slice(2).join(":");
+                SettingsSearchService.navigateToSection(section);
+                PopoutService.openSettingsWithTabIndex(tabIndex);
+                return true;
+            }
+        case "settings_page":
+            PopoutService.openSettingsWithTab(parts.slice(1).join(":"));
+            return true;
+        case "qr_generate":
+            PopoutService.showQRGeneratorModal(parts.slice(1).join(":"));
+            return true;
+        case "power":
+            return executePowerLauncherAction(parts.slice(1).join(":"));
+        case "vpn":
+            {
+                const id = parts.slice(1).join(":");
+                if (!id)
+                    return false;
+                DMSNetworkService.toggleVpn(id);
+                return true;
+            }
+        }
+        return false;
+    }
 
-        const tabIndex = parseInt(parts[1]);
-        const section = parts.slice(2).join(":");
-        SettingsSearchService.navigateToSection(section);
-        PopoutService.openSettingsWithTabIndex(tabIndex);
-        return true;
+    function executePowerLauncherAction(action) {
+        if (action === "lock") {
+            IdleService.lockRequested();
+            return true;
+        }
+        return SessionService.executePowerAction(action);
     }
 
     function getCoreApps(query) {
@@ -350,6 +551,9 @@ Singleton {
         case "color-picker":
             PopoutService.showColorPicker();
             return true;
+        case "qr-generator":
+            PopoutService.showQRGeneratorModal();
+            return true;
         }
         return false;
     }
@@ -358,6 +562,16 @@ Singleton {
         target: DesktopEntries
         function onApplicationsChanged() {
             root.refreshApplications();
+        }
+    }
+
+    Connections {
+        target: SettingsData
+        function onBuiltInPluginSettingsChanged() {
+            root.invalidateLauncherCache();
+        }
+        function onLauncherPluginVisibilityChanged() {
+            root.invalidateLauncherCache();
         }
     }
 
@@ -371,9 +585,10 @@ Singleton {
     }
 
     function wordBoundaryMatch(text, query) {
-        const textWords = tokenize(text);
-        const queryWords = tokenize(query);
+        return wordBoundaryMatchWords(tokenize(text), tokenize(query));
+    }
 
+    function wordBoundaryMatchWords(textWords, queryWords) {
         if (queryWords.length === 0)
             return false;
         if (queryWords.length > textWords.length)
@@ -414,20 +629,23 @@ Singleton {
         return matrix[len1][len2];
     }
 
-    function fuzzyMatchScore(text, query) {
+    function fuzzyMatchScore(text, query, words) {
         const queryLower = query.toLowerCase();
         const maxDistance = query.length <= 2 ? 0 : query.length === 3 ? 1 : query.length <= 6 ? 2 : 3;
 
         let bestScore = 0;
 
-        const distance = levenshteinDistance(text.toLowerCase(), queryLower);
-        if (distance <= maxDistance) {
-            const maxLen = Math.max(text.length, query.length);
-            bestScore = 1 - (distance / maxLen);
+        if (Math.abs(text.length - query.length) <= maxDistance) {
+            const distance = levenshteinDistance(text.toLowerCase(), queryLower);
+            if (distance <= maxDistance) {
+                const maxLen = Math.max(text.length, query.length);
+                bestScore = 1 - (distance / maxLen);
+            }
         }
 
-        const words = tokenize(text);
-        for (const word of words) {
+        for (const word of words || tokenize(text)) {
+            if (Math.abs(word.length - query.length) > maxDistance)
+                continue;
             const wordDistance = levenshteinDistance(word, queryLower);
             if (wordDistance <= maxDistance) {
                 const maxLen = Math.max(word.length, query.length);
@@ -489,16 +707,19 @@ Singleton {
             return [];
 
         const queryLower = query.toLowerCase().trim();
+        const queryWords = tokenize(queryLower);
         const scoredApps = [];
         const results = [];
-        const visibleApps = getVisibleApplications();
+        const index = _visibleSearchIndex();
+        const visibleApps = index.apps;
 
-        for (const app of visibleApps) {
-            const name = (app.name || "").toLowerCase();
-            const genericName = (app.genericName || "").toLowerCase();
-            const comment = (app.comment || "").toLowerCase();
-            const id = (app.id || "").toLowerCase();
-            const keywords = app.keywords ? app.keywords.map(k => k.toLowerCase()) : [];
+        for (const entry of index.entries) {
+            const app = entry.app;
+            const name = entry.name;
+            const genericName = entry.genericName;
+            const comment = entry.comment;
+            const id = entry.id;
+            const keywords = entry.keywords;
 
             let textScore = 0;
             let matchType = "none";
@@ -509,7 +730,7 @@ Singleton {
             } else if (name.startsWith(queryLower)) {
                 textScore = 5000;
                 matchType = "prefix";
-            } else if (wordBoundaryMatch(name, queryLower)) {
+            } else if (wordBoundaryMatchWords(entry.nameWords, queryWords)) {
                 textScore = 3000;
                 matchType = "word_boundary";
             } else if (name.includes(queryLower)) {
@@ -546,7 +767,7 @@ Singleton {
             }
 
             if (matchType === "none") {
-                const fuzzyScore = fuzzyMatchScore(name, queryLower);
+                const fuzzyScore = fuzzyMatchScore(name, queryLower, entry.nameWords);
                 if (fuzzyScore > 0) {
                     textScore = fuzzyScore * 100;
                     matchType = "fuzzy";
@@ -630,44 +851,45 @@ Singleton {
         return results;
     }
 
-    function getCategoriesForApp(app) {
-        if (!app?.categories)
-            return [];
-
-        const categoryMap = {
-            "AudioVideo": I18n.tr("Media"),
+    readonly property var _categoryMap: ({
+            "AudioVideo": I18n.tr("Media", "launcher app category for audio and video apps"),
             "Audio": I18n.tr("Media"),
             "Video": I18n.tr("Media"),
-            "Development": I18n.tr("Development"),
+            "Development": I18n.tr("Development", "launcher app category"),
             "TextEditor": I18n.tr("Development"),
             "IDE": I18n.tr("Development"),
-            "Education": I18n.tr("Education"),
-            "Game": I18n.tr("Games"),
-            "Graphics": I18n.tr("Graphics"),
+            "Education": I18n.tr("Education", "launcher app category"),
+            "Game": I18n.tr("Games", "launcher app category"),
+            "Graphics": I18n.tr("Graphics", "launcher app category"),
             "Photography": I18n.tr("Graphics"),
             "Network": I18n.tr("Internet"),
             "WebBrowser": I18n.tr("Internet"),
             "Email": I18n.tr("Internet"),
-            "Office": I18n.tr("Office"),
+            "Office": I18n.tr("Office", "launcher app category"),
             "WordProcessor": I18n.tr("Office"),
             "Spreadsheet": I18n.tr("Office"),
             "Presentation": I18n.tr("Office"),
-            "Science": I18n.tr("Science"),
+            "Science": I18n.tr("Science", "launcher app category"),
             "Settings": I18n.tr("Settings"),
             "System": I18n.tr("System"),
             "Utility": I18n.tr("Utilities"),
             "Accessories": I18n.tr("Utilities"),
             "FileManager": I18n.tr("Utilities"),
             "TerminalEmulator": I18n.tr("Utilities")
-        };
+        })
+
+    on_CategoryMapChanged: _cachedCategories = null
+
+    function getCategoriesForApp(app) {
+        if (!app?.categories)
+            return [];
 
         const mappedCategories = new Set();
-
         for (const cat of app.categories) {
-            if (categoryMap[cat])
-                mappedCategories.add(categoryMap[cat]);
+            const mapped = _categoryMap[cat];
+            if (mapped)
+                mappedCategories.add(mapped);
         }
-
         return Array.from(mappedCategories);
     }
 
@@ -703,14 +925,10 @@ Singleton {
             appCategories.forEach(cat => categories.add(cat));
         }
 
-        // Include categories from core apps (e.g. DMS Settings)
         for (const app of coreApps) {
             const appCategories = getCategoriesForApp(app);
             appCategories.forEach(cat => categories.add(cat));
         }
-
-        const pluginCategories = getPluginCategories();
-        pluginCategories.forEach(cat => categories.add(cat));
 
         _cachedCategories = Array.from(categories).sort();
         return _cachedCategories;
@@ -721,14 +939,22 @@ Singleton {
         if (category === I18n.tr("All"))
             return visibleApps;
 
-        const pluginItems = getPluginItems(category, "");
-        if (pluginItems.length > 0)
-            return pluginItems;
-
         return visibleApps.filter(app => {
             const appCategories = getCategoriesForApp(app);
             return appCategories.includes(category);
         });
+    }
+
+    function getPluginIdForCategory(category) {
+        if (typeof PluginService === "undefined")
+            return null;
+
+        const launchers = PluginService.getLauncherPlugins();
+        for (const pluginId in launchers) {
+            if ((launchers[pluginId].name || pluginId) === category)
+                return pluginId;
+        }
+        return null;
     }
 
     // Plugin launcher support functions
@@ -750,48 +976,19 @@ Singleton {
     }
 
     function getPluginCategoryIcon(category) {
-        if (typeof PluginService === "undefined")
+        const pluginId = getPluginIdForCategory(category);
+        if (!pluginId)
             return null;
 
-        const launchers = PluginService.getLauncherPlugins();
-        for (const pluginId in launchers) {
-            const plugin = launchers[pluginId];
-            if ((plugin.name || pluginId) === category) {
-                return plugin.icon || "extension";
-            }
-        }
-        return null;
-    }
-
-    function getAllPluginItems() {
-        if (typeof PluginService === "undefined") {
-            return [];
-        }
-
-        let allItems = [];
-        const launchers = PluginService.getLauncherPlugins();
-
-        for (const pluginId in launchers) {
-            const categoryName = launchers[pluginId].name || pluginId;
-            const items = getPluginItems(categoryName, "");
-            allItems = allItems.concat(items);
-        }
-
-        return allItems;
+        return PluginService.getLauncherPlugins()[pluginId].icon || "extension";
     }
 
     function getPluginItems(category, query) {
-        if (typeof PluginService === "undefined")
+        const pluginId = getPluginIdForCategory(category);
+        if (!pluginId)
             return [];
 
-        const launchers = PluginService.getLauncherPlugins();
-        for (const pluginId in launchers) {
-            const plugin = launchers[pluginId];
-            if ((plugin.name || pluginId) === category) {
-                return getPluginItemsForPlugin(pluginId, query);
-            }
-        }
-        return [];
+        return getPluginItemsForPlugin(pluginId, query);
     }
 
     function getPluginItemsForPlugin(pluginId, query) {
@@ -799,43 +996,15 @@ Singleton {
             return [];
         }
 
-        let instance = PluginService.pluginInstances[pluginId];
-        let isPersistent = true;
-
-        if (!instance) {
-            const component = PluginService.pluginLauncherComponents[pluginId];
-            if (!component)
-                return [];
-
-            try {
-                instance = component.createObject(root, {
-                    "pluginService": PluginService
-                });
-                isPersistent = false;
-            } catch (e) {
-                log.warn("Error creating temporary plugin instance", pluginId, ":", e);
-                return [];
-            }
-        }
-
+        const instance = PluginService.ensureLauncherInstance(pluginId);
         if (!instance)
             return [];
 
         try {
-            if (typeof instance.getItems === "function") {
-                const items = instance.getItems(query || "");
-                if (!isPersistent)
-                    instance.destroy();
-                return items || [];
-            }
-
-            if (!isPersistent) {
-                instance.destroy();
-            }
+            if (typeof instance.getItems === "function")
+                return instance.getItems(query || "") || [];
         } catch (e) {
             log.warn("Error getting items from plugin", pluginId, ":", e);
-            if (!isPersistent)
-                instance.destroy();
         }
 
         return [];
@@ -845,68 +1014,27 @@ Singleton {
         if (typeof PluginService === "undefined")
             return false;
 
-        let instance = PluginService.pluginInstances[pluginId];
-        let isPersistent = true;
-
-        if (!instance) {
-            const component = PluginService.pluginLauncherComponents[pluginId];
-            if (!component)
-                return false;
-
-            try {
-                instance = component.createObject(root, {
-                    "pluginService": PluginService
-                });
-                isPersistent = false;
-            } catch (e) {
-                log.warn("Error creating temporary plugin instance for execution", pluginId, ":", e);
-                return false;
-            }
-        }
-
+        const instance = PluginService.ensureLauncherInstance(pluginId);
         if (!instance)
             return false;
 
         try {
             if (typeof instance.executeItem === "function") {
                 instance.executeItem(item);
-                if (!isPersistent)
-                    instance.destroy();
                 return true;
-            }
-
-            if (!isPersistent) {
-                instance.destroy();
             }
         } catch (e) {
             log.warn("Error executing item from plugin", pluginId, ":", e);
-            if (!isPersistent)
-                instance.destroy();
         }
 
         return false;
-    }
-
-    function getPluginPasteText(pluginId, item) {
-        if (typeof PluginService === "undefined")
-            return null;
-
-        const instance = PluginService.pluginInstances[pluginId];
-        if (!instance)
-            return null;
-
-        if (typeof instance.getPasteText === "function") {
-            return instance.getPasteText(item);
-        }
-
-        return null;
     }
 
     function getPluginPasteArgs(pluginId, item) {
         if (typeof PluginService === "undefined")
             return null;
 
-        const instance = PluginService.pluginInstances[pluginId];
+        const instance = PluginService.ensureLauncherInstance(pluginId);
         if (!instance)
             return null;
 
@@ -922,26 +1050,11 @@ Singleton {
         return null;
     }
 
-    function searchPluginItems(query) {
-        if (typeof PluginService === "undefined")
-            return [];
-
-        let allItems = [];
-        const launchers = PluginService.getLauncherPlugins();
-
-        for (const pluginId in launchers) {
-            const items = getPluginItemsForPlugin(pluginId, query);
-            allItems = allItems.concat(items);
-        }
-
-        return allItems;
-    }
-
     function getPluginLauncherCategories(pluginId) {
         if (typeof PluginService === "undefined")
             return [];
 
-        const instance = PluginService.pluginInstances[pluginId];
+        const instance = PluginService.ensureLauncherInstance(pluginId);
         if (!instance)
             return [];
 
@@ -960,7 +1073,7 @@ Singleton {
         if (typeof PluginService === "undefined")
             return;
 
-        const instance = PluginService.pluginInstances[pluginId];
+        const instance = PluginService.ensureLauncherInstance(pluginId);
         if (!instance)
             return;
 
@@ -974,14 +1087,64 @@ Singleton {
         }
     }
 
-    function pluginHasCategories(pluginId) {
-        if (typeof PluginService === "undefined")
-            return false;
+    signal uninstallAppConfirmRequested(string appId, string appName, string flatpakId)
 
-        const instance = PluginService.pluginInstances[pluginId];
-        if (!instance)
-            return false;
+    property string _uninstallingAppId: ""
+    property string _uninstallingAppName: ""
+    property string _uninstallingStderr: ""
 
-        return typeof instance.getCategories === "function";
+    Process {
+        id: flatpakUninstallProc
+        running: false
+        command: []
+
+        stderr: StdioCollector {
+            onStreamFinished: {
+                root._uninstallingStderr = (text || "").trim();
+            }
+        }
+
+        onExited: exitCode => {
+            const appName = root._uninstallingAppName;
+            const appId = root._uninstallingAppId;
+            const err = root._uninstallingStderr;
+            root._uninstallingAppName = "";
+            root._uninstallingAppId = "";
+            root._uninstallingStderr = "";
+
+            if (exitCode === 0) {
+                ToastService.showInfo(I18n.tr("Uninstalled: %1", "uninstallation success").arg(appName));
+                if (appId) {
+                    SessionData.removePinnedApp(appId);
+                    SessionData.removeBarPinnedApp(appId);
+                }
+                root.refreshApplications();
+            } else {
+                ToastService.showError(I18n.tr("Uninstall failed: %1", "uninstallation error").arg(appName), err);
+            }
+        }
+    }
+
+    function requestUninstallFlatpak(appId, appName, flatpakId) {
+        if (!flatpakId)
+            return;
+        uninstallAppConfirmRequested(appId, appName, flatpakId);
+    }
+
+    function uninstallFlatpak(appId, appName, flatpakId) {
+        if (!flatpakId)
+            return;
+        if (flatpakUninstallProc.running) {
+            ToastService.showWarning(I18n.tr("An uninstallation is already in progress", "toast warning message"));
+            return;
+        }
+
+        _uninstallingAppId = appId || "";
+        _uninstallingAppName = appName || flatpakId;
+        _uninstallingStderr = "";
+        flatpakUninstallProc.command = ["flatpak", "uninstall", "-y", "--app", flatpakId];
+        flatpakUninstallProc.running = true;
+
+        ToastService.showInfo(I18n.tr("Uninstalling: %1", "uninstallation progress").arg(_uninstallingAppName));
     }
 }

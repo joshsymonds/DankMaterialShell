@@ -2,17 +2,24 @@ import QtQuick
 import QtQuick.Effects
 import qs.Common
 import qs.Services
+import qs.DCommon.Widgets
 import qs.Widgets
 import Quickshell.Services.Mpris
+import Quickshell.Widgets
 
-DankOSD {
+DOSD {
     id: root
 
+    osdKind: "mediaPlayback"
+
     readonly property bool useVertical: isVerticalLayout
+    readonly property bool playing: player?.isPlaying ?? false
     readonly property var player: MprisController.activePlayer
 
-    osdWidth: useVertical ? (40 + Theme.spacingS * 2) : Math.min(280, Screen.width - Theme.spacingM * 2)
-    osdHeight: useVertical ? (Theme.iconSize * 2) : (40 + Theme.spacingS * 2)
+    osdWidth: useVertical ? Theme.osdHeight : Math.min(Theme.osdMediaWidth, screenWidth - Theme.spacingM * 2)
+    osdHeight: Theme.osdHeight
+    surfaceColor: useVertical ? MediaAccentService.accent : Theme.hostSurface
+    surfaceRadius: useVertical ? (contentLoader.item?.surfaceRadius ?? Theme.cornerRadiusM) : Theme.fullRadius(alignedWidth, alignedHeight)
     autoHideInterval: 3000
     enableMouseInteraction: true
 
@@ -22,7 +29,7 @@ DankOSD {
         if (!player) {
             _displayIcon = "music_note";
             iconDebounce.stop();
-            return;
+            return false;
         }
         let icon = "music_note";
         switch (player.playbackState) {
@@ -34,10 +41,13 @@ DankOSD {
             icon = "play_arrow";
             break;
         }
-        if (icon === _displayIcon)
-            return;
+        if (icon === _displayIcon) {
+            iconDebounce.stop();
+            return false;
+        }
         iconDebounce.pendingIcon = icon;
         iconDebounce.restart();
+        return true;
     }
 
     function togglePlaying() {
@@ -51,6 +61,29 @@ DankOSD {
     property string _displayArtist: ""
     property string _displayAlbum: ""
 
+    function _showPending() {
+        _pendingShow = false;
+        pendingShowFallback.stop();
+        show();
+    }
+
+    function _evaluateShow() {
+        // art url can land in a later metadata update than the title
+        if (TrackArtService.getArtworkUrl(player) === "") {
+            _pendingShow = true;
+            pendingShowFallback.interval = 600;
+            pendingShowFallback.restart();
+            return;
+        }
+        if (TrackArtService.artReadyFor(player) && artPreloader.status === Image.Ready) {
+            _showPending();
+            return;
+        }
+        _pendingShow = true;
+        pendingShowFallback.interval = 1500;
+        pendingShowFallback.restart();
+    }
+
     Timer {
         id: iconDebounce
         interval: 150
@@ -58,50 +91,65 @@ DankOSD {
         onTriggered: root._displayIcon = pendingIcon
     }
 
+    Timer {
+        id: pendingShowFallback
+        interval: 1500
+        onTriggered: {
+            if (!root._pendingShow)
+                return;
+            root._pendingShow = false;
+            root.show();
+        }
+    }
+
     Image {
         id: artPreloader
-        source: TrackArtService._bgArtSource
+        source: SettingsData.osdMediaPlaybackEnabled ? TrackArtService.resolvedArtUrl : ""
         visible: false
         asynchronous: true
         cache: true
-    }
 
-    onPlayerChanged: {
-        if (!player) {
-            _pendingShow = false;
-            hide();
-        }
-    }
-
-    Connections {
-        target: TrackArtService
-        function onLoadingChanged() {
-            if (TrackArtService.loading || !root._pendingShow)
+        onStatusChanged: {
+            if (!root._pendingShow || TrackArtService.loading || !TrackArtService.artReadyFor(root.player))
                 return;
-            if (!TrackArtService._bgArtSource || artPreloader.status === Image.Ready) {
-                root._pendingShow = false;
-                root.show();
-            }
-        }
-    }
-
-    Connections {
-        target: artPreloader
-        function onStatusChanged() {
-            if (!root._pendingShow || TrackArtService.loading)
-                return;
-            switch (artPreloader.status) {
+            switch (status) {
             case Image.Ready:
             case Image.Error:
-                root._pendingShow = false;
-                root.show();
+                root._showPending();
                 break;
             }
         }
     }
 
+    onPlayerChanged: {
+        if (!player) {
+            _pendingShow = false;
+            pendingShowFallback.stop();
+            hide();
+        }
+    }
+
+    readonly property bool trackArtLoading: TrackArtService.loading
+
+    onTrackArtLoadingChanged: {
+        if (!_pendingShow)
+            return;
+        if (trackArtLoading) {
+            pendingShowFallback.interval = 1500;
+            pendingShowFallback.restart();
+            return;
+        }
+        if (!TrackArtService.resolvedArtUrl) {
+            _showPending();
+            return;
+        }
+        if (TrackArtService.artReadyFor(player) && artPreloader.status === Image.Ready)
+            _showPending();
+    }
+
     Connections {
         target: player
+        enabled: SettingsData.osdMediaPlaybackEnabled
 
         function handleUpdate() {
             if (!root.player?.trackTitle)
@@ -111,30 +159,40 @@ DankOSD {
             if (MprisController.isFirefoxYoutubeHoverPreview(player))
                 return;
 
-            root._displayTitle = player.trackTitle || "";
-            root._displayArtist = player.trackArtist || "";
-            root._displayAlbum = player.trackAlbum || "";
+            const metaPlayer = MprisController.bestMetadataPlayer(player);
+            const newTitle = MprisController.displayTrackTitle(metaPlayer);
+            const newArtist = metaPlayer.trackArtist || "";
+            const newAlbum = metaPlayer.trackAlbum || "";
+            const trackChanged = newTitle !== root._displayTitle || newArtist !== root._displayArtist || newAlbum !== root._displayAlbum;
 
-            root.updatePlaybackIcon();
-            TrackArtService.loadArtwork(player.trackArtUrl);
+            root._displayTitle = newTitle;
+            root._displayArtist = newArtist;
+            root._displayAlbum = newAlbum;
 
-            if (!player.trackArtUrl || player.trackArtUrl === "") {
+            const iconChanged = root.updatePlaybackIcon();
+
+            // live streams re-emit metadata as mpris:length grows - ignore churn
+            if (!trackChanged && !iconChanged)
+                return;
+
+            // vertical layout has no art background
+            if (root.useVertical) {
                 root.show();
                 return;
             }
-            if (TrackArtService.loading) {
-                root._pendingShow = true;
+            if (trackChanged) {
+                root._evaluateShow();
                 return;
             }
-            if (!TrackArtService._bgArtSource || artPreloader.status === Image.Ready) {
+            if (!root._pendingShow)
                 root.show();
-                return;
-            }
-            root._pendingShow = true;
         }
 
         function onTrackArtUrlChanged() {
-            TrackArtService.loadArtwork(player.trackArtUrl);
+            handleUpdate();
+        }
+        function onMetadataChanged() {
+            handleUpdate();
         }
         function onIsPlayingChanged() {
             handleUpdate();
@@ -146,6 +204,7 @@ DankOSD {
     }
 
     content: Loader {
+        readonly property real surfaceRadius: item?.radius ?? Theme.cornerRadiusM
         anchors.fill: parent
         sourceComponent: useVertical ? verticalContent : horizontalContent
     }
@@ -158,7 +217,7 @@ DankOSD {
 
             anchors.centerIn: parent
             width: parent.width - Theme.spacingS * 2
-            height: 40
+            height: Theme.buttonHeightS
 
             MouseArea {
                 anchors.fill: parent
@@ -168,24 +227,26 @@ DankOSD {
             Item {
                 id: bgContainer
                 anchors.fill: parent
-                visible: TrackArtService._bgArtSource !== ""
+                visible: TrackArtService.resolvedArtUrl !== ""
 
                 Image {
                     id: bgImage
                     anchors.centerIn: parent
                     width: Math.max(parent.width, parent.height)
                     height: width
-                    source: TrackArtService._bgArtSource
+                    source: TrackArtService.resolvedArtUrl
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
+                    retainWhileLoading: true
                     cache: true
                     visible: false
                 }
 
-                Item {
-                    id: blurredBg
+                ClippingRectangle {
                     anchors.fill: parent
-                    visible: false
+                    radius: Theme.fullRadius(width, height)
+                    color: "transparent"
+                    opacity: 0.7
 
                     MultiEffect {
                         anchors.centerIn: parent
@@ -201,71 +262,81 @@ DankOSD {
                 }
 
                 Rectangle {
-                    id: bgMask
                     anchors.fill: parent
-                    radius: Theme.cornerRadius
-                    visible: false
-                    layer.enabled: true
-                }
-
-                MultiEffect {
-                    anchors.fill: parent
-                    source: blurredBg
-                    maskEnabled: true
-                    maskSource: bgMask
-                    maskThresholdMin: 0.5
-                    maskSpreadAtMin: 1.0
-                    opacity: 0.7
-                }
-
-                Rectangle {
-                    anchors.fill: parent
-                    radius: Theme.cornerRadius
-                    color: Theme.surface
+                    radius: Theme.fullRadius(width, height)
+                    color: Theme.hostSurface
                     opacity: 0.3
                 }
             }
 
-            Rectangle {
-                width: Theme.iconSize
-                height: Theme.iconSize
-                radius: Theme.iconSize / 2
-                color: "transparent"
+            Row {
+                id: transportControls
+
                 x: parent.gap
                 anchors.verticalCenter: parent.verticalCenter
+                spacing: Theme.spacingXXS
 
-                DankIcon {
-                    anchors.centerIn: parent
-                    name: root._displayIcon
-                    size: Theme.iconSize
-                    color: playPauseButton.containsMouse ? Theme.primary : Theme.surfaceText
+                DActionButton {
+                    buttonSize: Theme.buttonHeightXS
+                    anchors.verticalCenter: parent.verticalCenter
+                    objectName: "previousTrack"
+                    iconName: "skip_previous"
+                    iconSize: Theme.iconSizeSmall
+                    iconColor: Theme.onSurface
+                    Accessible.name: I18n.tr("Previous")
+                    enabled: root.player?.canGoPrevious ?? false
+                    onClicked: {
+                        MprisController.previousOrRewind();
+                        root.resetHideTimer();
+                    }
                 }
 
-                MouseArea {
-                    id: playPauseButton
-
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
+                DIconButton {
+                    width: Theme.buttonHeightS
+                    buttonSize: Theme.buttonHeightS
+                    variant: "filled"
+                    round: false
+                    checkable: true
+                    checked: root.playing
+                    iconFilled: false
+                    iconName: root._displayIcon
+                    containerColor: MediaAccentService.accentContainer
+                    contentColor: MediaAccentService.onAccentContainer
+                    enabled: root.player?.canTogglePlaying ?? false
+                    Accessible.name: root.playing ? I18n.tr("Pause") : I18n.tr("Play")
                     onClicked: {
-                        togglePlaying();
-                        root.hide();
+                        root.togglePlaying();
+                        root.resetHideTimer();
+                    }
+                }
+
+                DActionButton {
+                    buttonSize: Theme.buttonHeightXS
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconName: "skip_next"
+                    iconSize: Theme.iconSizeSmall
+                    iconColor: Theme.onSurface
+                    Accessible.name: I18n.tr("Next")
+                    enabled: root.player?.canGoNext ?? false
+                    onClicked: {
+                        MprisController.next();
+                        root.resetHideTimer();
                     }
                 }
             }
 
             Column {
-                x: parent.gap * 2 + Theme.iconSize
-                width: parent.width - Theme.iconSize - parent.gap * 3
+                x: parent.gap * 2 + transportControls.width
+                width: parent.width - transportControls.width - parent.gap * 3
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: 3
+                spacing: Theme.spacingXXS
 
                 StyledText {
                     id: topText
                     width: parent.width
                     text: player ? (root._displayTitle || I18n.tr("Unknown Title")) : ""
                     font.pixelSize: Theme.fontSizeMedium
-                    font.weight: Font.Medium
+                    font.weight: Theme.fontWeightMedium
                     color: Theme.surfaceText
                     wrapMode: Text.NoWrap
                     elide: Text.ElideRight
@@ -276,7 +347,7 @@ DankOSD {
                     width: parent.width
                     text: player ? ((root._displayArtist || I18n.tr("Unknown Artist")) + (root._displayAlbum ? ` • ${root._displayAlbum}` : "")) : ""
                     font.pixelSize: Theme.fontSizeSmall
-                    font.weight: Font.Light
+                    font.weight: Theme.fontWeight
                     color: Theme.surfaceText
                     wrapMode: Text.NoWrap
                     elide: Text.ElideRight
@@ -288,40 +359,21 @@ DankOSD {
     Component {
         id: verticalContent
 
-        Item {
-            property int gap: Theme.spacingS
-
-            MouseArea {
-                anchors.fill: parent
-                onClicked: root.hide()
-            }
-
-            Rectangle {
-                width: Theme.iconSize
-                height: Theme.iconSize
-                radius: Theme.iconSize / 2
-                color: "transparent"
-                anchors.centerIn: parent
-                y: gap
-
-                DankIcon {
-                    anchors.centerIn: parent
-                    name: root._displayIcon
-                    size: Theme.iconSize
-                    color: playPauseButtonVert.containsMouse ? Theme.primary : Theme.surfaceText
-                }
-
-                MouseArea {
-                    id: playPauseButtonVert
-
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        togglePlaying();
-                        root.hide();
-                    }
-                }
+        DIconButton {
+            anchors.fill: parent
+            size: "m"
+            round: false
+            checkable: true
+            checked: root.playing
+            iconFilled: false
+            backgroundColor: "transparent"
+            iconColor: MediaAccentService.onAccent
+            iconName: root._displayIcon
+            enabled: root.player?.canTogglePlaying ?? false
+            Accessible.name: root.playing ? I18n.tr("Pause") : I18n.tr("Play")
+            onClicked: {
+                root.togglePlaying();
+                root.resetHideTimer();
             }
         }
     }

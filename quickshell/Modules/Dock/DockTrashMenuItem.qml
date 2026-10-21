@@ -1,7 +1,7 @@
 import QtQuick
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Rectangle {
     id: root
@@ -12,6 +12,7 @@ Rectangle {
 
     signal triggered
 
+    implicitWidth: contentRow.implicitWidth + Theme.spacingS * 2
     height: 28
     radius: Theme.cornerRadius
     opacity: enabled ? 1 : 0.4
@@ -19,11 +20,12 @@ Rectangle {
         if (!area.containsMouse || !enabled)
             return "transparent";
         if (isDestructive)
-            return Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.12);
+            return Theme.errorHover;
         return BlurService.hoverColor(Theme.widgetBaseHoverColor);
     }
 
     Row {
+        id: contentRow
         anchors.left: parent.left
         anchors.leftMargin: Theme.spacingS
         anchors.right: parent.right
@@ -31,7 +33,7 @@ Rectangle {
         anchors.verticalCenter: parent.verticalCenter
         spacing: Theme.spacingXS
 
-        DankIcon {
+        DIcon {
             anchors.verticalCenter: parent.verticalCenter
             name: root.iconName
             size: 14
@@ -44,13 +46,13 @@ Rectangle {
             text: root.text
             font.pixelSize: Theme.fontSizeSmall
             color: root.isDestructive && area.containsMouse && root.enabled ? Theme.error : Theme.surfaceText
-            font.weight: Font.Normal
+            font.weight: Theme.fontWeight
             elide: Text.ElideRight
             wrapMode: Text.NoWrap
         }
     }
 
-    DankRipple {
+    DRipple {
         id: ripple
         rippleColor: root.isDestructive ? Theme.error : Theme.surfaceText
         cornerRadius: Theme.cornerRadius

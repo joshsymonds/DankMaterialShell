@@ -23,7 +23,7 @@ DesktopPluginComponent {
         id: background
         anchors.fill: parent
         radius: Theme.cornerRadius
-        color: Theme.surfaceContainer
+        color: Theme.hostSurface
         opacity: root.backgroundOpacity
     }
 
@@ -130,7 +130,7 @@ DesktopPluginComponent {
                 anchors.bottomMargin: Theme.spacingXS
                 text: systemClock.date?.toLocaleDateString(I18n.locale(), "ddd, MMM d") ?? ""
                 font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.Medium
+                font.weight: Theme.fontWeightMedium
                 color: Theme.surfaceText
             }
         }
@@ -152,7 +152,7 @@ DesktopPluginComponent {
                 anchors.verticalCenterOffset: root.showDate ? -digitalRoot.dateFontSize * 0.8 : 0
                 text: systemClock.date?.toLocaleTimeString(Qt.locale(), root.showSeconds ? "hh:mm:ss" : "hh:mm") ?? ""
                 font.pixelSize: digitalRoot.timeFontSize
-                font.weight: Font.Bold
+                font.weight: Theme.fontWeightMedium
                 font.family: "monospace"
                 color: Theme.primary
             }

@@ -3,13 +3,13 @@
 # Usage: ./ppa-upload.sh [package-name] [ppa-name] [ubuntu-series] [rebuild-number] [--keep-builds] [--rebuild=N]
 #
 # Examples:
-#   ./ppa-upload.sh dms                    # Upload to questing + resolute (default)
-#   ./ppa-upload.sh dms 2                 # Native: questing ppa2, resolute ppa3 (auto +1 on second series)
+#   ./ppa-upload.sh dms                    # Upload to resolute + stonking (default)
+#   ./ppa-upload.sh dms 2                 # Native: resolute ppa2, stonking ppa3 (auto +1 on second series)
 #   ./ppa-upload.sh dms --rebuild=2       # Rebuild with ppa2 (flag syntax)
 #   ./ppa-upload.sh dms-git               # Single package (both series)
 #   ./ppa-upload.sh all                   # All packages (each to both series)
 #   ./ppa-upload.sh dms resolute          # 26.04 LTS only (same as "dms dms resolute")
-#   ./ppa-upload.sh dms questing          # 25.10 only
+#   ./ppa-upload.sh dms stonking          # 26.10 only
 #   ./ppa-upload.sh dms dms resolute      # Explicit PPA name + one series (optional form)
 #   ./ppa-upload.sh dms dms resolute 2    # One series + rebuild number
 #   ./ppa-upload.sh distro/ubuntu/dms dms # Path-style (backward compatible)
@@ -27,7 +27,7 @@ success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-AVAILABLE_PACKAGES=(dms dms-git dms-greeter)
+AVAILABLE_PACKAGES=(dms dms-git)
 
 KEEP_BUILDS=false
 REBUILD_RELEASE=""
@@ -70,8 +70,8 @@ if [[ ${#POSITIONAL_ARGS[@]} -gt 0 ]]; then
     fi
 fi
 
-# Shorthand: "dms resolute" / "dms questing" (package + series; PPA inferred — no need for "dms dms resolute")
-if [[ ${#POSITIONAL_ARGS[@]} -eq 2 ]] && [[ "${POSITIONAL_ARGS[1]}" == "questing" || "${POSITIONAL_ARGS[1]}" == "resolute" ]]; then
+# Shorthand: "dms resolute" / "dms stonking" (package + series; PPA inferred — no need for "dms dms resolute")
+if [[ ${#POSITIONAL_ARGS[@]} -eq 2 ]] && [[ "${POSITIONAL_ARGS[1]}" == "resolute" || "${POSITIONAL_ARGS[1]}" == "stonking" ]]; then
     PACKAGE_INPUT="${POSITIONAL_ARGS[0]}"
     PPA_NAME_INPUT=""
     UBUNTU_SERIES_RAW="${POSITIONAL_ARGS[1]}"
@@ -79,11 +79,11 @@ fi
 
 SERIES_LIST=()
 if [[ -z "$UBUNTU_SERIES_RAW" ]]; then
-    SERIES_LIST=(questing resolute)
-elif [[ "$UBUNTU_SERIES_RAW" == "questing" || "$UBUNTU_SERIES_RAW" == "resolute" ]]; then
+    SERIES_LIST=(resolute stonking)
+elif [[ "$UBUNTU_SERIES_RAW" == "resolute" || "$UBUNTU_SERIES_RAW" == "stonking" ]]; then
     SERIES_LIST=("$UBUNTU_SERIES_RAW")
 else
-    error "Invalid Ubuntu series: $UBUNTU_SERIES_RAW (use questing, resolute, or omit for both)"
+    error "Invalid Ubuntu series: $UBUNTU_SERIES_RAW (use resolute, stonking, or omit for both)"
     exit 1
 fi
 
@@ -101,7 +101,6 @@ get_ppa_name() {
     case "$pkg" in
         dms) echo "dms" ;;
         dms-git) echo "dms-git" ;;
-        dms-greeter) echo "danklinux" ;;
         *) echo "" ;;
     esac
 }
@@ -336,7 +335,7 @@ echo
 
 info "Step 2: Uploading to PPA..."
 
-if [ "$PPA_NAME" = "danklinux" ] || [ "$PPA_NAME" = "dms" ] || [ "$PPA_NAME" = "dms-git" ]; then
+if [ "$PPA_NAME" = "dms" ] || [ "$PPA_NAME" = "dms-git" ]; then
     warn "Using lftp for upload"
 
     BUILD_DIR=$(dirname "$CHANGES_FILE")
@@ -410,9 +409,9 @@ EOF
     fi
 else
     # This branch should not be reached for DMS packages
-    # All DMS packages (dms, dms-git, dms-greeter) use lftp
+    # All DMS packages (dms, dms-git) use lftp
     error "Unknown PPA: $PPA_NAME"
-    error "DMS packages use lftp for upload. Supported PPAs: dms, dms-git, danklinux"
+    error "DMS packages use lftp for upload. Supported PPAs: dms, dms-git"
     exit 1
 fi
 
@@ -481,13 +480,6 @@ if [ "$KEEP_BUILDS" = "false" ]; then
         # Remove git source directory binary
         if [ -d "$PACKAGE_DIR/dms-git-repo" ]; then
             rm -rf "$PACKAGE_DIR/dms-git-repo"
-            REMOVED=$((REMOVED + 1))
-        fi
-        ;;
-    dms-greeter)
-        # Remove downloaded source
-        if [ -f "$PACKAGE_DIR/dms-greeter-source.tar.gz" ]; then
-            rm -f "$PACKAGE_DIR/dms-greeter-source.tar.gz"
             REMOVED=$((REMOVED + 1))
         fi
         ;;

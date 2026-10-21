@@ -25,13 +25,13 @@ in
   ];
 
   options.programs.dank-material-shell = {
-    enable = lib.mkEnableOption "DankMaterialShell";
+    enable = lib.mkEnableOption "Dux Shell";
     package = lib.mkPackageOption dmsPkgs "dms-shell" {
-      extraDescription = "The DankMaterialShell package to use (defaults to be built from source)";
+      extraDescription = "The Dux Shell package to use (defaults to be built from source)";
     };
 
     systemd = {
-      enable = lib.mkEnableOption "DankMaterialShell systemd startup";
+      enable = lib.mkEnableOption "Dux Shell systemd startup";
       restartIfChanged = lib.mkOption {
         type = types.bool;
         default = true;
@@ -39,14 +39,10 @@ in
       };
     };
 
-    dgop = {
-      package = lib.mkPackageOption pkgs "dgop" { };
-    };
-
     enableSystemMonitoring = lib.mkOption {
       type = types.bool;
       default = true;
-      description = "Add needed dependencies to use system monitoring widgets";
+      description = "Enable system monitoring widgets and keybinds";
     };
 
     enableVPN = lib.mkOption {
@@ -76,12 +72,12 @@ in
     enableClipboardPaste = lib.mkOption {
       type = types.bool;
       default = true;
-      description = "Adds needed dependencies for directly pasting items from the clipboard history.";
+      description = "Deprecated: paste is built into dms; no extra dependencies needed. Kept as a no-op for compatibility.";
     };
 
     quickshell = {
-      package = lib.mkPackageOption dmsPkgs "quickshell" {
-        extraDescription = "The quickshell package to use (defaults to be built from source, due to unreleased features used by DMS).";
+      package = lib.mkPackageOption pkgs "quickshell" {
+        extraDescription = "(we recommend at least 0.3.0, currently available in nixos-unstable)";
       };
     };
 

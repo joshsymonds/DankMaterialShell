@@ -6,9 +6,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/plugins"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/server"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/plugins"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server"
+	"github.com/duxlabs-dev/dux-shell/core/internal/server/sysupdate"
+	"github.com/duxlabs-dev/dux-shell/core/internal/shellembed"
+	"github.com/duxlabs-dev/dux-shell/core/internal/site"
 	"github.com/spf13/cobra"
 )
 
@@ -18,67 +21,16 @@ var versionCmd = &cobra.Command{
 	Run:   runVersion,
 }
 
-var runCmd = &cobra.Command{
-	Use:     "run",
-	Short:   "Launch quickshell with DMS configuration",
-	Long:    "Launch quickshell with DMS configuration (qs -c dms)",
-	PreRunE: findConfig,
-	Run: func(cmd *cobra.Command, args []string) {
-		daemon, _ := cmd.Flags().GetBool("daemon")
-		session, _ := cmd.Flags().GetBool("session")
-		if v, _ := cmd.Flags().GetString("log-level"); v != "" {
-			if err := os.Setenv("DMS_LOG_LEVEL", v); err != nil {
-				log.Fatalf("Failed to set DMS_LOG_LEVEL: %v", err)
-			}
-		}
-		if v, _ := cmd.Flags().GetString("log-file"); v != "" {
-			if err := os.Setenv("DMS_LOG_FILE", v); err != nil {
-				log.Fatalf("Failed to set DMS_LOG_FILE: %v", err)
-			}
-		}
-		log.ApplyEnvOverrides()
-		if daemon {
-			runShellDaemon(session)
-		} else {
-			runShellInteractive(session)
-		}
-	},
-}
-
-var restartCmd = &cobra.Command{
-	Use:     "restart",
-	Short:   "Restart quickshell with DMS configuration",
-	Long:    "Kill existing DMS shell processes and restart quickshell with DMS configuration",
-	PreRunE: findConfig,
-	Run: func(cmd *cobra.Command, args []string) {
-		restartShell()
-	},
-}
-
-var restartDetachedCmd = &cobra.Command{
-	Use:     "restart-detached <pid>",
-	Hidden:  true,
-	Args:    cobra.ExactArgs(1),
-	PreRunE: findConfig,
-	Run: func(cmd *cobra.Command, args []string) {
-		runDetachedRestart(args[0])
-	},
-}
-
-var killCmd = &cobra.Command{
-	Use:   "kill",
-	Short: "Kill running DMS shell processes",
-	Long:  "Kill all running quickshell processes with DMS configuration",
-	Run: func(cmd *cobra.Command, args []string) {
-		killShell()
-	},
-}
-
 var ipcCmd = &cobra.Command{
-	Use:   "ipc [target] [function] [args...]",
+	Use:   "ipc",
 	Short: "Send IPC commands to running DMS shell",
+	Long: `Send IPC commands to the running DMS shell.
+
+  dms ipc call <target> <function> [args...]   invoke a command
+  dms ipc list                                 list all targets and functions
+
+Full reference: ` + site.Docs + "/dms/keybinds-ipc",
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		_ = findConfig(cmd, args)
 		return getShellIPCCompletions(args, toComplete), cobra.ShellCompDirectiveNoFileComp
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -86,11 +38,23 @@ var ipcCmd = &cobra.Command{
 	},
 }
 
+var ipcListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all IPC targets and functions",
+	Run: func(cmd *cobra.Command, args []string) {
+		printIPCHelp()
+	},
+}
+
 func init() {
+	ipcCmd.AddCommand(ipcListCmd)
 	ipcCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		_ = findConfig(cmd, args)
 		printIPCHelp()
 	})
+	pluginsUpdateCmd.Flags().BoolP("all", "a", false, "Update all installed plugins")
+	pluginsUpdateCmd.Flags().Bool("check", false, "Check for available updates without applying them")
+	pluginsLockCmd.Flags().StringP("output", "o", "", "Also write the lockfile to this path")
+	pluginsRestoreCmd.Flags().Bool("prune", false, "Remove managed plugins that are not in the lockfile")
 }
 
 var debugSrvCmd = &cobra.Command{
@@ -169,10 +133,22 @@ var pluginsUninstallCmd = &cobra.Command{
 }
 
 var pluginsUpdateCmd = &cobra.Command{
-	Use:   "update <plugin-id>",
-	Short: "Update a plugin by ID",
-	Long:  "Update an installed DMS plugin using its ID (e.g., 'myPlugin'). Plugin names are also supported.",
-	Args:  cobra.ExactArgs(1),
+	Use:   "update [plugin-id]",
+	Short: "Update a plugin by ID, or all plugins",
+	Long:  "Update an installed DMS plugin using its ID (e.g., 'myPlugin'). If --all or -a is specified, all installed plugins will be updated.",
+	Args: func(cmd *cobra.Command, args []string) error {
+		updateAll, _ := cmd.Flags().GetBool("all")
+		if updateAll {
+			if len(args) > 0 {
+				return fmt.Errorf("cannot specify plugin ID when using --all/-a")
+			}
+			return nil
+		}
+		if len(args) != 1 {
+			return fmt.Errorf("requires exactly 1 arg (plugin ID) or use --all/-a")
+		}
+		return nil
+	},
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) != 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp
@@ -180,8 +156,58 @@ var pluginsUpdateCmd = &cobra.Command{
 		return getInstalledPluginIDs(), cobra.ShellCompDirectiveNoFileComp
 	},
 	Run: func(cmd *cobra.Command, args []string) {
+		checkOnly, _ := cmd.Flags().GetBool("check")
+		updateAll, _ := cmd.Flags().GetBool("all")
+		if checkOnly {
+			if updateAll {
+				if err := checkAllPluginsCLI(); err != nil {
+					log.Fatalf("Error checking updates: %v", err)
+				}
+				return
+			}
+			if err := checkPluginCLI(args[0]); err != nil {
+				log.Fatalf("Error checking update: %v", err)
+			}
+			return
+		}
+		if updateAll {
+			if err := updateAllPluginsCLI(); err != nil {
+				log.Fatalf("Error updating plugins: %v", err)
+			}
+			return
+		}
 		if err := updatePluginCLI(args[0]); err != nil {
 			log.Fatalf("Error updating plugin: %v", err)
+		}
+	},
+}
+
+var pluginsLockCmd = &cobra.Command{
+	Use:   "lock",
+	Short: "Record installed plugins and their exact revisions",
+	Long:  "Write a portable plugins.lock.json containing every managed user plugin and its current Git commit.",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		output, _ := cmd.Flags().GetString("output")
+		if err := lockPluginsCLI(output); err != nil {
+			log.Fatalf("Error writing plugin lockfile: %v", err)
+		}
+	},
+}
+
+var pluginsRestoreCmd = &cobra.Command{
+	Use:   "restore [lockfile]",
+	Short: "Restore plugins from exact revisions in a lockfile",
+	Long:  "Install or reset all plugins in a portable plugins.lock.json. Existing managed plugins are retained unless --prune is specified.",
+	Args:  cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		path := ""
+		if len(args) == 1 {
+			path = args[0]
+		}
+		prune, _ := cmd.Flags().GetBool("prune")
+		if err := restorePluginsCLI(path, prune); err != nil {
+			log.Fatalf("Error restoring plugins: %v", err)
 		}
 	},
 }
@@ -193,21 +219,17 @@ func runVersion(cmd *cobra.Command, args []string) {
 // Git builds: dms (git) v0.6.2-XXXX
 // Stable releases: dms v0.6.2
 func formatVersion(version string) string {
-	// Arch/Debian/Ubuntu/OpenSUSE git format: 0.6.2+git2264.c5c5ce84
-	re := regexp.MustCompile(`^([\d.]+)\+git(\d+)\.`)
-	if matches := re.FindStringSubmatch(version); matches != nil {
-		return fmt.Sprintf("dms (git) v%s-%s", matches[1], matches[2])
-	}
-
-	// Fedora COPR git format: 0.0.git.2267.d430cae9
-	re = regexp.MustCompile(`^[\d.]+\.git\.(\d+)\.`)
-	if matches := re.FindStringSubmatch(version); matches != nil {
-		baseVersion := getBaseVersion()
-		return fmt.Sprintf("dms (git) v%s-%s", baseVersion, matches[1])
+	if n := sysupdate.GitBuildCount(version); n > 0 {
+		// Fedora COPR (0.0.git.2267.d430cae9) carries no real base version.
+		base, _, ok := strings.Cut(version, "+git")
+		if !ok {
+			base = getBaseVersion()
+		}
+		return fmt.Sprintf("dms (git) v%s-%d", strings.TrimPrefix(base, "v"), n)
 	}
 
 	// Stable release format: 0.6.2
-	re = regexp.MustCompile(`^([\d.]+)$`)
+	re := regexp.MustCompile(`^([\d.]+)$`)
 	if matches := re.FindStringSubmatch(version); matches != nil {
 		return fmt.Sprintf("dms v%s", matches[1])
 	}
@@ -215,27 +237,39 @@ func formatVersion(version string) string {
 	return fmt.Sprintf("dms %s", version)
 }
 
+var baseVersionRe = regexp.MustCompile(`^([\d.]+)`)
+
+// Installed UI trees, for builds without an embedded UI.
+var shellVersionPaths = []string{
+	"/usr/share/quickshell/dms/VERSION",
+	"/usr/local/share/quickshell/dms/VERSION",
+	"/etc/xdg/quickshell/dms/VERSION",
+}
+
 func getBaseVersion() string {
-	paths := []string{
-		"/usr/share/quickshell/dms/VERSION",
-		"/usr/local/share/quickshell/dms/VERSION",
-		"/etc/xdg/quickshell/dms/VERSION",
+	if ver := parseBaseVersion(shellembed.Version()); ver != "" {
+		return ver
 	}
 
-	for _, path := range paths {
-		if content, err := os.ReadFile(path); err == nil {
-			ver := strings.TrimSpace(string(content))
-			ver = strings.TrimPrefix(ver, "v")
-			if re := regexp.MustCompile(`^([\d.]+)`); re.MatchString(ver) {
-				if matches := re.FindStringSubmatch(ver); matches != nil {
-					return matches[1]
-				}
-			}
+	for _, path := range shellVersionPaths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if ver := parseBaseVersion(string(content)); ver != "" {
+			return ver
 		}
 	}
 
-	// Fallback
 	return "1.0.2"
+}
+
+func parseBaseVersion(raw string) string {
+	matches := baseVersionRe.FindStringSubmatch(strings.TrimPrefix(strings.TrimSpace(raw), "v"))
+	if matches == nil {
+		return ""
+	}
+	return matches[1]
 }
 
 func startDebugServer() error {
@@ -265,6 +299,13 @@ func browsePlugins() error {
 		return nil
 	}
 
+	feedback := plugins.FetchFeedback()
+
+	nameByID := make(map[string]string, len(pluginList))
+	for _, plugin := range pluginList {
+		nameByID[plugin.ID] = plugin.Name
+	}
+
 	fmt.Printf("\nAvailable Plugins (%d):\n\n", len(pluginList))
 	for _, plugin := range pluginList {
 		installed, _ := manager.IsInstalled(plugin)
@@ -287,6 +328,26 @@ func browsePlugins() error {
 		}
 		if len(plugin.Dependencies) > 0 {
 			fmt.Printf("    Dependencies: %s\n", strings.Join(plugin.Dependencies, ", "))
+		}
+		if fb, ok := feedback[plugin.ID]; ok {
+			fmt.Printf("    Upvotes: %d\n", fb.Upvotes)
+			if len(fb.Status) > 0 {
+				fmt.Printf("    Status: %s\n", strings.Join(fb.Status, ", "))
+			}
+			if fb.IssueURL != "" {
+				fmt.Printf("    Discuss: %s\n", fb.IssueURL)
+			}
+			if len(fb.Similar) > 0 {
+				names := make([]string, len(fb.Similar))
+				for i, id := range fb.Similar {
+					if name, ok := nameByID[id]; ok {
+						names[i] = name
+					} else {
+						names[i] = id
+					}
+				}
+				fmt.Printf("    Related: %s\n", strings.Join(names, ", "))
+			}
 		}
 		fmt.Println()
 	}
@@ -328,7 +389,11 @@ func listInstalledPlugins() error {
 	fmt.Printf("\nInstalled Plugins (%d):\n\n", len(installedNames))
 	for _, id := range installedNames {
 		if plugin, ok := pluginMap[id]; ok {
-			fmt.Printf("  %s\n", plugin.Name)
+			hasUpdateStr := ""
+			if hasUpdates, _, err := manager.HasUpdates(id, plugin); err == nil && hasUpdates {
+				hasUpdateStr = " (update available)"
+			}
+			fmt.Printf("  %s%s\n", plugin.Name, hasUpdateStr)
 			fmt.Printf("    ID: %s\n", plugin.ID)
 			fmt.Printf("    Category: %s\n", plugin.Category)
 			fmt.Printf("    Author: %s\n", plugin.Author)
@@ -395,6 +460,40 @@ func installPluginCLI(idOrName string) error {
 	}
 
 	fmt.Printf("Plugin installed successfully: %s\n", plugin.Name)
+	return nil
+}
+
+func lockPluginsCLI(outputPath string) error {
+	manager, err := plugins.NewManager()
+	if err != nil {
+		return fmt.Errorf("failed to create manager: %w", err)
+	}
+	warnings, err := manager.WriteCurrentLockfile(outputPath)
+	if err != nil {
+		return err
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	}
+	fmt.Printf("Plugin lockfile written: %s\n", manager.GetLockfilePath())
+	if outputPath != "" && outputPath != manager.GetLockfilePath() {
+		fmt.Printf("Plugin lockfile exported: %s\n", outputPath)
+	}
+	return nil
+}
+
+func restorePluginsCLI(path string, prune bool) error {
+	manager, err := plugins.NewManager()
+	if err != nil {
+		return fmt.Errorf("failed to create manager: %w", err)
+	}
+	if err := manager.RestoreFromLockfile(path, prune); err != nil {
+		return err
+	}
+	if path == "" {
+		path = manager.GetLockfilePath()
+	}
+	fmt.Printf("Plugins restored from lockfile: %s\n", path)
 	return nil
 }
 
@@ -508,23 +607,177 @@ func updatePluginCLI(idOrName string) error {
 	return nil
 }
 
+func updateAllPluginsCLI() error {
+	manager, err := plugins.NewManager()
+	if err != nil {
+		return fmt.Errorf("failed to create manager: %w", err)
+	}
+
+	registry, err := plugins.NewRegistry()
+	if err != nil {
+		return fmt.Errorf("failed to create registry: %w", err)
+	}
+
+	installed, err := manager.ListInstalled()
+	if err != nil {
+		return fmt.Errorf("failed to list installed plugins: %w", err)
+	}
+
+	pluginList, _ := registry.List()
+
+	var errs []error
+	for _, pluginID := range installed {
+		plugin := plugins.FindByIDOrName(pluginID, pluginList)
+		if plugin != nil {
+			fmt.Printf("Updating plugin: %s (ID: %s)\n", plugin.Name, plugin.ID)
+			if err := manager.Update(*plugin); err != nil {
+				if strings.Contains(err.Error(), "cannot update system plugin") {
+					fmt.Printf("Skipping system plugin: %s\n", plugin.Name)
+				} else {
+					errs = append(errs, fmt.Errorf("failed to update %s: %w", plugin.Name, err))
+				}
+			} else {
+				fmt.Printf("Plugin updated successfully: %s\n", plugin.Name)
+			}
+		} else {
+			fmt.Printf("Updating plugin: %s\n", pluginID)
+			if err := manager.UpdateByIDOrName(pluginID); err != nil {
+				if strings.Contains(err.Error(), "cannot update system plugin") {
+					fmt.Printf("Skipping system plugin: %s\n", pluginID)
+				} else {
+					errs = append(errs, fmt.Errorf("failed to update %s: %w", pluginID, err))
+				}
+			} else {
+				fmt.Printf("Plugin updated successfully: %s\n", pluginID)
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		for _, err := range errs {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+		}
+		return fmt.Errorf("failed to update some plugins")
+	}
+
+	return nil
+}
+
+func checkPluginCLI(idOrName string) error {
+	manager, err := plugins.NewManager()
+	if err != nil {
+		return fmt.Errorf("failed to create manager: %w", err)
+	}
+
+	registry, err := plugins.NewRegistry()
+	if err != nil {
+		return fmt.Errorf("failed to create registry: %w", err)
+	}
+
+	pluginList, _ := registry.List()
+	plugin := plugins.FindByIDOrName(idOrName, pluginList)
+
+	if plugin != nil {
+		installed, err := manager.IsInstalled(*plugin)
+		if err != nil {
+			return fmt.Errorf("failed to check install status: %w", err)
+		}
+		if !installed {
+			return fmt.Errorf("plugin not installed: %s", plugin.Name)
+		}
+
+		hasUpdates, _, err := manager.HasUpdates(plugin.ID, *plugin)
+		if err != nil {
+			return fmt.Errorf("failed to check updates: %w", err)
+		}
+
+		if hasUpdates {
+			fmt.Printf("Update available for plugin: %s (ID: %s)\n", plugin.Name, plugin.ID)
+		} else {
+			fmt.Printf("Plugin is up to date: %s\n", plugin.Name)
+		}
+		return nil
+	}
+
+	dummyPlugin := plugins.Plugin{ID: idOrName}
+	hasUpdates, _, err := manager.HasUpdates(idOrName, dummyPlugin)
+	if err != nil {
+		return fmt.Errorf("failed to check updates: %w", err)
+	}
+
+	if hasUpdates {
+		fmt.Printf("Update available for plugin: %s\n", idOrName)
+	} else {
+		fmt.Printf("Plugin is up to date: %s\n", idOrName)
+	}
+	return nil
+}
+
+func checkAllPluginsCLI() error {
+	manager, err := plugins.NewManager()
+	if err != nil {
+		return fmt.Errorf("failed to create manager: %w", err)
+	}
+
+	registry, err := plugins.NewRegistry()
+	if err != nil {
+		return fmt.Errorf("failed to create registry: %w", err)
+	}
+
+	installed, err := manager.ListInstalled()
+	if err != nil {
+		return fmt.Errorf("failed to list installed plugins: %w", err)
+	}
+
+	pluginList, _ := registry.List()
+
+	var count int
+	for _, pluginID := range installed {
+		plugin := plugins.FindByIDOrName(pluginID, pluginList)
+		var hasUpdates bool
+		var name string
+
+		if plugin != nil {
+			name = plugin.Name
+			hasUpdates, _, _ = manager.HasUpdates(pluginID, *plugin)
+		} else {
+			name = pluginID
+			dummyPlugin := plugins.Plugin{ID: pluginID}
+			hasUpdates, _, _ = manager.HasUpdates(pluginID, dummyPlugin)
+		}
+
+		if hasUpdates {
+			fmt.Printf("Update available for plugin: %s (ID: %s)\n", name, pluginID)
+			count++
+		}
+	}
+
+	if count > 0 {
+		fmt.Printf("\nFound %d plugin(s) with available updates.\n", count)
+	} else {
+		fmt.Println("All plugins are up to date.")
+	}
+
+	return nil
+}
+
 func getCommonCommands() []*cobra.Command {
-	return []*cobra.Command{
+	commands := shellApp.Commands()
+	return append(commands, []*cobra.Command{
 		versionCmd,
-		runCmd,
-		restartCmd,
-		restartDetachedCmd,
-		killCmd,
 		ipcCmd,
 		debugSrvCmd,
 		pluginsCmd,
+		registryCmd,
 		dank16Cmd,
 		brightnessCmd,
+		iccCmd,
 		dpmsCmd,
 		keybindsCmd,
 		greeterCmd,
 		setupCmd,
 		colorCmd,
+		qrCmd,
 		screenshotCmd,
 		notifyActionCmd,
 		notifyCmd,
@@ -539,5 +792,9 @@ func getCommonCommands() []*cobra.Command {
 		blurCmd,
 		trashCmd,
 		systemCmd,
-	}
+		systemdCmd,
+		switchUserCmd,
+		switchCmd,
+		dmenuCmd,
+	}...)
 }

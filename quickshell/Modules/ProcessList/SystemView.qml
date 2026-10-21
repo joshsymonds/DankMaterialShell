@@ -2,17 +2,15 @@ import QtQuick
 import QtQuick.Layouts
 import qs.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
 Item {
     id: root
 
-    Component.onCompleted: {
-        DgopService.addRef(["system", "cpu"]);
-    }
-
-    Component.onDestruction: {
-        DgopService.removeRef(["system", "cpu"]);
+    Ref {
+        service: DgopService
+        modules: ["system", "cpu"]
+        active: root.visible
     }
 
     ColumnLayout {
@@ -24,6 +22,8 @@ Item {
             Layout.preferredHeight: systemInfoColumn.implicitHeight + Theme.spacingM * 2
             radius: Theme.cornerRadius
             color: Theme.nestedSurface
+            border.width: Theme.layerOutlineWidth
+            border.color: Theme.outlineMedium
 
             ColumnLayout {
                 id: systemInfoColumn
@@ -34,7 +34,7 @@ Item {
                 Row {
                     spacing: Theme.spacingS
 
-                    DankIcon {
+                    DIcon {
                         name: "computer"
                         size: Theme.iconSize
                         color: Theme.primary
@@ -44,7 +44,7 @@ Item {
                     StyledText {
                         text: I18n.tr("System Information", "system info header in system monitor")
                         font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Bold
+                        font.weight: Theme.fontWeightMedium
                         color: Theme.surfaceText
                         anchors.verticalCenter: parent.verticalCenter
                     }
@@ -78,7 +78,7 @@ Item {
                     }
                     InfoRow {
                         label: I18n.tr("Uptime")
-                        value: DgopService.uptime || "--"
+                        value: DgopService.uptime ? DgopService.uptime.slice(3) : "--"
                     }
                     InfoRow {
                         label: I18n.tr("Load Average", "system info label")
@@ -97,6 +97,8 @@ Item {
             Layout.fillHeight: true
             radius: Theme.cornerRadius
             color: Theme.nestedSurface
+            border.width: Theme.layerOutlineWidth
+            border.color: Theme.outlineMedium
 
             ColumnLayout {
                 anchors.fill: parent
@@ -106,7 +108,7 @@ Item {
                 Row {
                     spacing: Theme.spacingS
 
-                    DankIcon {
+                    DIcon {
                         name: "developer_board"
                         size: Theme.iconSize
                         color: Theme.secondary
@@ -116,7 +118,7 @@ Item {
                     StyledText {
                         text: I18n.tr("GPU Monitoring", "gpu section header in system monitor")
                         font.pixelSize: Theme.fontSizeLarge
-                        font.weight: Font.Bold
+                        font.weight: Theme.fontWeightMedium
                         color: Theme.surfaceText
                         anchors.verticalCenter: parent.verticalCenter
                     }
@@ -128,13 +130,13 @@ Item {
                     color: Theme.outlineLight
                 }
 
-                DankListView {
+                DListView {
                     id: gpuListView
 
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
-                    spacing: 8
+                    spacing: Theme.spacingS
 
                     model: DgopService.availableGpus
 
@@ -148,22 +150,22 @@ Item {
                         color: {
                             const vendor = (modelData?.vendor ?? "").toLowerCase();
                             if (vendor.includes("nvidia"))
-                                return Qt.rgba(Theme.success.r, Theme.success.g, Theme.success.b, 0.08);
+                                return Theme.withAlpha(Theme.success, 0.08);
                             if (vendor.includes("amd"))
-                                return Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.08);
+                                return Theme.errorHover;
                             if (vendor.includes("intel"))
-                                return Qt.rgba(Theme.info.r, Theme.info.g, Theme.info.b, 0.08);
-                            return Qt.rgba(Theme.surfaceVariant.r, Theme.surfaceVariant.g, Theme.surfaceVariant.b, 0.08);
+                                return Theme.withAlpha(Theme.info, 0.08);
+                            return Theme.cardSurface;
                         }
                         border.color: {
                             const vendor = (modelData?.vendor ?? "").toLowerCase();
                             if (vendor.includes("nvidia"))
-                                return Qt.rgba(Theme.success.r, Theme.success.g, Theme.success.b, 0.2);
+                                return Theme.withAlpha(Theme.success, 0.2);
                             if (vendor.includes("amd"))
-                                return Qt.rgba(Theme.error.r, Theme.error.g, Theme.error.b, 0.2);
+                                return Theme.errorPressed;
                             if (vendor.includes("intel"))
-                                return Qt.rgba(Theme.info.r, Theme.info.g, Theme.info.b, 0.2);
-                            return Qt.rgba(Theme.surfaceVariant.r, Theme.surfaceVariant.g, Theme.surfaceVariant.b, 0.2);
+                                return Theme.withAlpha(Theme.info, 0.2);
+                            return Theme.surfaceVariantAlpha;
                         }
                         border.width: 1
 
@@ -179,7 +181,7 @@ Item {
                             anchors.margins: Theme.spacingM
                             spacing: Theme.spacingM
 
-                            DankIcon {
+                            DIcon {
                                 name: "developer_board"
                                 size: Theme.iconSize + 4
                                 color: {
@@ -201,7 +203,7 @@ Item {
                                 StyledText {
                                     text: modelData?.displayName ?? I18n.tr("Unknown GPU", "fallback gpu name")
                                     font.pixelSize: Theme.fontSizeMedium
-                                    font.weight: Font.Bold
+                                    font.weight: Theme.fontWeightMedium
                                     color: Theme.surfaceText
                                 }
 
@@ -242,8 +244,8 @@ Item {
                                 width: 70
                                 height: 32
                                 radius: Theme.cornerRadius
-                                color: parent.parent.tempEnabled ? Qt.rgba(Theme.surfaceVariant.r, Theme.surfaceVariant.g, Theme.surfaceVariant.b, 0.3) : Qt.rgba(Theme.surfaceVariant.r, Theme.surfaceVariant.g, Theme.surfaceVariant.b, 0.15)
-                                border.color: tempMouseArea.containsMouse ? Theme.outline : "transparent"
+                                color: parent.parent.tempEnabled ? Theme.withAlpha(Theme.surfaceVariant, 0.3) : Theme.surfaceSelected
+                                border.color: tempMouseArea.containsMouse ? Theme.outline : Theme.withAlpha(Theme.outline, 0)
                                 border.width: 1
 
                                 Row {
@@ -251,7 +253,7 @@ Item {
                                     anchors.centerIn: parent
                                     spacing: Theme.spacingXS
 
-                                    DankIcon {
+                                    DIcon {
                                         name: "thermostat"
                                         size: 16
                                         color: {
@@ -277,7 +279,7 @@ Item {
                                         }
                                         font.pixelSize: Theme.fontSizeSmall
                                         font.family: parent.parent.parent.parent.tempEnabled ? SettingsData.monoFontFamily : ""
-                                        font.weight: parent.parent.parent.parent.tempEnabled ? Font.Bold : Font.Normal
+                                        font.weight: parent.parent.parent.parent.tempEnabled ? Theme.fontWeightMedium : Theme.fontWeight
                                         color: {
                                             if (!parent.parent.parent.parent.tempEnabled)
                                                 return Theme.surfaceVariantText;
@@ -339,7 +341,7 @@ Item {
                             anchors.centerIn: parent
                             spacing: Theme.spacingM
 
-                            DankIcon {
+                            DIcon {
                                 name: "developer_board_off"
                                 size: 32
                                 color: Theme.surfaceVariantText
@@ -347,7 +349,7 @@ Item {
                             }
 
                             StyledText {
-                                text: I18n.tr("No GPUs detected", "empty state in gpu list")
+                                text: I18n.tr("No GPU detected", "empty state in gpu list")
                                 font.pixelSize: Theme.fontSizeMedium
                                 color: Theme.surfaceVariantText
                                 anchors.horizontalCenter: parent.horizontalCenter
@@ -369,7 +371,7 @@ Item {
         StyledText {
             text: label + ":"
             font.pixelSize: Theme.fontSizeSmall
-            font.weight: Font.Medium
+            font.weight: Theme.fontWeightMedium
             color: Theme.surfaceVariantText
             Layout.preferredWidth: 100
         }

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/ipp"
+	"github.com/duxlabs-dev/dux-shell/core/pkg/ipp"
 )
 
 var validProtocols = map[string]bool{
@@ -151,7 +151,11 @@ func (m *Manager) TestRemotePrinter(host string, port int, protocol string) (*Re
 	// For non-IPP protocols, only check TCP reachability
 	if protocol == "lpd" || protocol == "socket" {
 		addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-		conn, err := net.DialTimeout("tcp", addr, probeTimeout)
+		dial := m.dialFn
+		if dial == nil {
+			dial = net.DialTimeout
+		}
+		conn, err := dial("tcp", addr, probeTimeout)
 		if err != nil {
 			return &RemotePrinterInfo{
 				Reachable: false,

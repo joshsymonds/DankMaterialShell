@@ -1,9 +1,9 @@
 import QtQuick
 import qs.Common
 import qs.Modals.Common
-import qs.Widgets
+import qs.DCommon.Widgets
 
-DankModal {
+DModal {
     id: root
 
     property string outputName: ""
@@ -15,6 +15,7 @@ DankModal {
 
     shouldBeVisible: false
     allowStacking: true
+    useOverlayLayer: true
     modalWidth: 420
     modalHeight: contentLoader.item ? contentLoader.item.implicitHeight + Theme.spacingM * 2 : 200
 
@@ -80,21 +81,23 @@ DankModal {
                     text: I18n.tr("Confirm Display Changes")
                     font.pixelSize: Theme.fontSizeLarge
                     color: Theme.surfaceText
-                    font.weight: Font.Medium
+                    font.weight: Theme.fontWeightMedium
                 }
 
                 Rectangle {
                     width: parent.width
                     height: 70
                     radius: Theme.cornerRadius
-                    color: Theme.surfaceContainerHighest
+                    color: Theme.foregroundColor(Theme.cardSurface, Theme.isFloatingWindow(root))
+                    border.width: Theme.layerOutlineWidth
+                    border.color: Theme.outlineMedium
 
                     StyledText {
                         anchors.centerIn: parent
                         text: root.countdown + "s"
                         font.pixelSize: Theme.fontSizeXLarge * 1.5
                         color: Theme.primary
-                        font.weight: Font.Bold
+                        font.weight: Theme.fontWeightMedium
                     }
                 }
 
@@ -128,7 +131,7 @@ DankModal {
                             width: Math.max(70, revertText.contentWidth + Theme.spacingM * 2)
                             height: 36
                             radius: Theme.cornerRadius
-                            color: revertArea.containsMouse ? Theme.surfaceTextHover : "transparent"
+                            color: revertArea.containsMouse ? Theme.surfaceTextHover : Theme.withAlpha(Theme.surfaceTextHover, 0)
                             border.color: Theme.surfaceVariantAlpha
                             border.width: 1
 
@@ -136,10 +139,10 @@ DankModal {
                                 id: revertText
 
                                 anchors.centerIn: parent
-                                text: I18n.tr("Revert")
+                                text: I18n.tr("Revert", "verb, undo display changes in confirmation dialog")
                                 font.pixelSize: Theme.fontSizeMedium
                                 color: Theme.surfaceText
-                                font.weight: Font.Medium
+                                font.weight: Theme.fontWeightMedium
                             }
 
                             MouseArea {
@@ -168,7 +171,7 @@ DankModal {
                                 text: I18n.tr("Keep Changes")
                                 font.pixelSize: Theme.fontSizeMedium
                                 color: Theme.background
-                                font.weight: Font.Medium
+                                font.weight: Theme.fontWeightMedium
                             }
 
                             MouseArea {
@@ -194,12 +197,13 @@ DankModal {
                 }
             }
 
-            DankActionButton {
+            DActionButton {
                 anchors.top: parent.top
                 anchors.right: parent.right
                 anchors.topMargin: Theme.spacingM
                 anchors.rightMargin: Theme.spacingM
                 iconName: "close"
+                Accessible.name: I18n.tr("Close")
                 iconSize: Theme.iconSize - 4
                 iconColor: Theme.surfaceText
                 onClicked: {

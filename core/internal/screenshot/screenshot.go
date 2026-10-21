@@ -5,10 +5,12 @@ import (
 	"math"
 	"sync"
 
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/log"
-	"github.com/AvengeMedia/DankMaterialShell/core/internal/proto/wlr_screencopy"
-	wlhelpers "github.com/AvengeMedia/DankMaterialShell/core/internal/wayland/client"
-	"github.com/AvengeMedia/DankMaterialShell/core/pkg/go-wayland/wayland/client"
+	"github.com/duxlabs-dev/dux-go/wayland/client"
+	"github.com/duxlabs-dev/dux-shell/core/internal/log"
+	"github.com/duxlabs-dev/dux-shell/core/internal/proto/wlr_screencopy"
+	"github.com/duxlabs-dev/dux-shell/core/internal/proto/wp_color_management"
+	"github.com/duxlabs-dev/dux-shell/core/internal/utils"
+	wlhelpers "github.com/duxlabs-dev/dux-shell/core/internal/wayland/client"
 )
 
 type WaylandOutput struct {
@@ -28,6 +30,50 @@ type CaptureResult struct {
 	Region    Region
 	YInverted bool
 	Format    uint32
+	Scale     float64
+	CICP      *CICP
+	CopyOnly  bool
+}
+
+func (o *WaylandOutput) effectiveScale() float64 {
+	scale := o.fractionalScale
+	if scale <= 0 && DetectCompositor() == CompositorHyprland {
+		scale = GetHyprlandMonitorScale(o.name)
+	}
+	if scale <= 0 {
+		scale = float64(o.scale)
+	}
+	if scale <= 0 {
+		return 1.0
+	}
+	return scale
+}
+
+func (o *WaylandOutput) bounds() Region {
+	x, y, w, h := o.x, o.y, o.width, o.height
+	if DetectCompositor() == CompositorHyprland {
+		if hx, hy, hw, hh, ok := GetHyprlandMonitorGeometry(o.name); ok {
+			return Region{X: hx, Y: hy, Width: hw, Height: hh, Output: o.name}
+		}
+	}
+	if o.transform == 1 || o.transform == 3 || o.transform == 5 || o.transform == 7 {
+		w, h = h, w
+	}
+	if scale := o.effectiveScale(); scale > 0 {
+		w = int32(math.Round(float64(w) / scale))
+		h = int32(math.Round(float64(h) / scale))
+	}
+	return Region{
+		X:      x,
+		Y:      y,
+		Width:  w,
+		Height: h,
+		Output: o.name,
+	}
+}
+
+func geometryResult(region Region) *CaptureResult {
+	return &CaptureResult{Region: region}
 }
 
 type Screenshoter struct {
@@ -40,6 +86,7 @@ type Screenshoter struct {
 	compositor *client.Compositor
 	shm        *client.Shm
 	screencopy *wlr_screencopy.ZwlrScreencopyManagerV1
+	colorMgr   *wp_color_management.WpColorManagerV1
 
 	outputs   map[uint32]*WaylandOutput
 	outputsMu sync.Mutex
@@ -77,7 +124,7 @@ func (s *Screenshoter) Run() (*CaptureResult, error) {
 	switch s.config.Mode {
 	case ModeLastRegion:
 		return s.captureLastRegion()
-	case ModeRegion:
+	case ModeRegion, ModeScroll:
 		return s.captureRegion()
 	case ModeWindow:
 		return s.captureWindow()
@@ -98,21 +145,66 @@ func (s *Screenshoter) captureLastRegion() (*CaptureResult, error) {
 		return s.captureRegion()
 	}
 
-	output := s.findOutputForRegion(lastRegion)
+	var output *WaylandOutput
+	if lastRegion.Output != "" {
+		output = s.findOutputByName(lastRegion.Output)
+	}
+	if output == nil {
+		output = s.findOutputForRegion(lastRegion)
+	}
 	if output == nil {
 		return s.captureRegion()
+	}
+
+	if s.config.Geometry {
+		scale := output.effectiveScale()
+		if scale <= 0 {
+			scale = 1.0
+		}
+		localX := float64(lastRegion.X-output.x) / scale
+		localY := float64(lastRegion.Y-output.y) / scale
+		logicalW := float64(lastRegion.Width) / scale
+		logicalH := float64(lastRegion.Height) / scale
+		return geometryResult(Region{
+			X:      int32(math.Round(float64(output.x) + localX)),
+			Y:      int32(math.Round(float64(output.y) + localY)),
+			Width:  int32(math.Round(logicalW)),
+			Height: int32(math.Round(logicalH)),
+			Output: output.name,
+		}), nil
 	}
 
 	return s.captureRegionOnOutput(output, lastRegion)
 }
 
 func (s *Screenshoter) captureRegion() (*CaptureResult, error) {
+	if !s.config.AllowMultiple {
+		lock, err := utils.LockSelectionOverlay()
+		if err != nil {
+			return nil, err
+		}
+		defer lock.Release()
+	}
+
 	if s.config.Reset {
 		if err := SaveLastRegion(Region{}); err != nil {
 			log.Debug("failed to reset last region", "err", err)
 		}
 	}
 
+	if hook := s.config.SelectorHook; hook != nil {
+		started := make(chan struct{})
+		go func() {
+			hook(true)
+			close(started)
+		}()
+		defer func() {
+			<-started
+			hook(false)
+		}()
+	}
+
+	PrefetchOverlayStyle()
 	selector := NewRegionSelector(s)
 	result, cancelled, err := selector.Run()
 	if err != nil {
@@ -122,14 +214,30 @@ func (s *Screenshoter) captureRegion() (*CaptureResult, error) {
 		return nil, nil
 	}
 
-	if err := SaveLastRegion(result.Region); err != nil {
-		log.Debug("failed to save last region", "err", err)
+	if !s.config.Geometry && result.Region.Output != "" {
+		if err := SaveLastRegion(result.Region); err != nil {
+			log.Debug("failed to save last region", "err", err)
+		}
+	}
+
+	if out := s.findOutputByName(result.Region.Output); out != nil {
+		result.CICP = s.outputCICP(out)
 	}
 
 	return result, nil
 }
 
 func (s *Screenshoter) captureWindow() (*CaptureResult, error) {
+	if DetectCompositor() == CompositorAqueous {
+		return s.captureAqueousWindow()
+	}
+	if DetectCompositor() == CompositorNiri {
+		if s.config.Geometry {
+			return nil, fmt.Errorf("window geometry mode is not supported on niri")
+		}
+		return s.captureNiriWindow()
+	}
+
 	geom, err := GetActiveWindow()
 	if err != nil {
 		return nil, err
@@ -140,6 +248,10 @@ func (s *Screenshoter) captureWindow() (*CaptureResult, error) {
 		Y:      geom.Y,
 		Width:  geom.Width,
 		Height: geom.Height,
+	}
+
+	if s.config.Geometry {
+		return geometryResult(region), nil
 	}
 
 	var output *WaylandOutput
@@ -156,14 +268,14 @@ func (s *Screenshoter) captureWindow() (*CaptureResult, error) {
 	switch DetectCompositor() {
 	case CompositorHyprland:
 		return s.captureAndCrop(output, region)
-	case CompositorDWL:
-		return s.captureDWLWindow(output, region, geom)
+	case CompositorMango:
+		return s.captureMangoWindow(output, region, geom)
 	default:
 		return s.captureRegionOnOutput(output, region)
 	}
 }
 
-func (s *Screenshoter) captureDWLWindow(output *WaylandOutput, region Region, geom *WindowGeometry) (*CaptureResult, error) {
+func (s *Screenshoter) captureMangoWindow(output *WaylandOutput, region Region, geom *WindowGeometry) (*CaptureResult, error) {
 	result, err := s.captureWholeOutput(output)
 	if err != nil {
 		return nil, err
@@ -255,10 +367,19 @@ func (s *Screenshoter) captureDWLWindow(output *WaylandOutput, region Region, ge
 		Region:    region,
 		YInverted: false,
 		Format:    result.Format,
+		Scale:     scale,
+		CICP:      result.CICP,
 	}, nil
 }
 
 func (s *Screenshoter) captureFullScreen() (*CaptureResult, error) {
+	if DetectCompositor() == CompositorAqueous {
+		name, err := aqueousFocusedOutput(s.config.Seat)
+		if err != nil {
+			return nil, err
+		}
+		return s.captureOutput(name)
+	}
 	output := s.findFocusedOutput()
 	if output == nil {
 		s.outputsMu.Lock()
@@ -271,6 +392,10 @@ func (s *Screenshoter) captureFullScreen() (*CaptureResult, error) {
 
 	if output == nil {
 		return nil, fmt.Errorf("no output available")
+	}
+
+	if s.config.Geometry {
+		return geometryResult(output.bounds()), nil
 	}
 
 	return s.captureWholeOutput(output)
@@ -291,6 +416,10 @@ func (s *Screenshoter) captureOutput(name string) (*CaptureResult, error) {
 		return nil, fmt.Errorf("output %q not found", name)
 	}
 
+	if s.config.Geometry {
+		return geometryResult(output.bounds()), nil
+	}
+
 	return s.captureWholeOutput(output)
 }
 
@@ -305,6 +434,33 @@ func (s *Screenshoter) captureAllScreens() (*CaptureResult, error) {
 	if len(outputs) == 0 {
 		return nil, fmt.Errorf("no outputs available")
 	}
+
+	if s.config.Geometry {
+		minX, minY := math.MaxInt32, math.MaxInt32
+		maxX, maxY := math.MinInt32, math.MinInt32
+		for _, o := range outputs {
+			b := o.bounds()
+			if int(b.X) < minX {
+				minX = int(b.X)
+			}
+			if int(b.Y) < minY {
+				minY = int(b.Y)
+			}
+			if int(b.X+b.Width) > maxX {
+				maxX = int(b.X + b.Width)
+			}
+			if int(b.Y+b.Height) > maxY {
+				maxY = int(b.Y + b.Height)
+			}
+		}
+		return geometryResult(Region{
+			X:      int32(minX),
+			Y:      int32(minY),
+			Width:  int32(maxX - minX),
+			Height: int32(maxY - minY),
+		}), nil
+	}
+
 	if len(outputs) == 1 {
 		return s.captureWholeOutput(outputs[0])
 	}
@@ -416,9 +572,18 @@ func (s *Screenshoter) captureAllScreens() (*CaptureResult, error) {
 	composite.Clear()
 
 	var format uint32
+	cicp := entries[0].result.CICP
 	for _, e := range entries {
+		// Outputs may mix 8-bit and 10-bit; composite in 8-bit
+		if PixelFormat(e.result.Format).Is10Bit() {
+			e.result.Buffer.Convert10To8()
+			e.result.Format = uint32(e.result.Buffer.Format)
+		}
 		if format == 0 {
 			format = e.result.Format
+		}
+		if cicp != nil && (e.result.CICP == nil || *e.result.CICP != *cicp) {
+			cicp = nil
 		}
 		s.blitBufferScaled(composite, e.result.Buffer,
 			e.canvasX-minX, e.canvasY-minY, e.canvasW, e.canvasH,
@@ -430,6 +595,8 @@ func (s *Screenshoter) captureAllScreens() (*CaptureResult, error) {
 		Buffer: composite,
 		Region: Region{X: int32(minX), Y: int32(minY), Width: int32(totalW), Height: int32(totalH)},
 		Format: format,
+		Scale:  maxScale,
+		CICP:   cicp,
 	}, nil
 }
 
@@ -441,7 +608,7 @@ func (s *Screenshoter) blitBufferScaled(dst, src *ShmBuffer, dstX, dstY, dstW, d
 	srcData := src.Data()
 	dstData := dst.Data()
 
-	for dy := 0; dy < dstH; dy++ {
+	for dy := range dstH {
 		canvasY := dstY + dy
 		if canvasY < 0 || canvasY >= dst.Height {
 			continue
@@ -458,7 +625,7 @@ func (s *Screenshoter) blitBufferScaled(dst, src *ShmBuffer, dstX, dstY, dstW, d
 		srcRowOff := srcY * src.Stride
 		dstRowOff := canvasY * dst.Stride
 
-		for dx := 0; dx < dstW; dx++ {
+		for dx := range dstW {
 			canvasX := dstX + dx
 			if canvasX < 0 || canvasX >= dst.Width {
 				continue
@@ -502,6 +669,8 @@ func (s *Screenshoter) captureWholeOutput(output *WaylandOutput) (*CaptureResult
 	if err != nil {
 		return nil, err
 	}
+	result.Scale = output.effectiveScale()
+	result.CICP = s.outputCICP(output)
 
 	if result.YInverted {
 		result.Buffer.FlipVertical()
@@ -538,11 +707,13 @@ func (s *Screenshoter) captureAndCrop(output *WaylandOutput, region Region) (*Ca
 
 	outX, outY := output.x, output.y
 	scale := float64(output.scale)
-	if hx, hy, _, _, ok := GetHyprlandMonitorGeometry(output.name); ok {
-		outX, outY = hx, hy
-	}
-	if s := GetHyprlandMonitorScale(output.name); s > 0 {
-		scale = s
+	if DetectCompositor() == CompositorHyprland {
+		if hx, hy, _, _, ok := GetHyprlandMonitorGeometry(output.name); ok {
+			outX, outY = hx, hy
+		}
+		if s := GetHyprlandMonitorScale(output.name); s > 0 {
+			scale = s
+		}
 	}
 	if scale <= 0 {
 		scale = 1.0
@@ -562,7 +733,7 @@ func (s *Screenshoter) captureAndCrop(output *WaylandOutput, region Region) (*Ca
 	srcData := result.Buffer.Data()
 	dstData := cropped.Data()
 
-	for y := 0; y < h; y++ {
+	for y := range h {
 		srcY := localY + y
 		if result.YInverted {
 			srcY = result.Buffer.Height - 1 - (localY + y)
@@ -576,7 +747,7 @@ func (s *Screenshoter) captureAndCrop(output *WaylandOutput, region Region) (*Ca
 			dstY = h - 1 - y
 		}
 
-		for x := 0; x < w; x++ {
+		for x := range w {
 			srcX := localX + x
 			if srcX < 0 || srcX >= result.Buffer.Width {
 				continue
@@ -604,6 +775,8 @@ func (s *Screenshoter) captureAndCrop(output *WaylandOutput, region Region) (*Ca
 		Region:    region,
 		YInverted: false,
 		Format:    result.Format,
+		Scale:     scale,
+		CICP:      result.CICP,
 	}, nil
 }
 
@@ -612,23 +785,14 @@ func (s *Screenshoter) captureRegionOnOutput(output *WaylandOutput, region Regio
 		return s.captureRegionOnTransformedOutput(output, region)
 	}
 
-	scale := output.fractionalScale
-	if scale <= 0 && DetectCompositor() == CompositorHyprland {
-		scale = GetHyprlandMonitorScale(output.name)
-	}
-	if scale <= 0 {
-		scale = float64(output.scale)
-	}
-	if scale <= 0 {
-		scale = 1.0
-	}
+	scale := output.effectiveScale()
 
 	localX := int32(float64(region.X-output.x) * scale)
 	localY := int32(float64(region.Y-output.y) * scale)
 	w := int32(float64(region.Width) * scale)
 	h := int32(float64(region.Height) * scale)
 
-	if DetectCompositor() == CompositorDWL {
+	if DetectCompositor() == CompositorMango {
 		scaledOutW := int32(float64(output.width) * scale)
 		scaledOutH := int32(float64(output.height) * scale)
 		if localX >= scaledOutW {
@@ -660,7 +824,13 @@ func (s *Screenshoter) captureRegionOnOutput(output *WaylandOutput, region Regio
 		return nil, fmt.Errorf("capture region: %w", err)
 	}
 
-	return s.processFrame(frame, region)
+	result, err := s.processFrame(frame, region)
+	if err != nil {
+		return nil, err
+	}
+	result.Scale = scale
+	result.CICP = s.outputCICP(output)
+	return result, nil
 }
 
 func (s *Screenshoter) captureRegionOnTransformedOutput(output *WaylandOutput, region Region) (*CaptureResult, error) {
@@ -669,16 +839,7 @@ func (s *Screenshoter) captureRegionOnTransformedOutput(output *WaylandOutput, r
 		return nil, err
 	}
 
-	scale := output.fractionalScale
-	if scale <= 0 && DetectCompositor() == CompositorHyprland {
-		scale = GetHyprlandMonitorScale(output.name)
-	}
-	if scale <= 0 {
-		scale = float64(output.scale)
-	}
-	if scale <= 0 {
-		scale = 1.0
-	}
+	scale := output.effectiveScale()
 
 	localX := int(float64(region.X-output.x) * scale)
 	localY := int(float64(region.Y-output.y) * scale)
@@ -730,6 +891,8 @@ func (s *Screenshoter) captureRegionOnTransformedOutput(output *WaylandOutput, r
 		Region:    region,
 		YInverted: false,
 		Format:    result.Format,
+		Scale:     scale,
+		CICP:      result.CICP,
 	}, nil
 }
 
@@ -747,12 +910,16 @@ func (s *Screenshoter) processFrame(frame *wlr_screencopy.ZwlrScreencopyFrameV1,
 		bpp := format.BytesPerPixel()
 		if int(e.Stride) < int(e.Width)*bpp {
 			log.Error("invalid stride from compositor", "stride", e.Stride, "width", e.Width, "bpp", bpp)
+			// bail out here or the dispatch loop waits forever on a ready/failed
+			// event that never comes (frame.Copy is never called)
+			failed = true
 			return
 		}
 		var err error
 		buf, err = CreateShmBuffer(int(e.Width), int(e.Height), int(e.Stride))
 		if err != nil {
 			log.Error("failed to create buffer", "err", err)
+			failed = true
 			return
 		}
 		buf.Format = format
@@ -771,6 +938,7 @@ func (s *Screenshoter) processFrame(frame *wlr_screencopy.ZwlrScreencopyFrameV1,
 		pool, err = s.shm.CreatePool(buf.Fd(), int32(buf.Size()))
 		if err != nil {
 			log.Error("failed to create pool", "err", err)
+			failed = true
 			return
 		}
 
@@ -779,6 +947,7 @@ func (s *Screenshoter) processFrame(frame *wlr_screencopy.ZwlrScreencopyFrameV1,
 			pool.Destroy()
 			pool = nil
 			log.Error("failed to create wl_buffer", "err", err)
+			failed = true
 			return
 		}
 
@@ -857,26 +1026,16 @@ func (s *Screenshoter) findOutputForRegion(region Region) *WaylandOutput {
 	cy := region.Y + region.Height/2
 
 	for _, o := range s.outputs {
-		x, y, w, h := o.x, o.y, o.width, o.height
-		if DetectCompositor() == CompositorHyprland {
-			if hx, hy, hw, hh, ok := GetHyprlandMonitorGeometry(o.name); ok {
-				x, y, w, h = hx, hy, hw, hh
-			}
-		}
-		if cx >= x && cx < x+w && cy >= y && cy < y+h {
+		b := o.bounds()
+		if cx >= b.X && cx < b.X+b.Width && cy >= b.Y && cy < b.Y+b.Height {
 			return o
 		}
 	}
 
 	for _, o := range s.outputs {
-		x, y, w, h := o.x, o.y, o.width, o.height
-		if DetectCompositor() == CompositorHyprland {
-			if hx, hy, hw, hh, ok := GetHyprlandMonitorGeometry(o.name); ok {
-				x, y, w, h = hx, hy, hw, hh
-			}
-		}
-		if region.X >= x && region.X < x+w &&
-			region.Y >= y && region.Y < y+h {
+		b := o.bounds()
+		if region.X >= b.X && region.X < b.X+b.Width &&
+			region.Y >= b.Y && region.Y < b.Y+b.Height {
 			return o
 		}
 	}
@@ -952,10 +1111,7 @@ func (s *Screenshoter) handleGlobal(e client.RegistryGlobalEvent) {
 
 	case client.OutputInterfaceName:
 		output := client.NewOutput(s.ctx)
-		version := e.Version
-		if version > 4 {
-			version = 4
-		}
+		version := min(e.Version, 4)
 		if err := s.registry.Bind(e.Name, e.Interface, version, output); err == nil {
 			s.outputsMu.Lock()
 			s.outputs[e.Name] = &WaylandOutput{
@@ -970,12 +1126,15 @@ func (s *Screenshoter) handleGlobal(e client.RegistryGlobalEvent) {
 
 	case wlr_screencopy.ZwlrScreencopyManagerV1InterfaceName:
 		sc := wlr_screencopy.NewZwlrScreencopyManagerV1(s.ctx)
-		version := e.Version
-		if version > 3 {
-			version = 3
-		}
+		version := min(e.Version, 3)
 		if err := s.registry.Bind(e.Name, e.Interface, version, sc); err == nil {
 			s.screencopy = sc
+		}
+
+	case wp_color_management.WpColorManagerV1InterfaceName:
+		mgr := wp_color_management.NewWpColorManagerV1(s.ctx)
+		if err := s.registry.Bind(e.Name, e.Interface, 1, mgr); err == nil {
+			s.colorMgr = mgr
 		}
 	}
 }
@@ -1020,6 +1179,9 @@ func (s *Screenshoter) setupOutputHandlers(name uint32, output *client.Output) {
 }
 
 func (s *Screenshoter) cleanup() {
+	if s.colorMgr != nil {
+		s.colorMgr.Destroy()
+	}
 	if s.screencopy != nil {
 		s.screencopy.Destroy()
 	}

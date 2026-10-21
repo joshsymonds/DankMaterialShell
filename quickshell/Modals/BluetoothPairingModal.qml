@@ -1,20 +1,14 @@
 import QtQuick
-import Quickshell.Hyprland
 import qs.Common
 import qs.Modals.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 
-DankModal {
+DModal {
     id: root
     readonly property var log: Log.scoped("BluetoothPairingModal")
 
     layerNamespace: "dms:bluetooth-pairing"
-
-    HyprlandFocusGrab {
-        windows: [root.contentWindow]
-        active: root.useHyprlandFocusGrab && root.shouldHaveFocus
-    }
 
     property string deviceName: ""
     property string deviceAddress: ""
@@ -122,7 +116,7 @@ DankModal {
                         text: I18n.tr("Pair Bluetooth Device")
                         font.pixelSize: Theme.fontSizeLarge
                         color: Theme.surfaceText
-                        font.weight: Font.Medium
+                        font.weight: Theme.fontWeightMedium
                     }
 
                     StyledText {
@@ -155,7 +149,7 @@ DankModal {
                     width: parent.width
                     height: 50
                     radius: Theme.cornerRadius
-                    color: Theme.surfaceHover
+                    color: Theme.floatingWindowFieldColor
                     border.color: pinInputField.activeFocus ? Theme.primary : Theme.outlineStrong
                     border.width: pinInputField.activeFocus ? 2 : 1
                     visible: requestType === "pin"
@@ -167,7 +161,7 @@ DankModal {
                         }
                     }
 
-                    DankTextField {
+                    DTextField {
                         id: pinInputField
 
                         anchors.fill: parent
@@ -190,7 +184,7 @@ DankModal {
                     width: parent.width
                     height: 50
                     radius: Theme.cornerRadius
-                    color: Theme.surfaceHover
+                    color: Theme.floatingWindowFieldColor
                     border.color: passkeyInputField.activeFocus ? Theme.primary : Theme.outlineStrong
                     border.width: passkeyInputField.activeFocus ? 2 : 1
                     visible: requestType === "passkey"
@@ -202,7 +196,7 @@ DankModal {
                         }
                     }
 
-                    DankTextField {
+                    DTextField {
                         id: passkeyInputField
 
                         anchors.fill: parent
@@ -225,15 +219,17 @@ DankModal {
                     width: parent.width
                     height: 56
                     radius: Theme.cornerRadius
-                    color: Theme.withAlpha(Theme.surfaceContainerHighest, Theme.popupTransparency)
+                    color: Theme.foregroundColor(Theme.cardSurface, Theme.isFloatingWindow(root))
+                    border.width: Theme.layerOutlineWidth
+                    border.color: Theme.outlineMedium
                     visible: requestType === "confirm" || requestType === "display-passkey"
 
                     Column {
                         anchors.centerIn: parent
-                        spacing: 2
+                        spacing: Theme.spacingXXS
 
                         StyledText {
-                            text: I18n.tr("Passkey:")
+                            text: I18n.tr("Passkey:", "bluetooth pairing dialog label before the passkey")
                             font.pixelSize: Theme.fontSizeSmall
                             color: Theme.surfaceTextMedium
                             anchors.horizontalCenter: parent.horizontalCenter
@@ -243,7 +239,7 @@ DankModal {
                             text: String(passkey).padStart(6, "0")
                             font.pixelSize: Theme.fontSizeXLarge
                             color: Theme.surfaceText
-                            font.weight: Font.Bold
+                            font.weight: Theme.fontWeightMedium
                             anchors.horizontalCenter: parent.horizontalCenter
                         }
                     }
@@ -262,7 +258,7 @@ DankModal {
                             width: Math.max(70, cancelText.contentWidth + Theme.spacingM * 2)
                             height: 36
                             radius: Theme.cornerRadius
-                            color: cancelArea.containsMouse ? Theme.surfaceTextHover : "transparent"
+                            color: cancelArea.containsMouse ? Theme.surfaceTextHover : Theme.withAlpha(Theme.surfaceTextHover, 0)
                             border.color: Theme.surfaceVariantAlpha
                             border.width: 1
 
@@ -273,7 +269,7 @@ DankModal {
                                 text: I18n.tr("Cancel")
                                 font.pixelSize: Theme.fontSizeMedium
                                 color: Theme.surfaceText
-                                font.weight: Font.Medium
+                                font.weight: Theme.fontWeightMedium
                             }
 
                             MouseArea {
@@ -318,16 +314,16 @@ DankModal {
                                     case "display-passkey":
                                         return I18n.tr("Confirm");
                                     case "authorize":
-                                        return I18n.tr("Authorize");
+                                        return I18n.tr("Authorize", "verb, bluetooth pairing dialog confirm button");
                                     default:
                                         if (requestType.startsWith("authorize-service"))
                                             return I18n.tr("Authorize");
-                                        return I18n.tr("Pair");
+                                        return I18n.tr("Pair", "verb, bluetooth device pairing button");
                                     }
                                 }
                                 font.pixelSize: Theme.fontSizeMedium
                                 color: Theme.background
-                                font.weight: Font.Medium
+                                font.weight: Theme.fontWeightMedium
                             }
 
                             MouseArea {
@@ -353,12 +349,13 @@ DankModal {
                 }
             }
 
-            DankActionButton {
+            DActionButton {
                 anchors.top: parent.top
                 anchors.right: parent.right
                 anchors.topMargin: Theme.spacingM
                 anchors.rightMargin: Theme.spacingM
                 iconName: "close"
+                Accessible.name: I18n.tr("Cancel")
                 iconSize: Theme.iconSize - 4
                 iconColor: Theme.surfaceText
                 onClicked: () => {

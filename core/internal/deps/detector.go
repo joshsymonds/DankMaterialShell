@@ -35,6 +35,7 @@ type WindowManager int
 const (
 	WindowManagerHyprland WindowManager = iota
 	WindowManagerNiri
+	WindowManagerMango
 )
 
 type Terminal int
@@ -44,6 +45,17 @@ const (
 	TerminalKitty
 	TerminalAlacritty
 )
+
+func (t Terminal) Command() string {
+	switch t {
+	case TerminalKitty:
+		return "kitty"
+	case TerminalAlacritty:
+		return "alacritty"
+	default:
+		return "ghostty"
+	}
+}
 
 type DependencyDetector interface {
 	DetectDependencies(ctx context.Context, wm WindowManager) ([]Dependency, error)

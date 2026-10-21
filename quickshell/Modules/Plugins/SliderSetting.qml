@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Common
-import qs.Widgets
+import qs.DCommon.Widgets
+import "../../Common/QmlUtils.js" as QmlUtils
 
 Column {
     id: root
@@ -12,46 +13,38 @@ Column {
     property int value: defaultValue
     property int minimum: 0
     property int maximum: 100
-    property string leftIcon: ""
-    property string rightIcon: ""
+    property string startIcon: ""
+    property string endIcon: ""
+    property alias leftIcon: root.startIcon // ! TODO deprecate me after 1.7 release
+    property alias rightIcon: root.endIcon // ! TODO deprecate me after 1.7 release
+    property bool iconsClickable: false
     property string unit: ""
 
     width: parent.width
     spacing: Theme.spacingS
 
     function loadValue() {
-        const settings = findSettings()
+        const settings = QmlUtils.findSettings(root.parent);
         if (settings && settings.pluginService) {
-            value = settings.loadValue(settingKey, defaultValue)
+            value = settings.loadValue(settingKey, defaultValue);
         }
     }
 
     Component.onCompleted: {
-        loadValue()
+        loadValue();
     }
 
     onValueChanged: {
-        const settings = findSettings()
+        const settings = QmlUtils.findSettings(root.parent);
         if (settings) {
-            settings.saveValue(settingKey, value)
+            settings.saveValue(settingKey, value);
         }
-    }
-
-    function findSettings() {
-        let item = parent
-        while (item) {
-            if (item.saveValue !== undefined && item.loadValue !== undefined) {
-                return item
-            }
-            item = item.parent
-        }
-        return null
     }
 
     StyledText {
         text: root.label
         font.pixelSize: Theme.fontSizeMedium
-        font.weight: Font.Medium
+        font.weight: Theme.fontWeightMedium
         color: Theme.surfaceText
     }
 
@@ -64,18 +57,19 @@ Column {
         visible: root.description !== ""
     }
 
-    DankSlider {
+    DSlider {
+        upDownKeysStep: false
         width: parent.width
         value: root.value
         minimum: root.minimum
         maximum: root.maximum
-        leftIcon: root.leftIcon
-        rightIcon: root.rightIcon
+        startIcon: root.startIcon
+        endIcon: root.endIcon
+        iconsClickable: root.iconsClickable
         unit: root.unit
         wheelEnabled: false
-        thumbOutlineColor: Theme.withAlpha(Theme.surfaceContainerHighest, Theme.popupTransparency)
         onSliderValueChanged: newValue => {
-            root.value = newValue
+            root.value = newValue;
         }
     }
 }
