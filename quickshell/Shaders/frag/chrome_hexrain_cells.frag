@@ -7,7 +7,7 @@ layout(location = 0) out vec4 fragColor;
 // hex cell (and an edge), not on the pixel, so it is computed once per cell
 // per frame instead of by every fragment that needs it.
 //
-// Layout: each cell owns gridCellTexels (10) consecutive texels in its row.
+// Layout: each cell owns gridCellTexels (11) consecutive texels in its row.
 // x = (column + gridMargin) * gridCellTexels + j, y = row + gridMargin; the
 // margin keeps the neighbours of cells on the canvas edge in range. Columns
 // and rows follow the main pass's tiling of the virtual canvas (odd rows
@@ -15,13 +15,18 @@ layout(location = 0) out vec4 fragColor;
 //
 //   j 0..5    edge bucket j:  rgb = 2D-layer stream activations A/B/C on
 //                             that edge (wind-weighted), a = cell height (px)
-//   j 6, 7    height of neighbour k minus this scale's (px, signed), k = 0..3
-//             / 4..5 (zw of j 7 unused)
+//   j 6, 7    xy (and zw of j 6): height of neighbour k minus this
+//             scale's (px, signed), k = 0..3 / 4..5; zw of j 7: reach of
+//             neighbours 4, 5 (as j 10)
 //   j 8       the scale's orientation: unit quaternion (xyz, w) taking
 //             scale-local vectors to world (flip, then tilt)
 //   j 9       the scale's pose: x = height of its centre above the canvas
 //             plane (px), y = flip angle (0..π), zw = flip axis (unit, in
 //             plane)
+//   j 10      reach of neighbours 0..3: how far (px) neighbour k's scale,
+//             grown by the main pass's antialiasing margin, can cover
+//             pixels on this side of the edge they share, measured inward
+//             from that edge (≤ 0 when it stays on its own side)
 //
 // Neighbour k sits at angle k·60° (distance 2·cellSize). Heights include the
 // bar-zone elevation of the output this pass renders for.
@@ -44,6 +49,11 @@ layout(std140, binding = 0) uniform buf {
     float barZoneAnchor;
     float barZoneThickness;
     float barZoneElevation;
+    // Main-pass geometry, for the neighbour reach (j 10).
+    vec3 iResolution;
+    float hexBevel;
+    float slabThickness;
+    float cameraDistance;
     float gridCols;
     float gridRows;
     float gridMargin;
@@ -118,6 +128,10 @@ vec4 quatMul(vec4 a, vec4 b) {
                 a.w * b.w - dot(a.xyz, b.xyz));
 }
 
+vec3 rotate(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
 // Flip axis: in-plane, roughly perpendicular to the direction from the
 // wave origin so scales tip over away from it like dominoes, snapped to
 // the nearest of the hexagon's symmetry lines (every 30°). A half-turn
@@ -173,6 +187,49 @@ vec2 neighbourCenter(vec2 center, float k, float pitchX, float pitchY, float i) 
 // its height field value plus the bar-zone bump.
 float heightPx(vec2 center) {
     return (scaleHeight(center) + barElevationFor(center)) * ubuf.heightRange;
+}
+
+// Orientation of the scale centred at `center`: its flip, then its tilt.
+vec4 scaleOrientation(vec2 center, float pitchY) {
+    float flip = 3.14159265 * smoothstep(0.0, 1.0, cellFlipPhase(center, pitchY));
+    vec2 tilt = scaleTilt(center);
+    float lean = length(tilt);
+    vec4 qTilt = lean > 1e-5 ? axisAngle(vec3(-tilt.y, tilt.x, 0.0) / lean, lean)
+                             : vec4(0.0, 0.0, 0.0, 1.0);
+    return quatMul(qTilt, axisAngle(vec3(flipAxis(center), 0.0), flip));
+}
+
+// Reach of neighbour k into the cell centred at `center` (layout j 10).
+// The main pass casts its rays from the camera through each pixel's
+// point on the canvas plane, so a scale can only be hit at pixels inside
+// its silhouette projected from the camera onto that plane: the hull of
+// its twelve slab corners (inradius grown by the main pass's AA_PX, 0.75)
+// projected there. Its reach is how far that hull extends past the
+// shared edge, plus half a px for rounding.
+float neighbourReach(vec2 center, float k, float pitchX, float pitchY, float i) {
+    vec2 c = neighbourCenter(center, k, pitchX, pitchY, i);
+    vec4 q = scaleOrientation(c, pitchY);
+    vec3 lift = vec3(c, heightPx(c));
+    float seamWidth = max(0.1, ubuf.hexBevel * i * 0.04);
+    float corner = (i - seamWidth + 0.75) * 1.1547005;   // inradius / cos 30°
+    float halfT = max(ubuf.slabThickness, 0.1) * 0.5;
+    float camDist = max(ubuf.cameraDistance, 100.0);
+    vec2 eye = ubuf.iResolution.xy * 0.5;
+    vec2 n = vec2(cos(k * PI3), sin(k * PI3));
+    vec3 ex = rotate(q, vec3(1.0, 0.0, 0.0));
+    vec3 ey = rotate(q, vec3(0.0, 1.0, 0.0));
+    vec3 ez = rotate(q, vec3(0.0, 0.0, 1.0)) * halfT;
+    float nearest = 1e9;
+    for (int v = 0; v < 6; v++) {
+        float ang = (float(v) + 0.5) * PI3;
+        vec3 rim = lift + (ex * cos(ang) + ey * sin(ang)) * corner;
+        for (int f = -1; f <= 1; f += 2) {
+            vec3 w = rim + ez * float(f);
+            vec2 onPlane = eye + (w.xy - eye) * camDist / max(camDist - w.z, 1.0);
+            nearest = min(nearest, dot(onPlane - center, n));
+        }
+    }
+    return i - nearest + 0.5;
 }
 
 vec4 edgeStreams(vec2 cellCenter, float bucket, float i) {
@@ -238,26 +295,36 @@ void main() {
         fragColor = edgeStreams(cellCenter, j, i);
         return;
     }
-    if (j > 7.5) {
-        float flip = 3.14159265 * smoothstep(0.0, 1.0, cellFlipPhase(cellCenter, pitchY));
-        vec2 axis = flipAxis(cellCenter);
-        if (j < 8.5) {
-            vec2 tilt = scaleTilt(cellCenter);
-            float lean = length(tilt);
-            vec4 qTilt = lean > 1e-5 ? axisAngle(vec3(-tilt.y, tilt.x, 0.0) / lean, lean)
-                                     : vec4(0.0, 0.0, 0.0, 1.0);
-            fragColor = quatMul(qTilt, axisAngle(vec3(axis, 0.0), flip));
-        } else {
-            fragColor = vec4(heightPx(cellCenter), flip, axis);
-        }
+    if (j > 9.5) {
+        fragColor = vec4(neighbourReach(cellCenter, 0.0, pitchX, pitchY, i),
+                         neighbourReach(cellCenter, 1.0, pitchX, pitchY, i),
+                         neighbourReach(cellCenter, 2.0, pitchX, pitchY, i),
+                         neighbourReach(cellCenter, 3.0, pitchX, pitchY, i));
         return;
     }
-    // j 6, 7: signed height differences to the neighbours.
+    if (j > 8.5) {
+        float flip = 3.14159265 * smoothstep(0.0, 1.0, cellFlipPhase(cellCenter, pitchY));
+        fragColor = vec4(heightPx(cellCenter), flip, flipAxis(cellCenter));
+        return;
+    }
+    if (j > 7.5) {
+        fragColor = scaleOrientation(cellCenter, pitchY);
+        return;
+    }
+    // j 6, 7: signed height differences to the neighbours (and j 7 the
+    // reach of neighbours 4, 5).
     float own = heightPx(cellCenter);
-    float k0 = j < 6.5 ? 0.0 : 4.0;
-    fragColor = vec4(
-        heightPx(neighbourCenter(cellCenter, k0, pitchX, pitchY, i)) - own,
-        heightPx(neighbourCenter(cellCenter, k0 + 1.0, pitchX, pitchY, i)) - own,
-        k0 < 0.5 ? heightPx(neighbourCenter(cellCenter, 2.0, pitchX, pitchY, i)) - own : 0.0,
-        k0 < 0.5 ? heightPx(neighbourCenter(cellCenter, 3.0, pitchX, pitchY, i)) - own : 0.0);
+    if (j < 6.5) {
+        fragColor = vec4(
+            heightPx(neighbourCenter(cellCenter, 0.0, pitchX, pitchY, i)) - own,
+            heightPx(neighbourCenter(cellCenter, 1.0, pitchX, pitchY, i)) - own,
+            heightPx(neighbourCenter(cellCenter, 2.0, pitchX, pitchY, i)) - own,
+            heightPx(neighbourCenter(cellCenter, 3.0, pitchX, pitchY, i)) - own);
+    } else {
+        fragColor = vec4(
+            heightPx(neighbourCenter(cellCenter, 4.0, pitchX, pitchY, i)) - own,
+            heightPx(neighbourCenter(cellCenter, 5.0, pitchX, pitchY, i)) - own,
+            neighbourReach(cellCenter, 4.0, pitchX, pitchY, i),
+            neighbourReach(cellCenter, 5.0, pitchX, pitchY, i));
+    }
 }

@@ -7,8 +7,8 @@
 var GRID_MARGIN = 2;
 
 // Cell-pass texels per cell: 6 edge buckets, 2 of neighbour height
-// differences, the scale's orientation and its pose.
-var CELL_TEXELS = 10;
+// differences, the scale's orientation, its pose, and its neighbours' reach.
+var CELL_TEXELS = 11;
 
 // Light-pass blocks, each covering the whole canvas: underglow + front reach,
 // front colour + darkness, dominant front-light direction.

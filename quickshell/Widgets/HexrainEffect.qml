@@ -160,6 +160,10 @@ ShaderEffect {
         property real barZoneAnchor: root.barZoneAnchor
         property real barZoneThickness: root.barZoneThickness
         property real barZoneElevation: root.barZoneElevation
+        property vector3d iResolution: root.iResolution
+        property real hexBevel: root.hexBevel
+        property real slabThickness: root.slabThickness
+        property real cameraDistance: root.cameraDistance
         property real gridCols: root.gridCols
         property real gridRows: root.gridRows
         property real gridMargin: root.gridMargin
