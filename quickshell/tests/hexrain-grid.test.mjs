@@ -45,5 +45,6 @@ test("the light grid's texel centres span the canvas", () => {
 test("degenerate sizes still produce a usable grid", () => {
     const g = hexrainGrid.grid(0, 0, 0);
     assert.ok(g.cols >= 1 && g.rows >= 1 && g.lightCols >= 1 && g.lightRows >= 1);
-    assert.equal(g.cellTexels, 20);
+    assert.equal(g.cellTexels, 10);
+    assert.equal(g.lightBlocks, 3);
 });

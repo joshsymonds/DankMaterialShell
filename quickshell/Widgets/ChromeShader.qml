@@ -70,7 +70,6 @@ Item {
     property real sunDriftSpeed: 1.0
     property real heightAmount: 0.0
     property real matteness: 0.70
-    property real bleedBack: 0.03
     property real hexBevel: 0.6
     property real heightDriftSpeed: 0.0
     // Sun motion: each slot fades in, wanders along a Perlin-noise
@@ -84,8 +83,6 @@ Item {
     property real frontSunLifetime: 40.0
     property real frontSunGap: 10.0
     property real frontSunSpeed: 0.02
-    property real frontSunShadowLength: 1.0
-    property real frontSunShadowDarkness: 0.85
     property real backSunSize: 0.4
     property real backSunStrength: 1.0
     property real backSunLifetime: 45.0
@@ -145,9 +142,22 @@ Item {
     property real flipStartTime: 1.0e9
     property real flipPropDelay: 0.05
     property real flipDuration: 0.5
-    property real depthShading: 0.35
-    property real flipSpecular: 0.8
-    property real hexDepth: 0.7
+
+    // 3D scale field (hexrain).
+    property real heightRange: 7.0
+    property real tiltMax: 0.12
+    property real tiltDriftSpeed: 0.5
+    property real slabThickness: 4.0
+    property real domeHeight: 8.0
+    property real cameraDistance: 5000.0
+    property real frontSunHeight: 500.0
+    property real grainScale: 0.3
+    property real grainStrength: 0.4
+    property real rimGlow: 0.8
+    property real keyLight: 0.6
+    property real scaleShadow: 0.7
+    property real seamBase: 0.3
+    property real occlusion: 0.6
 
     property color primaryColor: Theme.primary
     property color secondaryColor: Theme.secondary
@@ -185,7 +195,6 @@ Item {
             sunDriftSpeed: root.sunDriftSpeed
             heightAmount: root.heightAmount
             matteness: root.matteness
-            bleedBack: root.bleedBack
             hexBevel: root.hexBevel
             heightDriftSpeed: root.heightDriftSpeed
             frontSunStrength: root.frontSunStrength
@@ -193,8 +202,6 @@ Item {
             frontSunLifetime: root.frontSunLifetime
             frontSunGap: root.frontSunGap
             frontSunSpeed: root.frontSunSpeed
-            frontSunShadowLength: root.frontSunShadowLength
-            frontSunShadowDarkness: root.frontSunShadowDarkness
             backSunSize: root.backSunSize
             backSunStrength: root.backSunStrength
             backSunLifetime: root.backSunLifetime
@@ -230,9 +237,20 @@ Item {
             flipStartTime: root.flipStartTime
             flipPropDelay: root.flipPropDelay
             flipDuration: root.flipDuration
-            property real depthShading: root.depthShading
-            property real flipSpecular: root.flipSpecular
-            property real hexDepth: root.hexDepth
+            heightRange: root.heightRange
+            tiltMax: root.tiltMax
+            tiltDriftSpeed: root.tiltDriftSpeed
+            slabThickness: root.slabThickness
+            domeHeight: root.domeHeight
+            cameraDistance: root.cameraDistance
+            frontSunHeight: root.frontSunHeight
+            grainScale: root.grainScale
+            grainStrength: root.grainStrength
+            rimGlow: root.rimGlow
+            keyLight: root.keyLight
+            scaleShadow: root.scaleShadow
+            seamBase: root.seamBase
+            occlusion: root.occlusion
             // iResolution = the canvas the shader thinks it's painting on.
             // For single-monitor surfaces this is just the local size; for
             // the multi-monitor wallpaper it's the combined bounding box of

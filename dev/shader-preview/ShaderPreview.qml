@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import Qt.labs.folderlistmodel
 import Quickshell
 import Quickshell.Io
-import "../../quickshell/Widgets"
+import "hexrain/Widgets"
 
 // Standalone Quickshell scene for iterating on a chrome-family shader (currently
 // chrome_hexrain — chrome_aurora shares the same uniforms and would slot in by
@@ -92,7 +92,6 @@ FloatingWindow {
         "sunDriftSpeed":  { min: 0.0, max: 3.0, step: 0.05 },
         "heightAmount":   { min: 0.0, max: 1.0, step: 0.01 },
         "matteness":      { min: 0.0, max: 1.0, step: 0.01 },
-        "bleedBack":      { min: 0.0, max: 0.3, step: 0.005 },
         "hexBevel":       { min: 0.0, max: 1.0, step: 0.01 },
         "heightDriftSpeed": { min: 0.0, max: 3.0, step: 0.05 },
         "frontSunStrength": { min: 0.0, max: 5.0, step: 0.02 },
@@ -100,8 +99,6 @@ FloatingWindow {
         "frontSunLifetime": { min: 5.0, max: 180.0, step: 1.0 },
         "frontSunGap":      { min: 0.0, max: 120.0, step: 0.5 },
         "frontSunSpeed":    { min: 0.0, max: 0.5, step: 0.002 },
-        "frontSunShadowLength":   { min: 0.0, max: 4.0, step: 0.05 },
-        "frontSunShadowDarkness": { min: 0.0, max: 3.0, step: 0.02 },
         "backSunSize":     { min: 0.05, max: 1.0, step: 0.01 },
         "backSunStrength": { min: 0.0, max: 3.0, step: 0.02 },
         "backSunLifetime": { min: 5.0, max: 180.0, step: 1.0 },
@@ -134,9 +131,20 @@ FloatingWindow {
         "barZoneElevation": { min: 0.0, max: 2.0, step: 0.02 },
         "flipPropDelay":  { min: 0.0, max: 0.5, step: 0.005 },
         "flipDuration":   { min: 0.05, max: 3.0, step: 0.05 },
-        "depthShading":   { min: 0.0, max: 1.0, step: 0.01 },
-        "flipSpecular":   { min: 0.0, max: 3.0, step: 0.02 },
-        "hexDepth":       { min: 0.0, max: 1.5, step: 0.02 }
+        "heightRange": { min: 0.0, max: 30.0, step: 0.25 },
+        "tiltMax": { min: 0.0, max: 0.4, step: 0.005 },
+        "tiltDriftSpeed": { min: 0.0, max: 3.0, step: 0.05 },
+        "slabThickness": { min: 0.5, max: 20.0, step: 0.25 },
+        "domeHeight": { min: 0.0, max: 12.0, step: 0.1 },
+        "cameraDistance": { min: 800.0, max: 20000.0, step: 50.0 },
+        "frontSunHeight": { min: 50.0, max: 3000.0, step: 10.0 },
+        "grainScale": { min: 0.02, max: 0.4, step: 0.01 },
+        "grainStrength": { min: 0.0, max: 2.0, step: 0.02 },
+        "rimGlow": { min: 0.0, max: 3.0, step: 0.02 },
+        "keyLight": { min: 0.0, max: 2.0, step: 0.02 },
+        "scaleShadow": { min: 0.0, max: 1.0, step: 0.01 },
+        "seamBase": { min: 0.0, max: 1.0, step: 0.01 },
+        "occlusion": { min: 0.0, max: 1.0, step: 0.01 }
     })
 
     // Section grouping: a fixed-order list of named sections, each with the
@@ -145,13 +153,21 @@ FloatingWindow {
     readonly property var sectionMap: ([
         { name: "field", keys: [
             "intensity", "cellSize", "modeAmount", "domeStrength", "seamGlow",
-            "sunDriftSpeed", "heightAmount", "matteness", "bleedBack",
-            "hexBevel", "heightDriftSpeed", "depthShading", "hexDepth"
+            "sunDriftSpeed", "heightAmount", "matteness",
+            "hexBevel"
+        ] },
+        { name: "scales", keys: [
+            "heightRange", "heightDriftSpeed", "tiltMax", "tiltDriftSpeed",
+            "slabThickness", "domeHeight", "cameraDistance"
+        ] },
+        { name: "material", keys: [
+            "grainScale", "grainStrength", "rimGlow", "keyLight", "scaleShadow", "seamBase", "occlusion"
         ] },
         { name: "front sun", keys: [
             "frontSunCount", "frontSunStrength", "frontSunSize",
             "frontSunLifetime", "frontSunGap", "frontSunSpeed",
-            "frontSunShadowLength", "frontSunShadowDarkness", "frontSunPaletteSpeed"
+            "frontSunPaletteSpeed",
+            "frontSunHeight"
         ] },
         { name: "negative front sun", keys: [
             "frontNegSunCount", "frontNegSunStrength", "frontNegSunSize",
@@ -177,7 +193,7 @@ FloatingWindow {
             "colorPrimary", "colorSecondary", "colorPrimaryContainer", "colorTertiary"
         ] },
         { name: "flip", keys: [
-            "flipPropDelay", "flipDuration", "flipSpecular"
+            "flipPropDelay", "flipDuration"
         ] },
         { name: "harness", keys: ["speed"] }
     ])
@@ -302,7 +318,10 @@ FloatingWindow {
     property bool flipActive: false
     // Keys NOT tweened: the wave's own controls, flip state, and the
     // colour pairs (which the shader handles via per-cell flip phase).
+    // cellSize is the grid itself: tweening it mid-flip slides every scale
+    // under the turning ones, so it stays at the active scene's value.
     readonly property var noTweenKeys: ({
+        "cellSize":       true,
         "flipStartTime":  true,
         "flipOriginX":    true,
         "flipOriginY":    true,
@@ -401,19 +420,14 @@ FloatingWindow {
             // Smoothstep for a gentler ease at both ends.
             const tt = t * t * (3.0 - 2.0 * t);
 
-            const integerKeys = {
-                "backSunCount": true, "backNegSunCount": true,
-                "frontSunCount": true, "frontNegSunCount": true
-            };
             for (const k in root.flipFromSnapshot) {
                 if (root.noTweenKeys[k]) continue;
                 if (!(k in root.flipTargetPreset)) continue;
                 const from = root.flipFromSnapshot[k];
                 const to   = root.flipTargetPreset[k];
                 if (typeof from !== "number" || typeof to !== "number") continue;
-                let v = from + (to - from) * tt;
-                if (integerKeys[k]) v = Math.round(v);
-                root.shaderState[k] = v;
+                // Sun counts tween fractionally too: the partial sun fades.
+                root.shaderState[k] = from + (to - from) * tt;
             }
             root.shaderState = root.shaderState;
             root.applyState();
@@ -1103,7 +1117,6 @@ FloatingWindow {
         sunDriftSpeed: 1.0
         heightAmount: 1.0
         matteness: 0.70
-        bleedBack: 0.03
         hexBevel: 0.6
         heightDriftSpeed: 0.6
         frontSunStrength: 1.5
@@ -1111,8 +1124,6 @@ FloatingWindow {
         frontSunLifetime: 40.0
         frontSunGap: 10.0
         frontSunSpeed: 0.02
-        frontSunShadowLength: 1.8
-        frontSunShadowDarkness: 0.95
         backSunSize: 0.4
         backSunStrength: 1.0
         backSunLifetime: 45.0
@@ -1153,9 +1164,6 @@ FloatingWindow {
         flipStartTime: 1.0e9
         flipPropDelay: 0.05
         flipDuration: 0.5
-        property real depthShading: 0.35
-        property real flipSpecular: 0.8
-        property real hexDepth: 0.7
         iResolution: Qt.vector3d(width, height, 1)
         // Single-window preview: xy offset = 0, zw = full window size,
         // so the new frag formula reduces to qt_TexCoord0 * iResolution.
