@@ -30,20 +30,27 @@ Singleton {
     // drift — running it at the monitor's full vsync (144Hz+) is wasted
     // GPU. At 30Hz the motion is visually indistinguishable but the
     // fragment shader runs ~5x less often on a high-refresh panel.
-    // The accumulator below batches frameTime so iTime advances in
-    // ~targetInterval chunks, which is what triggers the QSG redraw.
+    //
+    // Driven by a Timer, not a FrameAnimation: while any FrameAnimation
+    // runs, Qt's threaded render loop repaints every window on every
+    // vsync whether or not anything changed, which would render every
+    // DMS surface at the panel's full rate regardless of targetFps.
+    // Each tick advances iTime by measured wall time, so motion speed
+    // doesn't depend on timer jitter.
     property real targetFps: 30.0
     readonly property real targetInterval: 1.0 / targetFps
-    property real _accum: 0
+    property real _lastTickMs: Date.now()
 
-    FrameAnimation {
+    Timer {
+        interval: Math.round(root.targetInterval * 1000)
+        repeat: true
         running: true
         onTriggered: {
-            root._accum += frameTime;
-            if (root._accum >= root.targetInterval) {
-                root.iTime += root._accum * root.speed;
-                root._accum = 0;
-            }
+            const now = Date.now();
+            // Clamp so a wall-clock step (resume, NTP) can't jump the field.
+            const dt = Math.min(Math.max(now - root._lastTickMs, 0), 250) / 1000;
+            root._lastTickMs = now;
+            root.iTime += dt * root.speed;
         }
     }
 }
